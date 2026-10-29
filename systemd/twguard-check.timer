@@ -1,0 +1,10 @@
+[Unit]
+Description=tumbleweed-update-guard: tägliche Prüfung
+
+[Timer]
+OnCalendar=*-*-* 03:30
+RandomizedDelaySec=30min
+Persistent=true
+
+[Install]
+WantedBy=timers.target

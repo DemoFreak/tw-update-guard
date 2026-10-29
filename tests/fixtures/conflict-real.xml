@@ -1,0 +1,21 @@
+<?xml version='1.0'?>
+<stream>
+<message type="info">Loading repository data...</message>
+<message type="info">Reading installed packages...</message>
+<message type="info">&apos;postfix&apos; is already installed.</message>
+<message type="info">No update candidate for &apos;postfix-3.11.7-3.1.x86_64&apos;. The highest available version is already installed.</message>
+<message type="info">Resolving package dependencies...</message>
+<prompt id="1">
+<description>Problem: 1: Detailed information: 
+- the installed postfix-3.11.7-3.1.x86_64 conflicts with &apos;exim&apos; provided by the to be installed exim-4.98.2-4.6.x86_64
+- the to be installed postfix-3.11.7-3.1.x86_64 conflicts with &apos;exim&apos; provided by the to be installed exim-4.98.2-4.6.x86_64
+ Solution 1: deinstallation of postfix-3.11.7-3.1.x86_64
+ Solution 2: do not install exim-4.98.2-4.6.x86_64
+</description>
+<text>Choose from above solutions by number or cancel</text>
+<option value="1" desc="Choose solution 1"/>
+<option value="2" desc="Choose solution 2"/>
+<option default="1" value="c" desc="Choose no solution and cancel."/>
+<option value="d" desc="Toggle show detailed conflict information."/>
+</prompt>
+</stream>

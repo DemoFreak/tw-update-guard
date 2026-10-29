@@ -1,0 +1,13 @@
+[Unit]
+Description=tumbleweed-update-guard: Telegram-Bot und Erinnerungen
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=simple
+ExecStart=/usr/local/sbin/twguard bot
+Restart=always
+RestartSec=30
+
+[Install]
+WantedBy=multi-user.target

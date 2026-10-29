@@ -1,0 +1,10 @@
+[Unit]
+Description=tumbleweed-update-guard: Updates prüfen und Routine-Updates einspielen
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/twguard check
+Nice=10
+IOSchedulingClass=idle

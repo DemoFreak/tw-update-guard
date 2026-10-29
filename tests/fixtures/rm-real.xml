@@ -1,0 +1,26 @@
+<?xml version='1.0'?>
+<stream>
+<message type="info">Reading installed packages...</message>
+<message type="info">Resolving package dependencies...</message>
+<install-summary download-size="0" space-usage-diff="-3340483" space-usage-installed="0" space-usage-removed="3340483" packages-to-change="2" need-restart="0" need-reboot="0">
+<to-remove>
+<solvable type="package" name="nano" edition="9.3-1.1" arch="x86_64" repository="@System" summary="Pico editor clone with enhancements">
+<description>GNU nano is a small and friendly text editor. It aims to emulate
+the Pico text editor while also offering a few enhancements.</description></solvable>
+<solvable type="package" name="nano-lang" edition="9.3-1.1" arch="noarch" repository="@System" summary="Translations for package nano">
+<description>Provides translations for the &quot;nano&quot; package.</description></solvable>
+</to-remove>
+</install-summary>
+<prompt id="0">
+<text>Backend:  classic_rpmtrans --dry-run
+Continue?</text>
+<option default="1" value="y" desc="Yes, accept the summary and proceed with installation/removal of packages."/>
+<option value="n" desc="No, cancel the operation."/>
+<option value="v" desc="Toggle display of package versions."/>
+<option value="a" desc="Toggle display of package architectures."/>
+<option value="r" desc="Toggle display of repositories from which the packages will be installed."/>
+<option value="m" desc="Toggle display of package vendor names."/>
+<option value="d" desc="Toggle between showing all details and as few details as possible."/>
+<option value="g" desc="View the summary in pager."/>
+</prompt>
+</stream>

@@ -1,0 +1,60 @@
+<?xml version='1.0'?>
+<stream>
+<message type="info">Loading repository data...</message>
+<message type="info">Reading installed packages...</message>
+<message type="info">Resolving package dependencies...</message>
+<install-summary download-size="21214290" space-usage-diff="67609304" space-usage-installed="67609304" space-usage-removed="0" packages-to-change="3" need-restart="0" need-reboot="0">
+<to-install>
+<solvable type="package" name="postgresql17" edition="17.11-3.1" arch="x86_64" repository="openSUSE:repo-oss" summary="Basic Clients and Utilities for PostgreSQL">
+<description>PostgreSQL is an advanced object-relational database management system
+that supports an extended subset of the SQL standard, including
+transactions, foreign keys, subqueries, triggers, and user-defined
+types and functions.
+
+This package contains the basic utility and client programs necessary
+to maintain and work with local or remote PostgreSQL databases as well
+as manual pages for the SQL commands that PostgreSQL supports. Full
+HTML documentation for PostgreSQL can be found in the postgresql-docs
+package.</description></solvable>
+<solvable type="package" name="postgresql17-llvmjit" edition="17.11-3.1" arch="x86_64" repository="openSUSE:repo-oss" summary="Just-in-time compilation support for PostgreSQL">
+<description>PostgreSQL is an advanced object-relational database management system
+that supports an extended subset of the SQL standard, including
+transactions, foreign keys, sub-queries, triggers, and user-defined
+types and functions.
+
+This package contains support for just-in-time compiling parts of
+PostgreSQL queries. Using LLVM it compiles e.g. expressions and tuple
+deforming into native code, with the goal of accelerating analytics
+queries.</description></solvable>
+<solvable type="package" name="postgresql17-server" edition="17.11-3.1" arch="x86_64" repository="openSUSE:repo-oss" summary="The Programs Needed to Create and Run a PostgreSQL Server">
+<description>PostgreSQL is an advanced object-relational database management system
+that supports an extended subset of the SQL standard, including
+transactions, foreign keys, sub-queries, triggers, and user-defined
+types and functions.
+
+This package includes the programs needed to create and run a
+PostgreSQL server, which will in turn allow you to create and maintain
+PostgreSQL databases.</description></solvable>
+</to-install>
+</install-summary>
+<prompt id="0">
+<text>Backend:  classic_rpmtrans --dry-run
+Continue?</text>
+<option default="1" value="y" desc="Yes, accept the summary and proceed with installation/removal of packages."/>
+<option value="n" desc="No, cancel the operation."/>
+<option value="v" desc="Toggle display of package versions."/>
+<option value="a" desc="Toggle display of package architectures."/>
+<option value="r" desc="Toggle display of repositories from which the packages will be installed."/>
+<option value="m" desc="Toggle display of package vendor names."/>
+<option value="d" desc="Toggle between showing all details and as few details as possible."/>
+<option value="g" desc="View the summary in pager."/>
+</prompt>
+<progress id="fileconflict-check" name="Checking for file conflicts:"/>
+<progress id="fileconflict-check" name="Checking for file conflicts:" value="0"/>
+<progress id="fileconflict-check" name="Checking for file conflicts: (1 skipped)" value="0"/>
+<progress id="fileconflict-check" name="Checking for file conflicts: (1 skipped)" done="1"/>
+<fileconflict-summary><message type="warning">3 packages had to be excluded from file conflicts check because they are not yet downloaded.</message>
+<message type="info">    Note: Checking for file conflicts requires not installed packages to be downloaded in advance in
+    order to access their file lists. See option &apos;--download-in-advance / --dry-run --download-only&apos;
+    in the zypper manual page for details.</message>
+</fileconflict-summary></stream>

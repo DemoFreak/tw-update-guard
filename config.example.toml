@@ -1,0 +1,76 @@
+# tw-update-guard – /etc/twguard/config.toml (Modus 0600, enthält den Bot-Token)
+
+[telegram]
+# Token vom @BotFather; ein eigener Bot pro Server
+token = "123456789:ABCdefGHIjklMNOpqrSTUvwxYZ"
+# Gruppe (negative ID) oder privater Chat; ermitteln mit: twguard telegram-ids
+chat_id = -1001234567890
+# Wer Befehle geben darf (Telegram-Benutzer-IDs)
+allowed_user_ids = [123456789]
+# /help an alle Server: nur der Bot mit true antwortet (mit der ganzen Befehlsliste), die
+# übrigen schweigen. In genau einer Konfiguration auf true setzen.
+help_full = false
+
+[general]
+# hostname = "server1"        # Standard: Rechnername
+# "observe": nur prüfen und melden, nichts einspielen (Standard, für den Anfang)
+# "auto": Routine-Updates selbst einspielen
+mode = "observe"
+# Zusätzliche Argumente für zypper dup, z. B. ["--no-recommends"]
+dup_args = []
+# Stille Nachricht nach jedem automatischen Update
+report_routine = true
+
+[rules]
+# Jede Änderung braucht Freigabe (Bootloader, Netzwerk, SSH: Aussperrgefahr)
+block = ["grub2", "grub2-*", "shim", "systemd-boot", "dracut",
+         "openssh-server*", "wicked*", "NetworkManager", "systemd-network", "firewalld"]
+# Freigabe bei Versionssprung sowie bei neuen oder entfernten Paketen dieses Musters.
+# "muster:2" vergleicht die ersten zwei Versionsteile (PHP 8.4 → 8.5), sonst nur den ersten.
+# Muster ohne Treffer auf dem Server schaden nicht.
+watch = [
+    # Basis
+    "systemd", "glibc", "openssl", "mdadm", "python3[0-9][0-9]",
+    # Web und Datenbanken
+    "apache2", "php8*:2", "mariadb:2", "redis", "postgresql*", "nginx", "nextcloud",
+    "roundcubemail:2", "forgejo",
+    # Mail und DNS
+    "postfix", "dovecot*:2", "amavisd-new", "spamassassin", "clamav:2", "bind:2",
+    # Sonstige Dienste
+    "bareos-filedaemon", "samba:2", "docker", "containerd", "podman", "syncthing",
+    "snapd", "fail2ban:2",
+]
+# Nur zur Information: ziehen einen Neustart nach sich
+reboot = ["kernel-default", "kernel-longterm"]
+# Entfernungen, die bei Tumbleweed normal sind
+routine_removals = ["lib*", "*-lang", "typelib-*"]
+max_removals = 20
+# 0 = keine Grenze (große Rebuilds sind bei Tumbleweed normal)
+max_packages = 0
+
+[escalation]
+# Keine Erinnerungen in diesem Zeitraum (Ortszeit); "" = immer
+quiet_hours = "22:00-07:00"
+# Stufen [ab Alter in Stunden, Abstand in Stunden]:
+# sofort, dann täglich; ab 2 Tagen alle 8 h; ab 5 Tagen alle 3 h; ab 10 Tagen stündlich
+ladder = [[0, 24], [48, 8], [120, 3], [240, 1]]
+# Vorübergehende Fehler (Repo nicht erreichbar) erst nach einem Tag melden
+ladder_error = [[24, 24], [72, 6]]
+# /later: wie oft und wie lange höchstens
+max_snoozes = 2
+max_snooze_hours = 72
+# Alarm, wenn so lange keine Prüfung erfolgreich war
+stale_after_hours = 72
+
+[briefing]
+# Tägliche Zusammenfassung je Server, auch wenn alles in Ordnung ist (Lebenszeichen).
+# Uhrzeit bis 18:00; war der Bot zu der Zeit aus, kommt sie bis zu 6 Stunden später. "" = aus
+at = "08:00"
+# Ohne Ton, solange nichts offen ist
+silent = true
+
+[update]
+# Git-Arbeitskopie von tw-update-guard auf diesem Server; /update holt von dort
+# den neuen Stand (git fetch). Leer = abgeschaltet. install.sh trägt den Pfad selbst ein.
+# repo = "/root/tw-update-guard"
+branch = "main"
