@@ -90,7 +90,7 @@ Rückmeldung: Bei Befehlen zeigt Telegram sofort „schreibt …“, bei Schaltf
 **Aufgeräumter Chat:** Je Server und Thema bleibt höchstens eine Nachricht stehen.
 - Befehle werden nach der Antwort gelöscht (Admin-Recht nötig). Hilfe, Version, Details und Bestätigungen löschen sich nach 2 bis 5 Minuten selbst.
 - `/status`, Briefing und Erinnerungen ersetzen ihren Vorgänger. Eine Erinnerung kommt also weiterhin neu (mit Ton), die vorige verschwindet.
-- Schaltflächen bearbeiten die Nachricht, an der sie hängen: „Freigeben“ macht daraus die Wartemeldung und dann das Ergebnis, „Details“ klappt die Paketliste auf („◀️ Zurück“ wieder zu), „1 Tag später“ vermerkt die Aufschiebung, „Neu starten“ zeigt den Neustart und nach dem Start „wieder da“.
+- Schaltflächen bearbeiten die Nachricht, an der sie hängen: „Freigeben“ macht daraus die Wartemeldung und dann das Ergebnis, „Details“ klappt die Paketliste auf (nach Name, umschaltbar auf „nach Version“ mit gruppierten Paketen, bei langen Listen mit Seiten; „📄 Als Datei“ schickt alle Pakete als HTML-Datei; „◀️ Zurück“ wieder zu), „1 Tag später“ vermerkt die Aufschiebung, „Neu starten“ zeigt den Neustart und nach dem Start „wieder da“.
 - Erledigte Punkte bleiben als „✅ … erledigt“ stehen, ohne Schaltflächen.
 - Stille Update-Berichte bleiben bis zum nächsten Briefing; das fasst sie zusammen und löscht sie.
 - Telegram erlaubt Löschen nur in den ersten 48 Stunden. Ältere Nachrichten kürzt der Bot stattdessen auf eine Zeile.
@@ -105,6 +105,7 @@ twguard check --dry-run             # Einstufung ohne Wirkung
 twguard classify datei.xml          # gespeicherte zypper-XML-Ausgabe einstufen
 journalctl -u twguard-check -u twguard-bot
 journalctl -u twguard-bot | grep -E 'langsam|Verbindung'   # Telegram-Aufrufe über 3 s, mit Dauer je Phase
+journalctl -u twguard-bot | grep 'Fehler in einer Stunde'   # mehr Abruf- und Sendefehler als max_errors_per_hour
 ```
 
 ## Grenzen

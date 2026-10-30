@@ -8,7 +8,7 @@ import time
 from html import escape
 from pathlib import Path
 
-from . import messages, state, zypper
+from . import details, messages, state, zypper
 from .config import Config
 from .notify import (adopt_migration, format_issue, format_observed, format_reasons, format_report, issue_buttons,
                      observed_buttons, send_due)
@@ -120,6 +120,7 @@ def _run(cfg: Config, tg: Telegram, dry_run: bool) -> int:
         st.resolve("error")
         st.last_check_ok = time.time()
         st.last_plan_text = describe(plan)
+        st.last_plan = details.snapshot(plan)
         approved = bool(st.approved_fingerprint) and st.approved_fingerprint == fingerprint
         expired = bool(st.approved_fingerprint) and not approved
         if not approved:

@@ -8,5 +8,4 @@ Echte Ausgaben von zypper (Tumbleweed, Oktober 2026), erzeugt mit `--xmlout -n -
 | `in-real.xml` | `in postgresql17-server` | Format von `<to-install>` |
 | `rm-real.xml` | `rm --clean-deps nano` | Format von `<to-remove>` |
 | `conflict-real.xml` | `in postfix exim` (Exit-Code 4) | Solver-Konflikt als `<prompt>` |
-
-Ein echter `dup` mit `<to-upgrade>` (Attribute `edition-old`, `arch-old`) fehlt noch, weil das System beim Erzeugen aktuell war.
+| `upgrade-real.xml` | `dup` | Format von `<to-upgrade>` (`edition-old`, `arch-old`), mit Paketen, Muster und Produkt; auf wenige Einträge gekürzt, `packages-to-change` entsprechend angepasst |

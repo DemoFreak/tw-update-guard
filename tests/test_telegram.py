@@ -3,7 +3,7 @@ import unittest
 from unittest import mock
 
 from twguard import telegram
-from twguard.telegram import Telegram, TelegramError, connect, format_phases
+from twguard.telegram import ErrorMeter, Telegram, TelegramError, connect, format_phases, multipart
 
 
 class ConnectTest(unittest.TestCase):
@@ -104,6 +104,62 @@ class CallTest(unittest.TestCase):
                 Telegram("x", 0).call("getUpdates", timeout=0)
         self.assertIn("connect 6.0 s", logs.output[0])
         self.assertIn("2001:db8::1", logs.output[0])
+
+
+class DocumentTest(unittest.TestCase):
+    def test_upload_body_contains_fields_and_file(self):
+        body, content_type = multipart({"chat_id": -5}, "document", 'a".html', b"<p>inhalt</p>", "text/html")
+        boundary = content_type.split("boundary=")[1]
+        self.assertTrue(body.endswith(f"--{boundary}--\r\n".encode()))
+        self.assertIn(b'name="chat_id"\r\n\r\n-5\r\n', body)
+        self.assertIn(b'filename="a_.html"', body)
+        self.assertIn(b"<p>inhalt</p>", body)
+
+    def test_send_document_counts_as_send_error(self):
+        tg = Telegram("x", 0, max_errors_per_hour=5)
+        with mock.patch.object(tg, "_call", side_effect=TelegramError("sendDocument: reset")):
+            with self.assertRaises(TelegramError):
+                tg.send_document(-5, "a.html", b"x")
+        self.assertEqual(tg.errors.counts, {"Senden": 1})
+
+
+class ErrorMeterTest(unittest.TestCase):
+    def test_warns_once_above_limit(self):
+        meter = ErrorMeter(limit=2)
+        with self.assertLogs("twguard.telegram", "WARNING") as logs:
+            for now in (0, 1, 2, 3):
+                meter.add("getUpdates" if now else "sendMessage", OSError("reset"), now=now)
+        self.assertEqual(len(logs.output), 1)
+        self.assertIn("Abruf 2, Senden 1", logs.output[0])
+        self.assertIn("reset", logs.output[0])
+
+    def test_silent_up_to_limit(self):
+        meter = ErrorMeter(limit=2)
+        with self.assertNoLogs("twguard.telegram", "WARNING"):
+            meter.add("getUpdates", OSError(), now=0)
+            meter.add("getUpdates", OSError(), now=1)
+
+    def test_new_hour_counts_afresh(self):
+        meter = ErrorMeter(limit=1)
+        with self.assertLogs("twguard.telegram", "WARNING") as logs:
+            for now in (0, 1, 3600, 3601):
+                meter.add("getUpdates", OSError(), now=now)
+        self.assertEqual(len(logs.output), 2)
+
+    def test_zero_never_warns_and_other_methods_do_not_count(self):
+        with self.assertNoLogs("twguard.telegram", "WARNING"):
+            ErrorMeter(limit=0).add("getUpdates", OSError(), now=0)
+            meter = ErrorMeter(limit=1)
+            for now in range(3):
+                meter.add("deleteMessage", OSError(), now=now)
+        self.assertEqual(meter.counts, {})
+
+    def test_call_counts_errors_but_not_migration(self):
+        tg = Telegram("x", 0, max_errors_per_hour=5)
+        for error in (TelegramError("sendMessage: reset"), TelegramError("umgezogen", migrate_to=-5)):
+            with mock.patch.object(tg, "_call", side_effect=error), self.assertRaises(TelegramError):
+                tg.call("sendMessage")
+        self.assertEqual(tg.errors.counts, {"Senden": 1})
 
 
 if __name__ == "__main__":

@@ -148,6 +148,62 @@ class BotTest(unittest.TestCase):
         self.press("back")
         self.assertEqual(self.tg.raw_edits, [(5, "Meldung")])
 
+    def set_plan(self, count=1):
+        rows = [["to-upgrade", f"paket-{i:03}", "1.0-1", "1.0-2", "repo"] for i in range(count)]
+        with state.locked(self.bot.cfg.state_dir) as st:
+            st.last_plan = {"summary": f"{count} Pakete", "rows": rows, "problems": []}
+
+    def test_details_switch_view_keeps_back(self):
+        self.set_plan()
+        self.press("details")
+        _, text, buttons = self.tg.edited[-1]
+        self.assertIn("paket-000\n", text)
+        self.assertEqual(buttons, [[("🔢 Nach Version", "details:version:1"), ("📄 Als Datei", "file")],
+                                   [("◀️ Zurück", "back")]])
+        self.press("details:version:1")
+        _, text, buttons = self.tg.edited[-1]
+        self.assertIn("nur neu gebaut", text)
+        self.assertEqual(buttons[0][0], ("🔤 Nach Name", "details:name:1"))
+        # Umschalten darf den gemerkten Inhalt nicht überschreiben
+        self.press("back")
+        self.assertEqual(self.tg.raw_edits, [(5, "Meldung")])
+
+    def test_details_pages(self):
+        self.set_plan(300)
+        self.press("details")
+        nav = self.tg.edited[-1][2][1]
+        self.assertEqual(nav[-1], ("➡️", "details:name:2"))
+        self.assertEqual(len(nav), 2)
+        self.press("details:name:2")
+        nav = self.tg.edited[-1][2][1]
+        self.assertEqual(nav[0], ("⬅️", "details:name:1"))
+        # Der Plan kann inzwischen kürzer sein
+        self.press("details:name:99")
+        self.assertIn("paket-", self.tg.edited[-1][1])
+
+    def test_details_command_has_no_back(self):
+        self.set_plan()
+        self.bot.handle(message("/details@" + self.bot.me["username"]))
+        self.assertEqual(self.tg.buttons[-1], [[("🔢 Nach Version", "details:version:1"), ("📄 Als Datei", "file")]])
+
+    def test_file_button_sends_document_and_replaces_previous(self):
+        self.set_plan()
+        self.press("file")
+        name, content, caption = self.tg.documents[0]
+        self.assertTrue(name.endswith(".html"))
+        self.assertIn(b"paket-000", content)
+        self.assertIn("1 Pakete", caption)
+        with state.locked(self.bot.cfg.state_dir) as st:
+            first = st.messages["file"]["message_id"]
+        self.press("file")
+        self.assertEqual(len(self.tg.documents), 2)
+        self.assertIn(first, self.tg.deleted)
+
+    def test_file_button_without_plan(self):
+        self.press("file")
+        self.assertEqual(self.tg.documents, [])
+        self.assertEqual(self.tg.answered, ["Keine Paketliste vorhanden."])
+
     def test_status_has_buttons(self):
         self.bot.handle(message("/status"))
         self.assertIn(("🔄 Jetzt prüfen", "check"), self.tg.buttons[0][0])

@@ -10,6 +10,9 @@ allowed_user_ids = [123456789]
 # /help an alle Server: nur der Bot mit true antwortet (mit der ganzen Befehlsliste), die
 # übrigen schweigen. In genau einer Konfiguration auf true setzen.
 help_full = false
+# Einzelne Abruf- und Sendefehler sind normal und erscheinen nicht im Journal. Erst wenn es
+# mehr als so viele je Stunde sind (bei rund 360 Abrufen je Stunde), kommt eine Warnung. 0 = nie
+max_errors_per_hour = 10
 
 [general]
 # hostname = "server1"        # Standard: Rechnername

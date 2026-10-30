@@ -35,6 +35,8 @@ class State:
     approved_fingerprint: str = ""
     last_check_ok: float = 0.0
     last_plan_text: str = ""
+    # Dasselbe als Daten für /details (details.snapshot)
+    last_plan: dict = field(default_factory=dict)
     first_seen: float = 0.0
     tg_offset: int = 0
     reboot_requested_at: float = 0.0

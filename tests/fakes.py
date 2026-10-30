@@ -6,6 +6,7 @@ from twguard.telegram import TelegramError
 class FakeTelegram:
     def __init__(self, *args):
         self.sent = []  # Texte gesendeter Nachrichten
+        self.documents = []  # (Dateiname, Inhalt, Beschriftung)
         self.buttons = []
         self.silent = []
         self.markups = []
@@ -27,6 +28,11 @@ class FakeTelegram:
         self.markups.append(markup)
         self.next_id += 1
         return {"message_id": self.next_id, "chat": {"id": chat_id or -100}}
+
+    def send_document(self, chat_id, filename, content, caption=""):
+        self.documents.append((filename, content, caption))
+        self.next_id += 1
+        return {"message_id": self.next_id, "chat": {"id": chat_id}}
 
     def edit(self, chat_id, message_id, text, buttons=None):
         self.edited.append((message_id, text, buttons))

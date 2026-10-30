@@ -4,6 +4,7 @@ from unittest import mock
 from pathlib import Path
 
 from twguard import zypper
+from twguard.rules import Rules, classify
 from twguard.zypper import Plan, Solvable, message_text, parse_plan
 
 FIXTURES = Path(__file__).parent / "fixtures"
@@ -21,6 +22,21 @@ class ParsePlanTest(unittest.TestCase):
         self.assertTrue(plan.empty)
         self.assertFalse(plan.failed)
         self.assertEqual(plan.packages_to_change, 0)
+
+    def test_upgrade(self):
+        plan = parse_plan(fixture("upgrade-real.xml"))
+        self.assertEqual(plan.packages_to_change, 5)
+        # Muster und Produkte zählen nicht als Pakete
+        self.assertEqual(sum(len(items) for items in plan.sections.values()), 5)
+        grub = next(s for s in plan.get("to-upgrade") if s.name == "grub2")
+        self.assertEqual((grub.edition_old, grub.edition), ("2.16-3.1", "2.16-4.1"))
+        self.assertEqual(grub.arch_old, "x86_64")
+        self.assertEqual(grub.repository, "openSUSE:repo-oss")
+
+    def test_upgrade_classified_by_real_format(self):
+        verdict = classify(parse_plan(fixture("upgrade-real.xml")), Rules())
+        self.assertFalse(verdict.auto)
+        self.assertEqual(verdict.reasons, ["kritisches Paket: grub2 2.16-3.1 → 2.16-4.1"])
 
     def test_install(self):
         plan = parse_plan(fixture("in-real.xml"))

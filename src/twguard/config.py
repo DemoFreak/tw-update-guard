@@ -53,6 +53,8 @@ class Config:
     allowed_user_ids: list[int] = field(default_factory=list)
     # /help an alle: nur dieser Bot schickt die ganze Befehlsliste, die übrigen eine Zeile
     help_full: bool = False
+    # Warnung im Journal, wenn mehr Abruf- und Sendefehler je Stunde auftreten; 0 = nie
+    max_errors_per_hour: int = 10
     hostname: str = field(default_factory=socket.gethostname)
     dup_args: list[str] = field(default_factory=list)
     report_routine: bool = True
@@ -81,6 +83,7 @@ def load(path: str | Path | None = None) -> Config:
             chat_id=int(tg.get("chat_id", 0)),
             allowed_user_ids=[int(x) for x in tg.get("allowed_user_ids", [])],
             help_full=bool(tg.get("help_full", False)),
+            max_errors_per_hour=int(tg.get("max_errors_per_hour", Config.max_errors_per_hour)),
             hostname=general.get("hostname") or socket.gethostname(),
             dup_args=list(general.get("dup_args", [])),
             report_routine=bool(general.get("report_routine", True)),

@@ -16,7 +16,7 @@ from dataclasses import dataclass
 from html import escape
 from pathlib import Path
 
-from . import COMMIT, __version__, messages, ota, state, zypper
+from . import COMMIT, __version__, details, messages, ota, state, zypper
 from .config import Config
 from .notify import (TITLES, adopt_migration, clip, fmt_age, format_briefing, format_issue, format_status, issue_buttons,
                      mark_resolved, minutes_of_day, send_due)
@@ -113,7 +113,7 @@ def plain(html: str) -> str:
 class Bot:
     def __init__(self, cfg: Config, tg: Telegram | None = None, me: dict | None = None):
         self.cfg = cfg
-        self.tg = tg or Telegram(cfg.token, cfg.chat_id)
+        self.tg = tg or Telegram(cfg.token, cfg.chat_id, cfg.max_errors_per_hour)
         self.me = me
         self.offset = 0
         self.last_tick = 0.0
@@ -158,7 +158,7 @@ class Bot:
                 updates = self.tg.get_updates(self.offset)
                 failures = 0
             except TelegramError as e:
-                log.warning("getUpdates: %s", e)
+                log.debug("getUpdates: %s", e)
                 time.sleep(RETRY_SECONDS[min(failures, len(RETRY_SECONDS) - 1)])
                 failures += 1
                 updates = []
@@ -259,7 +259,7 @@ class Bot:
                                  buttons=[[("📊 Status", "status"), ("🔄 Jetzt prüfen", "check")]],
                                  silent=self.cfg.briefing.silent and not st.issues)
             except TelegramError as e:
-                log.warning("Briefing nicht gesendet: %s", e)
+                log.debug("Briefing nicht gesendet: %s", e)
                 return
             st.last_briefing_day = today
             # Die Update-Berichte stehen jetzt im Briefing
@@ -345,13 +345,34 @@ class Bot:
             text += "\n<i>Beobachtungsmodus: Updates werden nur gemeldet.</i>"
         return text, [[("🔄 Jetzt prüfen", "check"), ("📋 Details", "details")]]
 
-    def details_text(self) -> str:
+    def details_view(self, arg: str = "", back: bool = False) -> tuple[str, Buttons]:
+        """Eine Seite der Paketliste; `arg` ist "ansicht:seite" aus der Schaltfläche."""
+        view, _, number = arg.partition(":")
+        view = view if view in details.VIEWS else details.VIEWS[0]
         with state.locked(self.cfg.state_dir) as st:
-            text = st.last_plan_text or "Noch kein Probelauf."
-        return f"<b>{self.host}</b>\n<pre>{escape(clip(text, 3500))}</pre>"
+            plan, text = st.last_plan, st.last_plan_text
+        back_row = [[("◀️ Zurück", "back")]] if back else []
+        if not plan:
+            # Noch kein Prüflauf seit dem Update auf diese Version
+            text = text or "Noch kein Probelauf."
+            return f"<b>{self.host}</b>\n<pre>{escape(clip(text, 3500))}</pre>", back_row
+        all_pages = details.pages(plan, view)
+        page = min(max(int(number) if number.isdigit() else 1, 1), len(all_pages))
+        other, label = ("version", "🔢 Nach Version") if view == "name" else ("name", "🔤 Nach Name")
+        nav = [("⬅️", f"details:{view}:{page - 1}")] if page > 1 else []
+        if len(all_pages) > 1:
+            nav.append((f"{page}/{len(all_pages)}", f"details:{view}:{page}"))
+        if page < len(all_pages):
+            nav.append(("➡️", f"details:{view}:{page + 1}"))
+        first = [(label, f"details:{other}:1")]
+        if plan.get("rows"):
+            first.append(("📄 Als Datei", "file"))
+        rows = [first, *([nav] if nav else []), *back_row]
+        return f"<b>{self.host}</b>\n{all_pages[page - 1]}", rows
 
     def cmd_details(self, args: list[str], addressed: bool = False) -> Out:
-        return Out(self.details_text(), ttl=LONG)
+        text, buttons = self.details_view()
+        return Out(text, buttons, ttl=LONG)
 
     def cmd_approve(self, args: list[str], addressed: bool = False) -> Out:
         error = self.approve()
@@ -547,6 +568,7 @@ class Bot:
         handler = {
             "approve": self.press_approve,
             "details": self.press_details,
+            "file": self.press_file,
             "back": self.press_back,
             "later": self.press_later,
             "check": self.press_check,
@@ -573,22 +595,47 @@ class Bot:
     def press_details(self, cq: dict, pressed: dict, arg: str) -> None:
         self._answer(cq)
         msg = cq.get("message") or {}
-        # Ursprünglichen Inhalt merken, damit „Zurück“ ihn genau so wiederherstellt
         with state.locked(self.cfg.state_dir) as st:
-            st.collapsed[str(pressed["message_id"])] = {
-                "text": msg.get("text", ""),
-                "entities": msg.get("entities", []),
-                "reply_markup": msg.get("reply_markup", {}),
-                "at": time.time(),
-            }
-        messages.edit(self.tg, pressed, self.details_text(), [[("◀️ Zurück", "back")]])
+            # Ursprünglichen Inhalt merken, damit „Zurück“ ihn genau so wiederherstellt;
+            # Umschalten und Blättern (mit `arg`) zeigen schon die Liste
+            if not arg:
+                st.collapsed[str(pressed["message_id"])] = {
+                    "text": msg.get("text", ""),
+                    "entities": msg.get("entities", []),
+                    "reply_markup": msg.get("reply_markup", {}),
+                    "at": time.time(),
+                }
+            back = str(pressed["message_id"]) in st.collapsed
+        messages.edit(self.tg, pressed, *self.details_view(arg, back))
+
+    def press_file(self, cq: dict, pressed: dict, arg: str) -> None:
+        """Die ganze Paketliste als HTML-Datei; eine neuere ersetzt die vorige."""
+        with state.locked(self.cfg.state_dir) as st:
+            plan, at = st.last_plan, st.last_check_ok or time.time()
+        if not plan.get("rows"):
+            self._answer(cq, "Keine Paketliste vorhanden.")
+            return
+        html_text = details.file_html(plan, self.cfg.hostname, at)
+        try:
+            sent = self.tg.send_document(pressed["chat_id"], details.file_name(self.cfg.hostname, at),
+                                         html_text.encode(), f"📄 <b>{self.host}</b>: {escape(plan['summary'])}")
+        except TelegramError as e:
+            log.debug("Datei nicht gesendet: %s", e)
+            self._answer(cq, "Datei konnte nicht gesendet werden.", alert=True)
+            return
+        self._answer(cq)
+        with state.locked(self.cfg.state_dir) as st:
+            old = st.messages.get("file")
+            messages.claim(st, "file", messages.ref(sent))
+        if old:
+            messages.delete(self.tg, old)
 
     def press_back(self, cq: dict, pressed: dict, arg: str) -> None:
         with state.locked(self.cfg.state_dir) as st:
             original = st.collapsed.pop(str(pressed["message_id"]), None)
         if original is None:
             self._answer(cq, "Nicht mehr verfügbar.")
-            messages.edit(self.tg, pressed, self.details_text())
+            messages.edit(self.tg, pressed, self.details_view()[0])
             return
         self._answer(cq)
         try:
@@ -696,7 +743,7 @@ class Bot:
                 if out.start_check:
                     st.check_request = messages.ref(sent)
         except TelegramError as e:
-            log.warning("Antwort nicht gesendet: %s", e)
+            log.debug("Antwort nicht gesendet: %s", e)
             return
         if out.start_check:
             self.start_check()
@@ -718,7 +765,7 @@ class Bot:
         try:
             self.tg.send(text, silent=silent)
         except TelegramError as e:
-            log.warning("Nachricht nicht gesendet: %s", e)
+            log.debug("Nachricht nicht gesendet: %s", e)
 
     def _typing(self, chat_id: int) -> None:
         try:

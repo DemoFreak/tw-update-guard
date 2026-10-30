@@ -9,6 +9,7 @@ import logging
 import socket
 import ssl
 import time
+import uuid
 
 log = logging.getLogger(__name__)
 
@@ -18,9 +19,24 @@ PORT = 443
 CONNECT_TIMEOUT = 5
 # Aufrufe, die länger dauern, landen als Warnung im Journal (getUpdates: zusätzlich zur Wartezeit)
 SLOW_SECONDS = 3
+# Diese Aufrufe zählen als Abruf- bzw. Sendefehler (ErrorMeter)
+COUNTED = {"getUpdates": "Abruf", "sendMessage": "Senden", "sendDocument": "Senden"}
+ERROR_WINDOW_SECONDS = 3600
 
 # Schaltflächen: Zeilen aus (Beschriftung, Rückgabewert); der Rückgabewert hat höchstens 64 Bytes
 Buttons = list[list[tuple[str, str]]]
+
+
+def multipart(fields: dict, field: str, filename: str, content: bytes, content_type: str) -> tuple[bytes, str]:
+    """Rumpf und Content-Type für den Upload einer Datei."""
+    boundary = uuid.uuid4().hex
+    parts = [f'--{boundary}\r\nContent-Disposition: form-data; name="{name}"\r\n\r\n{value}\r\n'.encode()
+             for name, value in fields.items()]
+    safe_name = filename.replace('"', "_")
+    parts.append(f'--{boundary}\r\nContent-Disposition: form-data; name="{field}"; filename="{safe_name}"\r\n'
+                 f"Content-Type: {content_type}\r\n\r\n".encode() + content + b"\r\n")
+    parts.append(f"--{boundary}--\r\n".encode())
+    return b"".join(parts), f"multipart/form-data; boundary={boundary}"
 
 
 def keyboard(buttons: Buttons | None) -> dict:
@@ -33,6 +49,29 @@ class TelegramError(Exception):
         super().__init__(message)
         # Gruppe wurde zur Supergruppe: deren neue ID (Telegram nennt sie im Fehler)
         self.migrate_to = migrate_to
+
+
+class ErrorMeter:
+    """Zählt Abruf- und Sendefehler; über der Grenze eine Warnung je Stundenfenster. 0 = nie."""
+
+    def __init__(self, limit: int = 0):
+        self.limit = limit
+        self.start: float | None = None
+        self.counts: dict[str, int] = {}
+        self.warned = False
+
+    def add(self, method: str, error: Exception, now: float | None = None) -> None:
+        kind = COUNTED.get(method)
+        if not self.limit or not kind:
+            return
+        now = time.monotonic() if now is None else now
+        if self.start is None or now - self.start >= ERROR_WINDOW_SECONDS:
+            self.start, self.counts, self.warned = now, {}, False
+        self.counts[kind] = self.counts.get(kind, 0) + 1
+        if sum(self.counts.values()) > self.limit and not self.warned:
+            self.warned = True
+            log.warning("Telegram: mehr als %d Fehler in einer Stunde (Abruf %d, Senden %d), zuletzt: %s",
+                        self.limit, self.counts.get("Abruf", 0), self.counts.get("Senden", 0), error)
 
 
 def connect(host: str, port: int, timeout: float, phases: dict, prefer: str = "") -> socket.socket:
@@ -75,7 +114,8 @@ def format_phases(phases: dict) -> str:
 
 
 class Telegram:
-    def __init__(self, token: str, chat_id: int):
+    def __init__(self, token: str, chat_id: int, max_errors_per_hour: int = 0):
+        self.errors = ErrorMeter(max_errors_per_hour)
         self.token = token
         self.chat_id = chat_id
         self._ssl = ssl.create_default_context()
@@ -84,17 +124,24 @@ class Telegram:
         # (alte, neue) Chat-ID, falls die Gruppe beim Senden umgezogen ist; der Besitzer übernimmt sie
         self.migration: tuple[int, int] | None = None
 
-    def call(self, method: str, http_timeout: float = 20, **params):
+    def call(self, method: str, http_timeout: float = 20, body: bytes | None = None, content_type: str = "",
+             **params):
         start = time.monotonic()
         phases: dict = {}
         try:
-            return self._call(method, http_timeout, phases, **params)
+            return self._call(method, http_timeout, phases, body, content_type, **params)
+        except TelegramError as e:
+            # Der Umzug zur Supergruppe ist kein Fehler; send() wiederholt an die neue ID
+            if not e.migrate_to:
+                self.errors.add(method, e)
+            raise
         finally:
             elapsed = time.monotonic() - start
             if elapsed > SLOW_SECONDS + params.get("timeout", 0):
                 log.warning("langsam: %s brauchte %.1f s (%s)", method, elapsed, format_phases(phases))
 
-    def _call(self, method: str, http_timeout: float, phases: dict, **params):
+    def _call(self, method: str, http_timeout: float, phases: dict, body: bytes | None = None,
+              content_type: str = "", **params):
         conn = None
         try:
             sock = connect(HOST, PORT, CONNECT_TIMEOUT, phases, self._prefer)
@@ -106,8 +153,8 @@ class Telegram:
             conn = http.client.HTTPSConnection(HOST, PORT, timeout=http_timeout, context=self._ssl)
             conn.sock = sock
             t = time.monotonic()
-            conn.request("POST", f"/bot{self.token}/{method}", body=json.dumps(params).encode(),
-                         headers={"Content-Type": "application/json"})
+            conn.request("POST", f"/bot{self.token}/{method}", body=body or json.dumps(params).encode(),
+                         headers={"Content-Type": content_type or "application/json"})
             resp = conn.getresponse()
             body = resp.read()
             phases["antwort"] = time.monotonic() - t
@@ -151,6 +198,12 @@ class Telegram:
             self.migration = (self.chat_id, e.migrate_to)
             self.chat_id = params["chat_id"] = e.migrate_to
             return self.call("sendMessage", **params)
+
+    def send_document(self, chat_id: int, filename: str, content: bytes, caption: str = "",
+                      content_type: str = "text/html") -> dict:
+        fields = {"chat_id": chat_id, "caption": caption, "parse_mode": "HTML", "disable_notification": "true"}
+        body, header = multipart(fields, "document", filename, content, content_type)
+        return self.call("sendDocument", http_timeout=60, body=body, content_type=header)
 
     def edit(self, chat_id: int, message_id: int, text: str, buttons: Buttons | None = None) -> dict:
         return self.call("editMessageText", chat_id=chat_id, message_id=message_id, text=text,

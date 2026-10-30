@@ -40,7 +40,7 @@ One bot per server, all bots in one group. Commands for a specific server must b
 | Command | Effect |
 |---|---|
 | `/status` | open issues |
-| `/details` | package list of the last dry run |
+| `/details` | package list of the last dry run (by name or grouped by version, paged if long, or as an HTML file) |
 | `/approve` | approve and install the reported update |
 | `/check` | check now; a waiting message is replaced by the result |
 | `/later 12h`, `/later 2d` | postpone reminders (limited) |
@@ -65,6 +65,7 @@ twguard status                      # open issues
 twguard check --dry-run             # classification without any effect
 twguard classify file.xml           # classify a saved zypper XML output
 journalctl -u twguard-check -u twguard-bot
+journalctl -u twguard-bot | grep 'Fehler in einer Stunde'   # more fetch and send errors than max_errors_per_hour
 ```
 
 ## Limits

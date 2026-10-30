@@ -2,6 +2,7 @@ import tomllib
 import unittest
 from pathlib import Path
 
+from twguard.config import Config
 from twguard.rules import Rules, classify, version_key
 from twguard.zypper import Plan, Solvable
 
@@ -131,6 +132,11 @@ class ExampleConfigTest(unittest.TestCase):
         with open(Path(__file__).parent.parent / "config.example.toml", "rb") as f:
             data = tomllib.load(f)
         self.assertEqual(Rules(**data["rules"]), Rules())
+
+    def test_example_error_limit_matches_default(self):
+        with open(Path(__file__).parent.parent / "config.example.toml", "rb") as f:
+            data = tomllib.load(f)
+        self.assertEqual(data["telegram"]["max_errors_per_hour"], Config.max_errors_per_hour)
 
 
 if __name__ == "__main__":

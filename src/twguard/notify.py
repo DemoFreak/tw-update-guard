@@ -245,7 +245,7 @@ def send_due(cfg: Config, st: State, tg: Telegram, now: float | None = None) -> 
             messages.replace(tg, st, f"issue:{issue.kind}", format_issue(cfg.hostname, issue, now, cfg.escalation),
                              buttons=issue_buttons(issue))
         except TelegramError as e:
-            log.warning("Erinnerung nicht gesendet: %s", e)
+            log.debug("Erinnerung nicht gesendet: %s", e)
             continue
         issue.last_notified = now
         issue.notify_count += 1

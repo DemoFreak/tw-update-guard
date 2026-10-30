@@ -1,0 +1,42 @@
+<?xml version='1.0' encoding='utf-8'?>
+<stream>
+<message type="info">Loading repository data...</message>
+<message type="info">Reading installed packages...</message>
+<message type="warning">You are about to do a distribution upgrade with all enabled repositories. Make sure these repositories are compatible before you continue. See 'man zypper' for more information about this command.</message>
+<message type="info">Computing distribution upgrade...</message>
+<install-summary download-size="138075605" space-usage-diff="-60054" space-usage-installed="526690864" space-usage-removed="526750918" packages-to-change="5" need-restart="0" need-reboot="0">
+<to-upgrade>
+<solvable type="package" name="binutils" edition="2.47-2.1" arch="x86_64" repository="openSUSE:repo-oss" edition-old="2.47-1.1" arch-old="x86_64" summary="GNU Binutils">
+<description>C compiler utilities: ar, as, gprof, ld, nm, objcopy, objdump, ranlib,
+size, strings, and strip. These utilities are needed whenever you want
+to compile a program or kernel.</description></solvable>
+<solvable type="package" name="cracklib-dict-full" edition="2.10.3-1.1" arch="x86_64" repository="openSUSE:repo-oss" edition-old="2.8.12-66.20" arch-old="x86_64" summary="A Password-Checking Library">
+<description>CrackLib tests passwords to determine whether they match certain
+security-oriented characteristics. You can use CrackLib to stop users
+from choosing passwords that are easy to guess.</description></solvable>
+<solvable type="package" name="grub2" edition="2.16-4.1" arch="x86_64" repository="openSUSE:repo-oss" edition-old="2.16-3.1" arch-old="x86_64" summary="Bootloader with support for Linux, Multiboot and more">
+<description>This is the second version of the GRUB (Grand Unified Bootloader), a
+highly configurable and customizable bootloader with modular
+architecture.  It supports a rich variety of kernel formats, file systems,
+computer architectures and hardware devices.</description></solvable>
+<solvable type="pattern" name="base" edition="20241218-36.1" arch="x86_64" repository="openSUSE:repo-oss" edition-old="20241218-35.1" arch-old="x86_64" summary="Base System">
+<description>This is the base runtime system.  It contains only a basic multiuser booting system. For running on real hardware, you need to add additional packages and pattern to make this pattern useful on its own.</description></solvable>
+<solvable type="product" name="openSUSE" edition="20261028-0" arch="x86_64" repository="openSUSE:repo-oss" edition-old="20261026-0" arch-old="x86_64" summary="openSUSE Tumbleweed">
+<description>openSUSE Tumbleweed is the rolling distribution by the openSUSE.org project.</description></solvable>
+</to-upgrade>
+<to-install>
+<solvable type="package" name="libplacebo387" edition="7.387.0-1.1" arch="x86_64" repository="openSUSE:repo-oss" summary="Library for GPU-accelerated video/image rendering primitives">
+<description>This library contains GPU-accelerated video/image rendering
+primitives, as well as a standalone vulkan-based image/video
+renderer. It is based on the core rendering algorithms and ideas
+of mpv.</description></solvable>
+</to-install>
+<to-remove>
+<solvable type="package" name="libplacebo360" edition="7.360.1-1.7" arch="x86_64" repository="@System" summary="Library for GPU-accelerated video/image rendering primitives">
+<description>This library contains GPU-accelerated video/image rendering
+primitives, as well as a standalone vulkan-based image/video
+renderer. It is based on the core rendering algorithms and ideas
+of mpv.</description></solvable>
+</to-remove>
+</install-summary>
+</stream>
