@@ -3,6 +3,7 @@ import unittest
 from unittest import mock
 from pathlib import Path
 
+import testlang  # noqa: F401
 from twguard import zypper
 from twguard.rules import Rules, classify
 from twguard.zypper import Plan, Solvable, message_text, parse_plan

@@ -11,6 +11,8 @@ import ssl
 import time
 import uuid
 
+from .i18n import tr
+
 log = logging.getLogger(__name__)
 
 HOST = "api.telegram.org"
@@ -70,7 +72,7 @@ class ErrorMeter:
         self.counts[kind] = self.counts.get(kind, 0) + 1
         if sum(self.counts.values()) > self.limit and not self.warned:
             self.warned = True
-            log.warning("Telegram: mehr als %d Fehler in einer Stunde (Abruf %d, Senden %d), zuletzt: %s",
+            log.warning(tr("Telegram: mehr als %d Fehler in einer Stunde (Abruf %d, Senden %d), zuletzt: %s"),
                         self.limit, self.counts.get("Abruf", 0), self.counts.get("Senden", 0), error)
 
 
@@ -101,15 +103,15 @@ def connect(host: str, port: int, timeout: float, phases: dict, prefer: str = ""
         phases["addr"] = addr[0]
         if failed:
             phases["failed"] = failed
-            log.warning("Verbindung zu %s über %s, künftig zuerst; vorher: %s", host, addr[0], "; ".join(failed))
+            log.warning(tr("Verbindung zu %s über %s, künftig zuerst; vorher: %s"), host, addr[0], "; ".join(failed))
         return sock
-    raise OSError("keine Adresse erreichbar: " + "; ".join(failed))
+    raise OSError(tr("keine Adresse erreichbar: {failed}", failed="; ".join(failed)))
 
 
 def format_phases(phases: dict) -> str:
     parts = [f"{name} {phases[name]:.1f} s" for name in ("dns", "connect", "tls", "antwort") if name in phases]
     if "addr" in phases:
-        parts.append(f"über {phases['addr']}")
+        parts.append(tr("über {address}", address=phases["addr"]))
     return ", ".join(parts)
 
 
@@ -138,7 +140,7 @@ class Telegram:
         finally:
             elapsed = time.monotonic() - start
             if elapsed > SLOW_SECONDS + params.get("timeout", 0):
-                log.warning("langsam: %s brauchte %.1f s (%s)", method, elapsed, format_phases(phases))
+                log.warning(tr("langsam: %s brauchte %.1f s (%s)"), method, elapsed, format_phases(phases))
 
     def _call(self, method: str, http_timeout: float, phases: dict, body: bytes | None = None,
               content_type: str = "", **params):

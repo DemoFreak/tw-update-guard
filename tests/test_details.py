@@ -2,6 +2,7 @@ import unittest
 from html.parser import HTMLParser
 from pathlib import Path
 
+import testlang  # noqa: F401
 from twguard import details
 from twguard.details import file_html, file_name, pages, snapshot, version_change
 from twguard.zypper import Plan, Solvable, parse_plan

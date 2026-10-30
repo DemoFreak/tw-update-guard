@@ -4,6 +4,7 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
+import testlang  # noqa: F401
 from twguard import check, state
 from twguard.config import Config
 from twguard.zypper import Plan, Solvable
@@ -34,7 +35,7 @@ class CheckTest(unittest.TestCase):
         self.addCleanup(mock.patch.stopall)
 
     def cfg(self, mode):
-        return Config(token="x", chat_id=-100, hostname="server1", mode=mode, state_dir=Path(self.tmp.name))
+        return Config(language="de", token="x", chat_id=-100, hostname="server1", mode=mode, state_dir=Path(self.tmp.name))
 
     def test_observe_does_not_apply(self):
         cfg = self.cfg("observe")
@@ -54,6 +55,16 @@ class CheckTest(unittest.TestCase):
             st.approved_fingerprint = fingerprint
         check.run(cfg)
         self.apply.assert_called_once()
+
+    def test_observe_remembers_pending_until_applied(self):
+        cfg = self.cfg("observe")
+        check.run(cfg)
+        with state.locked(cfg.state_dir) as st:
+            self.assertIn("Paket", st.pending_text)
+            st.approved_fingerprint = routine_plan().fingerprint()
+        check.run(cfg)
+        with state.locked(cfg.state_dir) as st:
+            self.assertEqual(st.pending_text, "")
 
     def request(self, cfg, age=0):
         with state.locked(cfg.state_dir) as st:
@@ -196,13 +207,13 @@ class ChatMigrationConfigTest(unittest.TestCase):
     def test_remembered_migration_applies_while_config_is_old(self):
         from twguard.cli import apply_chat_migration
         with tempfile.TemporaryDirectory() as tmp:
-            cfg = Config(chat_id=-100, state_dir=Path(tmp))
+            cfg = Config(language="de", chat_id=-100, state_dir=Path(tmp))
             with state.locked(cfg.state_dir) as st:
                 st.chat_migration = {"from": -100, "to": -1009, "at": 0}
             apply_chat_migration(cfg)
             self.assertEqual(cfg.chat_id, -1009)
             # Steht schon die neue (oder eine andere) ID in der Konfiguration, bleibt sie
-            cfg = Config(chat_id=-1009, state_dir=Path(tmp))
+            cfg = Config(language="de", chat_id=-1009, state_dir=Path(tmp))
             apply_chat_migration(cfg)
             self.assertEqual(cfg.chat_id, -1009)
 

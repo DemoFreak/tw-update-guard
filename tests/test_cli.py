@@ -3,6 +3,7 @@ import io
 import unittest
 from unittest import mock
 
+import testlang  # noqa: F401
 from twguard import cli, config
 from twguard.telegram import Telegram, TelegramError
 
@@ -13,7 +14,7 @@ def run_ids(**patches):
     with contextlib.redirect_stderr(err), contextlib.redirect_stdout(out), \
          mock.patch.object(cli, "bot_running", return_value=patches.pop("running", False)), \
          mock.patch.object(Telegram, "get_updates", **patches) as get_updates:
-        rc = cli.cmd_telegram_ids(config.Config())
+        rc = cli.cmd_telegram_ids(config.Config(language="de"))
     return rc, out.getvalue(), err.getvalue(), get_updates
 
 
@@ -42,7 +43,7 @@ class TelegramIdsTest(unittest.TestCase):
     def test_cli_prints_telegram_error_without_traceback(self):
         err = io.StringIO()
         with contextlib.redirect_stderr(err), \
-             mock.patch.object(cli, "_config", return_value=config.Config()), \
+             mock.patch.object(cli, "_config", return_value=config.Config(language="de")), \
              mock.patch.object(cli, "bot_running", return_value=False), \
              mock.patch.object(Telegram, "get_updates", side_effect=TelegramError("getUpdates: timed out")):
             rc = cli.main(["telegram-ids"])

@@ -5,6 +5,7 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
+import testlang  # noqa: F401
 from twguard import ota, state
 from twguard.config import Config, Update
 
@@ -62,7 +63,7 @@ class SelfUpdateTest(CheckRemoteTest):
     def setUp(self):
         super().setUp()
         root = Path(self.tmp.name)
-        self.cfg = Config(token="x", chat_id=-100, hostname="server1", state_dir=root / "state",
+        self.cfg = Config(language="de", token="x", chat_id=-100, hostname="server1", state_dir=root / "state",
                           update=self.upd)
         self.installed, self.previous = root / "twguard", root / "twguard.prev"
         self.installed.write_text("alt")
@@ -139,7 +140,7 @@ class SelfUpdateTest(CheckRemoteTest):
 
 class StartupReportTest(unittest.TestCase):
     def setUp(self):
-        self.cfg = Config(hostname="server1")
+        self.cfg = Config(language="de", hostname="server1")
 
     def test_started_with(self):
         self.assertTrue(ota.started_with("abcdef1234567890", "abcdef123456"))

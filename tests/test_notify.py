@@ -1,6 +1,7 @@
 import time
 import unittest
 
+import testlang  # noqa: F401
 from twguard.config import Escalation
 from twguard.notify import fmt_age, in_quiet_hours, is_due, level
 from twguard.state import Issue

@@ -10,6 +10,7 @@ from __future__ import annotations
 import logging
 import time
 
+from .i18n import tr
 from .state import State
 from .telegram import Buttons, Telegram, TelegramError
 
@@ -42,7 +43,7 @@ def edit(tg: Telegram, message: dict, text: str, buttons: Buttons | None = None)
     except TelegramError as e:
         if "not modified" in str(e):
             return True
-        log.info("Nachricht %s nicht bearbeitet: %s", message.get("message_id"), e)
+        log.info(tr("Nachricht %s nicht bearbeitet: %s"), message.get("message_id"), e)
         return False
 
 
@@ -51,15 +52,15 @@ def delete(tg: Telegram, message: dict) -> bool:
         tg.delete(message["chat_id"], message["message_id"])
         return True
     except TelegramError as e:
-        log.info("Nachricht %s nicht gelöscht: %s", message.get("message_id"), e)
+        log.info(tr("Nachricht %s nicht gelöscht: %s"), message.get("message_id"), e)
         return False
 
 
-def retire(tg: Telegram, message: dict, short: str = REPLACED) -> None:
+def retire(tg: Telegram, message: dict, short: str = "") -> None:
     """Löschen; geht das nicht mehr (älter als 48 h), auf eine Zeile ohne Schaltflächen kürzen."""
     if time.time() - message.get("at", 0) < DELETE_LIMIT and delete(tg, message):
         return
-    edit(tg, message, short)
+    edit(tg, message, short or tr(REPLACED))
 
 
 def replace(tg: Telegram, st: State, topic: str, text: str, buttons: Buttons | None = None,
@@ -80,7 +81,7 @@ def edit_or_send(tg: Telegram, message: dict, text: str, buttons: Buttons | None
     try:
         return ref(tg.send(text, chat_id=message.get("chat_id"), buttons=buttons))
     except TelegramError as e:
-        log.warning("Nachricht nicht gesendet: %s", e)
+        log.warning(tr("Nachricht nicht gesendet: %s"), e)
         return None
 
 

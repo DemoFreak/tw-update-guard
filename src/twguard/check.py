@@ -10,9 +10,10 @@ from pathlib import Path
 
 from . import details, messages, state, zypper
 from .config import Config
+from .i18n import set_language, tr
 from .notify import (adopt_migration, format_issue, format_observed, format_reasons, format_report, issue_buttons,
                      observed_buttons, send_due)
-from .rules import classify, describe
+from .rules import classify, describe, plan_summary
 from .telegram import Buttons, Telegram, TelegramError
 
 log = logging.getLogger(__name__)
@@ -65,7 +66,7 @@ def finish(cfg: Config, tg: Telegram, text: str, buttons: Buttons | None = None,
 def _fail(cfg: Config, tg: Telegram, kind: str, detail: str) -> int:
     log.error("%s", detail)
     finish(cfg, tg, f"❌ <b>{escape(cfg.hostname)}</b>: {escape(detail.splitlines()[0])}\n"
-                    "Details in der Meldung oder per journalctl -u twguard-check.")
+                    + tr("Details in der Meldung oder per journalctl -u twguard-check."))
     with state.locked(cfg.state_dir) as st:
         st.open_issue(kind, detail)
         send_due(cfg, st, tg)
@@ -74,6 +75,7 @@ def _fail(cfg: Config, tg: Telegram, kind: str, detail: str) -> int:
 
 def run(cfg: Config, dry_run: bool = False) -> int:
     tg = Telegram(cfg.token, cfg.chat_id)
+    set_language(cfg.language)
     try:
         return _run(cfg, tg, dry_run)
     finally:
@@ -86,7 +88,7 @@ def _run(cfg: Config, tg: Telegram, dry_run: bool) -> int:
 
     errors = zypper.refresh()
     if errors:
-        detail = "Repos lassen sich nicht auffrischen:\n" + "\n".join(errors)
+        detail = tr("Repos lassen sich nicht auffrischen:") + "\n" + "\n".join(errors)
         if dry_run:
             print(detail)
             return 1
@@ -94,7 +96,7 @@ def _run(cfg: Config, tg: Telegram, dry_run: bool) -> int:
 
     plan = zypper.dry_run(cfg.dup_args)
     if plan.failed:
-        detail = "zypper dup --dry-run schlägt fehl:\n" + "\n".join(plan.errors)
+        detail = tr("zypper dup --dry-run schlägt fehl:") + "\n" + "\n".join(plan.errors)
         if dry_run:
             print(detail)
             return 1
@@ -105,12 +107,12 @@ def _run(cfg: Config, tg: Telegram, dry_run: bool) -> int:
     if dry_run:
         print(describe(plan))
         print()
-        print("Modus:", "Beobachtung (spielt nichts ein)" if cfg.observe else "automatisch")
-        print("Einstufung:", "Routine (würde eingespielt)" if verdict.auto else "Freigabe nötig")
+        print(tr("Modus:"), tr("Beobachtung (spielt nichts ein)") if cfg.observe else tr("automatisch"))
+        print(tr("Einstufung:"), tr("Routine (würde eingespielt)") if verdict.auto else tr("Freigabe nötig"))
         for reason in verdict.reasons:
             print("  -", reason)
         if verdict.reboot_expected:
-            print("Neustart zu erwarten")
+            print(tr("Neustart zu erwarten"))
         return 0
 
     if not plan.empty:
@@ -121,6 +123,7 @@ def _run(cfg: Config, tg: Telegram, dry_run: bool) -> int:
         st.last_check_ok = time.time()
         st.last_plan_text = describe(plan)
         st.last_plan = details.snapshot(plan)
+        st.pending_text = ""
         approved = bool(st.approved_fingerprint) and st.approved_fingerprint == fingerprint
         expired = bool(st.approved_fingerprint) and not approved
         if not approved:
@@ -129,15 +132,15 @@ def _run(cfg: Config, tg: Telegram, dry_run: bool) -> int:
             st.resolve("manual")
             send_due(cfg, st, tg)
     if plan.empty:
-        log.info("nichts zu tun")
-        finish(cfg, tg, f"✅ <b>{escape(cfg.hostname)}</b>: Prüfung fertig, keine Updates.")
+        log.info(tr("nichts zu tun"))
+        finish(cfg, tg, f"✅ <b>{escape(cfg.hostname)}</b>: " + tr("Prüfung fertig, keine Updates."))
         return 0
 
     if not (verdict.auto or approved):
-        log.info("Freigabe nötig: %s", "; ".join(verdict.reasons))
+        log.info(tr("Freigabe nötig: %s"), "; ".join(verdict.reasons))
         detail = format_reasons(verdict.reasons)
         if expired:
-            detail = "Die Freigabe galt einem älteren Stand und ist verfallen.\n\n" + detail
+            detail = tr("Die Freigabe galt einem älteren Stand und ist verfallen.") + "\n\n" + detail
         with state.locked(cfg.state_dir) as st:
             issue, _ = st.open_issue("manual", detail, fingerprint=fingerprint, approvable=verdict.approvable)
             now = time.time()
@@ -153,11 +156,12 @@ def _run(cfg: Config, tg: Telegram, dry_run: bool) -> int:
         return 0
 
     if cfg.observe and not approved:
-        log.info("Beobachtungsmodus: würde %d Pakete einspielen", plan.packages_to_change)
+        log.info(tr("Beobachtungsmodus: würde %d Pakete einspielen"), plan.packages_to_change)
         text = format_observed(cfg.hostname, plan.packages_to_change, verdict.reboot_expected)
         answered = finish(cfg, tg, text, observed_buttons(fingerprint), topic="observed")
         with state.locked(cfg.state_dir) as st:
             st.resolve("manual")
+            st.pending_text = plan_summary(plan)
             if answered:
                 st.observed_fingerprint = fingerprint
             elif st.observed_fingerprint != fingerprint:
@@ -165,22 +169,22 @@ def _run(cfg: Config, tg: Telegram, dry_run: bool) -> int:
                     messages.replace(tg, st, "observed", text, observed_buttons(fingerprint), silent=True)
                     st.observed_fingerprint = fingerprint
                 except TelegramError as e:
-                    log.warning("Meldung nicht gesendet: %s", e)
+                    log.warning(tr("Meldung nicht gesendet: %s"), e)
             send_due(cfg, st, tg)
         return 0
 
-    log.info("spiele %d Pakete ein (%s)", plan.packages_to_change, "freigegeben" if approved else "Routine")
+    log.info(tr("spiele %d Pakete ein (%s)"), plan.packages_to_change, tr("freigegeben") if approved else tr("Routine"))
     rc, output, applied = zypper.apply(cfg.dup_args)
-    log.info("zypper dup: Exit-Code %s\n%s", rc, "\n".join(output.splitlines()[-200:]))
+    log.info(tr("zypper dup: Exit-Code %s\n%s"), rc, "\n".join(output.splitlines()[-200:]))
     if rc not in zypper.OK_CODES:
         tail = "\n".join(output.strip().splitlines()[-15:])
-        return _fail(cfg, tg, "apply-failed", f"zypper dup endete mit Exit-Code {rc}:\n{tail}")
+        return _fail(cfg, tg, "apply-failed", tr("zypper dup endete mit Exit-Code {rc}:\n{tail}", rc=rc, tail=tail))
     deviation, unverified = [], applied.empty
     if unverified:
-        log.warning("Plan des Einspielens nicht lesbar, Abgleich mit dem Probelauf entfällt")
+        log.warning(tr("Plan des Einspielens nicht lesbar, Abgleich mit dem Probelauf entfällt"))
     elif applied.fingerprint() != fingerprint:
-        deviation = zypper.diff_plans(plan, applied) or ["(Unterschied nicht darstellbar, siehe Journal)"]
-        log.warning("eingespielter Plan weicht vom geprüften ab:\n%s", "\n".join(deviation))
+        deviation = zypper.diff_plans(plan, applied) or [tr("(Unterschied nicht darstellbar, siehe Journal)")]
+        log.warning(tr("eingespielter Plan weicht vom geprüften ab:\n%s"), "\n".join(deviation))
     warn = bool(deviation) or unverified
 
     reboot = rc == zypper.EXIT_REBOOT_NEEDED or zypper.needs_rebooting() is True
@@ -190,7 +194,7 @@ def _run(cfg: Config, tg: Telegram, dry_run: bool) -> int:
         st.resolve("apply-failed")
         st.approved_fingerprint = ""
         if reboot and "reboot" not in st.issues:
-            st.open_issue("reboot", "Nach dem Update ist ein Neustart nötig (Kernel oder Systembibliotheken).")
+            st.open_issue("reboot", tr("Nach dem Update ist ein Neustart nötig (Kernel oder Systembibliotheken)."))
         send_due(cfg, st, tg)
     report = format_report(cfg.hostname, plan.packages_to_change, approved, reboot, services, deviation, unverified)
     # Berichte bleiben bis zum nächsten Briefing stehen; das fasst sie zusammen und löscht sie
@@ -201,7 +205,7 @@ def _run(cfg: Config, tg: Telegram, dry_run: bool) -> int:
             silent = not (approved or warn)
             entry = {**messages.ref(tg.send(report, silent=silent)), "packages": plan.packages_to_change}
         except TelegramError as e:
-            log.warning("Bericht nicht gesendet: %s", e)
+            log.warning(tr("Bericht nicht gesendet: %s"), e)
     with state.locked(cfg.state_dir) as st:
         st.reports.append(entry)
     return 0

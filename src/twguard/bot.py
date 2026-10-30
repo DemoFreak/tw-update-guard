@@ -18,8 +18,9 @@ from pathlib import Path
 
 from . import COMMIT, __version__, details, messages, ota, state, zypper
 from .config import Config
-from .notify import (TITLES, adopt_migration, clip, fmt_age, format_briefing, format_issue, format_status, issue_buttons,
-                     mark_resolved, minutes_of_day, send_due)
+from .i18n import EN, set_language, tr
+from .notify import (adopt_migration, clip, fmt_age, format_briefing, format_issue, format_status, issue_buttons,
+                     mark_resolved, minutes_of_day, send_due, stamp, title)
 from .telegram import Buttons, Telegram, TelegramError
 
 log = logging.getLogger(__name__)
@@ -71,12 +72,16 @@ MENU = [
 # Feste Tastatur: Text des Knopfs → Befehl an alle Server
 # Eine Taste sendet nur ihre Beschriftung; der Bot übersetzt sie hier in den Befehl.
 # Eine neue Taste versteht ein Bot deshalb erst, wenn er selbst die Version mit ihr hat.
-KEYS = {"📊 Status": "status", "🔄 Alle prüfen": "checkall",
-        "⬆️ Update": "update", "🏷️ Version": "version", "❓ Hilfe": "help"}
+KEY_LABELS = {"📊 Status": "status", "🔄 Alle prüfen": "checkall",
+              "⬆️ Update": "update", "🏷️ Version": "version", "❓ Hilfe": "help"}
+# In einer Gruppe können Server verschiedener Sprachen laufen, die Tastatur stammt aber nur von
+# einem Bot: Jeder versteht deshalb die Beschriftungen aller Sprachen
+KEYS = {**KEY_LABELS, **{EN.get(label, label): command for label, command in KEY_LABELS.items()}}
 # Die Tasten hängen an der Nachricht, die sie eingeblendet hat: wird sie gelöscht, verschwinden sie.
 # Zwei Reihen, damit die Beschriftungen auch auf dem Telefon lesbar bleiben
-_KEY_TEXTS = list(KEYS)
-KEYBOARD = {"keyboard": [[{"text": t} for t in row] for row in (_KEY_TEXTS[:2], _KEY_TEXTS[2:])],
+def keyboard_markup() -> dict:
+    labels = [tr(label) for label in KEY_LABELS]
+    return {"keyboard": [[{"text": t} for t in row] for row in (labels[:2], labels[2:])],
             "is_persistent": True, "resize_keyboard": True}
 
 
@@ -112,6 +117,7 @@ def plain(html: str) -> str:
 
 class Bot:
     def __init__(self, cfg: Config, tg: Telegram | None = None, me: dict | None = None):
+        set_language(cfg.language)
         self.cfg = cfg
         self.tg = tg or Telegram(cfg.token, cfg.chat_id, cfg.max_errors_per_hour)
         self.me = me
@@ -147,9 +153,9 @@ class Bot:
             try:
                 self.me = self.tg.get_me()
             except TelegramError as e:
-                log.warning("Telegram nicht erreichbar: %s", e)
+                log.warning(tr("Telegram nicht erreichbar: %s"), e)
                 time.sleep(30)
-        log.info("angemeldet als @%s", self.me["username"])
+        log.info(tr("angemeldet als @%s"), self.me["username"])
         self.startup()
         failures = 0
         while True:
@@ -169,15 +175,15 @@ class Bot:
 
     def startup(self) -> None:
         try:
-            self.tg.set_commands(MENU)
+            self.tg.set_commands([(command, tr(text)) for command, text in MENU])
         except TelegramError as e:
-            log.warning("Befehlsmenü nicht gesetzt: %s", e)
+            log.warning(tr("Befehlsmenü nicht gesetzt: %s"), e)
         with state.locked(self.cfg.state_dir) as st:
             self.offset = st.tg_offset
             st.first_seen = st.first_seen or time.time()
             if st.reboot_requested_at and boot_time() > st.reboot_requested_at:
                 st.reboot_requested_at = 0.0
-                text = f"🟢 <b>{self.host}</b> ist wieder da (Kernel {escape(os.uname().release)})."
+                text = tr("🟢 <b>{host}</b> ist wieder da (Kernel {kernel}).", host=self.host, kernel=escape(os.uname().release))
                 previous = st.messages.pop("reboot", None)
                 if previous:
                     messages.edit_or_send(self.tg, previous, text)
@@ -198,7 +204,7 @@ class Bot:
             else:
                 self.handle(update.get("message") or {})
         except Exception:
-            log.exception("Befehl fehlgeschlagen")
+            log.exception(tr("Befehl fehlgeschlagen"))
         self.sync_migration()
 
     def sync_migration(self) -> None:
@@ -218,7 +224,7 @@ class Bot:
         with state.locked(self.cfg.state_dir) as st:
             rpmdb_changed = bool(st.rpmdb_mtime) and mtime != st.rpmdb_mtime
             st.rpmdb_mtime = mtime
-            pending = any(k in st.issues for k in ("manual", "apply-failed"))
+            pending = bool(st.pending_text) or any(k in st.issues for k in ("manual", "apply-failed"))
         if rpmdb_changed:
             # Jemand hat Pakete geändert, z. B. per SSH selbst `zypper dup` ausgeführt
             self.check_reboot()
@@ -232,8 +238,8 @@ class Bot:
             base = st.last_check_ok or st.first_seen
             stale = base and now - base > self.cfg.escalation.stale_after_hours * 3600
             if stale and "stale" not in st.issues and "error" not in st.issues:
-                st.open_issue("stale", f"Seit {fmt_age(now - base)} keine erfolgreiche Prüfung. "
-                                       "Läuft twguard-check.timer?", now=now)
+                st.open_issue("stale", tr("Seit {age} keine erfolgreiche Prüfung. Läuft twguard-check.timer?",
+                                          age=fmt_age(now - base)), now=now)
             elif not stale:
                 st.resolve("stale")
             self._report_update(st, now)
@@ -256,16 +262,16 @@ class Bot:
                                    os.uname().release, now - boot_time())
             try:
                 messages.replace(self.tg, st, "briefing", text,
-                                 buttons=[[("📊 Status", "status"), ("🔄 Jetzt prüfen", "check")]],
+                                 buttons=[[("📊 Status", "status"), (tr("🔄 Jetzt prüfen"), "check")]],
                                  silent=self.cfg.briefing.silent and not st.issues)
             except TelegramError as e:
-                log.debug("Briefing nicht gesendet: %s", e)
+                log.debug(tr("Briefing nicht gesendet: %s"), e)
                 return
             st.last_briefing_day = today
             # Die Update-Berichte stehen jetzt im Briefing
             for report in st.reports:
                 if report.get("message_id"):
-                    messages.retire(self.tg, report, "✅ eingespielt, siehe Briefing")
+                    messages.retire(self.tg, report, tr("✅ eingespielt, siehe Briefing"))
             st.reports = []
 
     def check_reboot(self) -> None:
@@ -275,7 +281,7 @@ class Bot:
             return
         with state.locked(self.cfg.state_dir) as st:
             if needed and "reboot" not in st.issues:
-                st.open_issue("reboot", "zypper needs-rebooting meldet einen ausstehenden Neustart.")
+                st.open_issue("reboot", tr("zypper needs-rebooting meldet einen ausstehenden Neustart."))
             elif not needed and st.resolve("reboot"):
                 mark_resolved(self.cfg, st, self.tg)
 
@@ -302,14 +308,14 @@ class Bot:
         if not text.startswith("/"):
             return
         if msg.get("date", 0) < time.time() - MAX_COMMAND_AGE:
-            log.info("veralteten Befehl ignoriert: %s", text)
+            log.info(tr("veralteten Befehl ignoriert: %s"), text)
             return
         user = (msg.get("from") or {}).get("id")
         if user not in self.cfg.allowed_user_ids or chat.get("id") not in (self.cfg.chat_id, user):
-            log.warning("Befehl von %s in Chat %s ignoriert (nicht freigegeben)", user, chat.get("id"))
+            log.warning(tr("Befehl von %s in Chat %s ignoriert (nicht freigegeben)"), user, chat.get("id"))
             if user in self.cfg.allowed_user_ids and chat.get("type") == "supergroup":
-                log.warning("Falls die Gruppe zur Supergruppe wurde: chat_id = %s in config.toml eintragen "
-                            "(bisher %s)", chat.get("id"), self.cfg.chat_id)
+                log.warning(tr("Falls die Gruppe zur Supergruppe wurde: chat_id = %s in config.toml eintragen "
+                            "(bisher %s)"), chat.get("id"), self.cfg.chat_id)
             return
 
         word, *args = text.split()
@@ -324,7 +330,7 @@ class Bot:
         entry = self.commands.get(cmd.lower())
         if entry is None:
             if addressed:
-                self._deliver(msg, Out("Unbekannter Befehl. /help zeigt die Befehle.", ttl=SHORT))
+                self._deliver(msg, Out(tr("Unbekannter Befehl. /help zeigt die Befehle."), ttl=SHORT))
                 self._delete_command(msg)
             return
         func, needs_address = entry
@@ -342,8 +348,8 @@ class Bot:
         with state.locked(self.cfg.state_dir) as st:
             text = format_status(self.cfg.hostname, st, time.time())
         if self.cfg.observe:
-            text += "\n<i>Beobachtungsmodus: Updates werden nur gemeldet.</i>"
-        return text, [[("🔄 Jetzt prüfen", "check"), ("📋 Details", "details")]]
+            text += f"\n<i>{tr('Beobachtungsmodus: Updates werden nur gemeldet.')}</i>"
+        return text, [[(tr("🔄 Jetzt prüfen"), "check"), ("📋 Details", "details")]]
 
     def details_view(self, arg: str = "", back: bool = False) -> tuple[str, Buttons]:
         """Eine Seite der Paketliste; `arg` ist "ansicht:seite" aus der Schaltfläche."""
@@ -351,14 +357,14 @@ class Bot:
         view = view if view in details.VIEWS else details.VIEWS[0]
         with state.locked(self.cfg.state_dir) as st:
             plan, text = st.last_plan, st.last_plan_text
-        back_row = [[("◀️ Zurück", "back")]] if back else []
+        back_row = [[(tr("◀️ Zurück"), "back")]] if back else []
         if not plan:
             # Noch kein Prüflauf seit dem Update auf diese Version
-            text = text or "Noch kein Probelauf."
+            text = text or tr("Noch kein Probelauf.")
             return f"<b>{self.host}</b>\n<pre>{escape(clip(text, 3500))}</pre>", back_row
         all_pages = details.pages(plan, view)
         page = min(max(int(number) if number.isdigit() else 1, 1), len(all_pages))
-        other, label = ("version", "🔢 Nach Version") if view == "name" else ("name", "🔤 Nach Name")
+        other, label = ("version", tr("🔢 Nach Version")) if view == "name" else ("name", tr("🔤 Nach Name"))
         nav = [("⬅️", f"details:{view}:{page - 1}")] if page > 1 else []
         if len(all_pages) > 1:
             nav.append((f"{page}/{len(all_pages)}", f"details:{view}:{page}"))
@@ -366,7 +372,7 @@ class Bot:
             nav.append(("➡️", f"details:{view}:{page + 1}"))
         first = [(label, f"details:{other}:1")]
         if plan.get("rows"):
-            first.append(("📄 Als Datei", "file"))
+            first.append((tr("📄 Als Datei"), "file"))
         rows = [first, *([nav] if nav else []), *back_row]
         return f"<b>{self.host}</b>\n{all_pages[page - 1]}", rows
 
@@ -381,7 +387,7 @@ class Bot:
         return Out(self.approved_text(), topic="status", start_check=True)
 
     def approved_text(self) -> str:
-        return f"⏳ Freigegeben. <b>{self.host}</b> spielt das Update ein; das Ergebnis erscheint hier."
+        return tr("⏳ Freigegeben. <b>{host}</b> spielt das Update ein; das Ergebnis erscheint hier.", host=self.host)
 
     def approve(self, fingerprint: str = "") -> str:
         """Freigabe erteilen; Rückgabe: Fehlertext oder leer. Mit Fingerabdruck nur für genau diesen Stand."""
@@ -391,18 +397,18 @@ class Bot:
                 # Beobachtungsmodus: einzelnes Routine-Update trotzdem einspielen
                 st.approved_fingerprint = fingerprint
             elif issue is None:
-                return "Es liegt kein Update zur Freigabe vor."
+                return tr("Es liegt kein Update zur Freigabe vor.")
             elif not issue.approvable or not issue.fingerprint:
-                return "Das lässt sich nicht per Telegram freigeben, bitte per SSH lösen."
+                return tr("Das lässt sich nicht per Telegram freigeben, bitte per SSH lösen.")
             elif fingerprint and fingerprint != issue.fingerprint:
-                return "Diese Meldung gilt einem älteren Stand. /status zeigt den aktuellen."
+                return tr("Diese Meldung gilt einem älteren Stand. /status zeigt den aktuellen.")
             else:
                 st.approved_fingerprint = issue.fingerprint
         return ""
 
     def checking_text(self) -> str:
-        return (f"🔄 <b>{self.host}</b>: Prüfung läuft (Repos auffrischen, Probelauf); "
-                "das Ergebnis erscheint hier, meist nach ein bis zwei Minuten.")
+        return tr("🔄 <b>{host}</b>: Prüfung läuft (Repos auffrischen, Probelauf); "
+                  "das Ergebnis erscheint hier, meist nach ein bis zwei Minuten.", host=self.host)
 
     def cmd_check(self, args: list[str], addressed: bool = False) -> Out:
         return Out(self.checking_text(), topic="status", start_check=True)
@@ -410,7 +416,7 @@ class Bot:
     def cmd_later(self, args: list[str], addressed: bool = False) -> Out:
         hours = parse_duration(args[0]) if args else 24
         if hours is None:
-            return Out("Format: /later 12h oder /later 2d", ttl=SHORT)
+            return Out(tr("Format: /later 12h oder /later 2d"), ttl=SHORT)
         return Out(self.snooze(hours), ttl=SHORT)
 
     def snooze(self, hours: float, kinds: list[str] | None = None) -> str:
@@ -421,20 +427,19 @@ class Bot:
         with state.locked(self.cfg.state_dir) as st:
             issues = [i for i in st.issues.values() if kinds is None or i.kind in kinds]
             if not issues:
-                return "Es ist nichts offen."
+                return tr("Es ist nichts offen.")
             for issue in issues:
-                title = TITLES.get(issue.kind, issue.kind)
                 if issue.snooze_count >= esc.max_snoozes:
-                    refused.append(title)
+                    refused.append(title(issue.kind))
                     continue
                 issue.snoozed_until = now + hours * 3600
                 issue.snooze_count += 1
-                done.append(title)
+                done.append(title(issue.kind))
         lines = []
         if done:
-            lines.append(f"Aufgeschoben um {hours:g} Stunden: {', '.join(done)}")
+            lines.append(tr("Aufgeschoben um {hours} Stunden: {titles}", hours=f"{hours:g}", titles=", ".join(done)))
         if refused:
-            lines.append(f"Nicht weiter aufschiebbar: {', '.join(refused)}")
+            lines.append(tr("Nicht weiter aufschiebbar: {titles}", titles=", ".join(refused)))
         return "\n".join(lines)
 
     def reboot(self) -> str:
@@ -442,14 +447,14 @@ class Bot:
         p = subprocess.run(["shutdown", "-r", "+1", "twguard: Neustart per Telegram"],
                            capture_output=True, text=True)
         if p.returncode:
-            return f"Neustart fehlgeschlagen: {escape(p.stderr.strip())}"
+            return tr("Neustart fehlgeschlagen: {error}", error=escape(p.stderr.strip()))
         with state.locked(self.cfg.state_dir) as st:
             st.reboot_requested_at = time.time()
         return ""
 
     def reboot_view(self) -> tuple[str, Buttons]:
-        return (f"🔁 <b>{self.host}</b> startet in 1 Minute neu; danach steht das Ergebnis hier.",
-                [[("✖️ Neustart abbrechen", "cancel")]])
+        return (tr("🔁 <b>{host}</b> startet in 1 Minute neu; danach steht das Ergebnis hier.", host=self.host),
+                [[(tr("✖️ Neustart abbrechen"), "cancel")]])
 
     def cmd_reboot(self, args: list[str], addressed: bool = False) -> Out:
         error = self.reboot()
@@ -464,8 +469,8 @@ class Bot:
         with state.locked(self.cfg.state_dir) as st:
             st.reboot_requested_at = 0.0
         if p.returncode:
-            return f"Abbrechen fehlgeschlagen: {escape(p.stderr.strip())}"
-        return f"✖️ <b>{self.host}</b>: Neustart abgebrochen."
+            return tr("Abbrechen fehlgeschlagen: {error}", error=escape(p.stderr.strip()))
+        return tr("✖️ <b>{host}</b>: Neustart abgebrochen.", host=self.host)
 
     def cmd_cancel(self, args: list[str], addressed: bool = False) -> Out | None:
         text = self.cancel()
@@ -479,19 +484,19 @@ class Bot:
         """Neuen Stand holen und zur Bestätigung anbieten."""
         with state.locked(self.cfg.state_dir) as st:
             if st.update_request:
-                return Out(f"<b>{self.host}</b>: Ein Update läuft bereits.", ttl=SHORT)
+                return Out(tr("<b>{host}</b>: Ein Update läuft bereits.", host=self.host), ttl=SHORT)
         try:
             pending = ota.check_remote(self.cfg.update)
         except ota.UpdateError as e:
             return Out(f"<b>{self.host}</b>: {escape(str(e))}", ttl=LONG)
         if not pending.commits:
-            return Out(f"<b>{self.host}</b>: twguard ist aktuell ({escape(COMMIT)}).", ttl=SHORT)
+            return Out(tr("<b>{host}</b>: twguard ist aktuell ({commit}).", host=self.host, commit=escape(COMMIT)), ttl=SHORT)
         shown = "\n".join(pending.commits[:15])
         if len(pending.commits) > 15:
-            shown += f"\n… und {len(pending.commits) - 15} weitere"
-        text = (f"⬆️ <b>{self.host}</b>: {len(pending.commits)} neue Commits für twguard "
-                f"(läuft mit {escape(COMMIT)}):\n<pre>{escape(clip(shown, 2500))}</pre>")
-        return Out(text, [[("⬆️ Einspielen", f"update:{pending.target}"), ("✖️ Abbrechen", "dismiss")]],
+            shown += "\n" + tr("… und {n} weitere", n=len(pending.commits) - 15)
+        text = tr("⬆️ <b>{host}</b>: {n} neue Commits für twguard (läuft mit {commit}):\n<pre>{commits}</pre>",
+                  host=self.host, n=len(pending.commits), commit=escape(COMMIT), commits=escape(clip(shown, 2500)))
+        return Out(text, [[(tr("⬆️ Einspielen"), f"update:{pending.target}"), (tr("✖️ Abbrechen"), "dismiss")]],
                    topic="update")
 
     def update_go(self, commit: str, pressed: dict) -> str:
@@ -504,12 +509,12 @@ class Bot:
         except ota.UpdateError as e:
             return f"<b>{self.host}</b>: {escape(str(e))}"
         if pending.target != commit:
-            return "Inzwischen gibt es einen anderen Stand. Bitte /update erneut."
+            return tr("Inzwischen gibt es einen anderen Stand. Bitte /update erneut.")
         if not pending.commits:
-            return f"<b>{self.host}</b>: twguard ist schon aktuell."
+            return tr("<b>{host}</b>: twguard ist schon aktuell.", host=self.host)
         with state.locked(self.cfg.state_dir) as st:
             if st.update_request:
-                return "Ein Update läuft bereits."
+                return tr("Ein Update läuft bereits.")
             messages.release(st, pressed["message_id"])
             st.update_request = {"commit": commit, "chat_id": pressed["chat_id"],
                                  "message_id": pressed["message_id"], "at": time.time()}
@@ -517,14 +522,14 @@ class Bot:
         if error:
             with state.locked(self.cfg.state_dir) as st:
                 st.update_request = {}
-            return f"Update nicht gestartet: {escape(error)}"
+            return tr("Update nicht gestartet: {error}", error=escape(error))
         return ""
 
     def cmd_version(self, args: list[str], addressed: bool = False) -> Out:
         return Out(self.version_line(), ttl=LONG)
 
     def version_line(self) -> str:
-        mode = "Beobachtung" if self.cfg.observe else "automatisch"
+        mode = tr("Beobachtung") if self.cfg.observe else tr("automatisch")
         return (f"🖥 <b>{self.host}</b> (@{escape(self.me['username'])}) · twguard {escape(__version__)} "
                 f"({escape(COMMIT)}) · {mode}")
 
@@ -533,7 +538,7 @@ class Bot:
         # welche Server erreichbar sind, zeigen /status und /version
         if not (addressed or self.cfg.help_full):
             return None
-        return Out(self.version_line() + "\n\n" + escape(HELP), topic="help", ttl=LONG)
+        return Out(self.version_line() + "\n\n" + escape(tr(HELP)), topic="help", ttl=LONG)
 
     def cmd_keyboard(self, args: list[str], addressed: bool = False) -> Out | None:
         """Tastatur ein- oder ausblenden; die Nachricht dazu ist die einzige, die stehen bleiben muss."""
@@ -544,10 +549,10 @@ class Bot:
             if removed:
                 return None  # mit der Nachricht sind auch die Tasten weg
             if previous:
-                return Out("Die Tastatur-Nachricht ist älter als 48 Stunden; bitte von Hand löschen.", ttl=SHORT)
-            return Out("Dieser Bot hat keine Tastatur eingeblendet.", ttl=SHORT)
-        return Out("⌨️ Tastatur für alle Server. Diese Nachricht nicht löschen, sonst verschwinden die Tasten "
-                   "(/keyboard off blendet sie aus).", markup=KEYBOARD, topic="keyboard")
+                return Out(tr("Die Tastatur-Nachricht ist älter als 48 Stunden; bitte von Hand löschen."), ttl=SHORT)
+            return Out(tr("Dieser Bot hat keine Tastatur eingeblendet."), ttl=SHORT)
+        return Out(tr("⌨️ Tastatur für alle Server. Diese Nachricht nicht löschen, sonst verschwinden die Tasten "
+                      "(/keyboard off blendet sie aus)."), markup=keyboard_markup(), topic="keyboard")
 
     # --- Schaltflächen ----------------------------------------------------
 
@@ -560,8 +565,8 @@ class Bot:
         user = (cq.get("from") or {}).get("id")
         chat = msg.get("chat") or {}
         if user not in self.cfg.allowed_user_ids or chat.get("id") not in (self.cfg.chat_id, user):
-            log.warning("Schaltfläche von %s in Chat %s ignoriert (nicht freigegeben)", user, chat.get("id"))
-            self._answer(cq, "Nicht berechtigt.")
+            log.warning(tr("Schaltfläche von %s in Chat %s ignoriert (nicht freigegeben)"), user, chat.get("id"))
+            self._answer(cq, tr("Nicht berechtigt."))
             return
         pressed = {"chat_id": chat.get("id"), "message_id": msg.get("message_id"), "at": msg.get("date", 0)}
         action, _, arg = (cq.get("data") or "").partition(":")
@@ -579,7 +584,7 @@ class Bot:
             "dismiss": self.press_dismiss,
         }.get(action)
         if handler is None:
-            self._answer(cq, "Unbekannte Schaltfläche.")
+            self._answer(cq, tr("Unbekannte Schaltfläche."))
             return
         handler(cq, pressed, arg)
 
@@ -588,7 +593,7 @@ class Bot:
         if error:
             self._answer(cq, plain(error), alert=True)
             return
-        self._answer(cq, "Freigegeben")
+        self._answer(cq, tr("Freigegeben"))
         self._take_over(pressed, self.approved_text(), request=True)
         self.start_check()
 
@@ -613,15 +618,15 @@ class Bot:
         with state.locked(self.cfg.state_dir) as st:
             plan, at = st.last_plan, st.last_check_ok or time.time()
         if not plan.get("rows"):
-            self._answer(cq, "Keine Paketliste vorhanden.")
+            self._answer(cq, tr("Keine Paketliste vorhanden."))
             return
         html_text = details.file_html(plan, self.cfg.hostname, at)
         try:
             sent = self.tg.send_document(pressed["chat_id"], details.file_name(self.cfg.hostname, at),
                                          html_text.encode(), f"📄 <b>{self.host}</b>: {escape(plan['summary'])}")
         except TelegramError as e:
-            log.debug("Datei nicht gesendet: %s", e)
-            self._answer(cq, "Datei konnte nicht gesendet werden.", alert=True)
+            log.debug(tr("Datei nicht gesendet: %s"), e)
+            self._answer(cq, tr("Datei konnte nicht gesendet werden."), alert=True)
             return
         self._answer(cq)
         with state.locked(self.cfg.state_dir) as st:
@@ -634,7 +639,7 @@ class Bot:
         with state.locked(self.cfg.state_dir) as st:
             original = st.collapsed.pop(str(pressed["message_id"]), None)
         if original is None:
-            self._answer(cq, "Nicht mehr verfügbar.")
+            self._answer(cq, tr("Nicht mehr verfügbar."))
             messages.edit(self.tg, pressed, self.details_view()[0])
             return
         self._answer(cq)
@@ -642,7 +647,7 @@ class Bot:
             self.tg.edit_raw(pressed["chat_id"], pressed["message_id"], original["text"],
                              original["entities"], original["reply_markup"])
         except TelegramError as e:
-            log.warning("Details nicht zurückgeklappt: %s", e)
+            log.warning(tr("Details nicht zurückgeklappt: %s"), e)
 
     def press_later(self, cq: dict, pressed: dict, arg: str) -> None:
         hours_text, _, kind = arg.partition(":")
@@ -652,12 +657,12 @@ class Bot:
             if issue is None or issue.snoozed_until <= time.time():
                 return
             text = format_issue(self.cfg.hostname, issue, time.time(), self.cfg.escalation)
-            text += time.strftime("\n\n⏰ Aufgeschoben bis %d.%m. %H:%M", time.localtime(issue.snoozed_until))
+            text += tr("\n\n⏰ Aufgeschoben bis {when}", when=stamp(issue.snoozed_until))
             buttons = issue_buttons(issue, later=False)
         messages.edit(self.tg, pressed, text, buttons)
 
     def press_check(self, cq: dict, pressed: dict, arg: str) -> None:
-        self._answer(cq, "Prüfung läuft …")
+        self._answer(cq, tr("Prüfung läuft …"))
         with state.locked(self.cfg.state_dir) as st:
             on_status = st.messages.get("status", {}).get("message_id") == pressed["message_id"]
         if on_status:
@@ -683,7 +688,7 @@ class Bot:
         if error:
             self._answer(cq, plain(error), alert=True)
             return
-        self._answer(cq, "Neustart in 1 Minute")
+        self._answer(cq, tr("Neustart in 1 Minute"))
         text, buttons = self.reboot_view()
         self._take_over(pressed, text, buttons, topic="reboot")
 
@@ -700,16 +705,16 @@ class Bot:
             self._answer(cq, plain(error), alert=True)
             messages.edit(self.tg, pressed, error)
             return
-        self._answer(cq, "Update läuft …")
-        messages.edit(self.tg, pressed, f"⏳ <b>{self.host}</b>: Update auf {escape(commit[:12])} läuft, "
-                                        "der Bot startet gleich neu; das Ergebnis erscheint hier.")
+        self._answer(cq, tr("Update läuft …"))
+        messages.edit(self.tg, pressed, tr("⏳ <b>{host}</b>: Update auf {commit} läuft, der Bot startet gleich neu; "
+                                           "das Ergebnis erscheint hier.", host=self.host, commit=escape(commit[:12])))
 
     def press_dismiss(self, cq: dict, pressed: dict, arg: str) -> None:
         self._answer(cq)
         with state.locked(self.cfg.state_dir) as st:
             messages.release(st, pressed["message_id"])
         if not messages.delete(self.tg, pressed):
-            messages.edit(self.tg, pressed, "✖️ verworfen")
+            messages.edit(self.tg, pressed, tr("✖️ verworfen"))
 
     # --- Hilfsfunktionen --------------------------------------------------
 
@@ -743,7 +748,7 @@ class Bot:
                 if out.start_check:
                     st.check_request = messages.ref(sent)
         except TelegramError as e:
-            log.debug("Antwort nicht gesendet: %s", e)
+            log.debug(tr("Antwort nicht gesendet: %s"), e)
             return
         if out.start_check:
             self.start_check()
@@ -757,27 +762,27 @@ class Bot:
         except TelegramError as e:
             # Bei Befehlen an alle hat ein anderer Bot ihn vielleicht schon gelöscht
             if "not found" not in str(e) and not self.delete_warned:
-                log.warning("Befehle werden nicht gelöscht (Bot braucht das Admin-Recht "
-                            "„Nachrichten löschen“): %s", e)
+                log.warning(tr("Befehle werden nicht gelöscht (Bot braucht das Admin-Recht "
+                            "„Nachrichten löschen“): %s"), e)
                 self.delete_warned = True
 
     def _send(self, text: str, silent: bool = False) -> None:
         try:
             self.tg.send(text, silent=silent)
         except TelegramError as e:
-            log.debug("Nachricht nicht gesendet: %s", e)
+            log.debug(tr("Nachricht nicht gesendet: %s"), e)
 
     def _typing(self, chat_id: int) -> None:
         try:
             self.tg.typing(chat_id)
         except TelegramError as e:
-            log.warning("Tippanzeige nicht gesendet: %s", e)
+            log.warning(tr("Tippanzeige nicht gesendet: %s"), e)
 
     def _answer(self, cq: dict, text: str = "", alert: bool = False) -> None:
         try:
             self.tg.answer_callback(cq["id"], text, alert=alert)
         except (TelegramError, KeyError) as e:
-            log.warning("Schaltfläche nicht bestätigt: %s", e)
+            log.warning(tr("Schaltfläche nicht bestätigt: %s"), e)
 
     def _report_update(self, st: state.State, now: float | None = None) -> None:
         result = ota.startup_report(self.cfg, st, now)

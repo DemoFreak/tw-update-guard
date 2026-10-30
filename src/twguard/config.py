@@ -9,6 +9,7 @@ import tomllib
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from .i18n import LANGUAGES, tr
 from .rules import Rules
 
 DEFAULT_PATH = Path("/etc/twguard/config.toml")
@@ -60,6 +61,8 @@ class Config:
     report_routine: bool = True
     # observe: nur prüfen und melden; auto: Routine-Updates einspielen
     mode: str = "observe"
+    # Sprache der Telegram-Ausgabe (i18n.LANGUAGES)
+    language: str = "en"
     state_dir: Path = DEFAULT_STATE_DIR
     rules: Rules = field(default_factory=Rules)
     escalation: Escalation = field(default_factory=Escalation)
@@ -88,6 +91,7 @@ def load(path: str | Path | None = None) -> Config:
             dup_args=list(general.get("dup_args", [])),
             report_routine=bool(general.get("report_routine", True)),
             mode=general.get("mode", "observe"),
+            language=general.get("language", "en"),
             state_dir=Path(os.environ.get("TWGUARD_STATE_DIR") or general.get("state_dir") or DEFAULT_STATE_DIR),
             rules=Rules(**data.get("rules", {})),
             escalation=Escalation(**data.get("escalation", {})),
@@ -95,7 +99,11 @@ def load(path: str | Path | None = None) -> Config:
             briefing=Briefing(**data.get("briefing", {})),
         )
     except TypeError as e:
-        raise SystemExit(f"{path}: unbekannter Eintrag ({e})") from e
+        raise SystemExit(tr("{path}: unbekannter Eintrag ({error})", path=path, error=e)) from e
     if cfg.mode not in MODES:
-        raise SystemExit(f"{path}: mode muss einer von {', '.join(MODES)} sein, nicht {cfg.mode!r}")
+        raise SystemExit(tr("{path}: {key} muss einer von {allowed} sein, nicht {value}", path=path, key="mode",
+                            allowed=", ".join(MODES), value=repr(cfg.mode)))
+    if cfg.language not in LANGUAGES:
+        raise SystemExit(tr("{path}: {key} muss einer von {allowed} sein, nicht {value}", path=path, key="language",
+                            allowed=", ".join(LANGUAGES), value=repr(cfg.language)))
     return cfg

@@ -1,130 +1,132 @@
 # tw-update-guard (twguard)
 
-🇬🇧 **English:** twguard keeps headless openSUSE Tumbleweed servers up to date. It installs routine updates (`zypper dup`) by itself, reports risky ones, pending reboots and errors through one Telegram bot per server, and keeps reminding you until the issue is resolved. The user interface is currently German; multilingual output is planned. See [README.en.md](README.en.md) and [INSTALL.en.md](INSTALL.en.md).
+🇩🇪 [Deutsche Fassung](README.de.md) · **Installation:** short guide in [INSTALL.md](INSTALL.md)
 
-**Installation:** Kurzanleitung in [INSTALL.md](INSTALL.md).
+A service for headless openSUSE Tumbleweed servers. It installs routine updates (`zypper dup`) by itself and reports anything risky through Telegram. It keeps reminding you until the issue is actually resolved; reading the message is not enough.
 
-Ein Dienst für headless openSUSE-Tumbleweed-Server. Er spielt Routine-Updates (`zypper dup`) selbst ein und meldet alles Heikle über Telegram. Er hakt so lange nach, bis der Punkt erledigt ist. Ein „gelesen“ reicht dafür nicht.
+Telegram messages, the `twguard` command line output, `--help` and the log lines (journal) are available in English (the default) and German (`language = "de"` in `[general]`).
 
-## Ablauf
+## How it works
 
-1. **Täglich** (`twguard-check.timer`, 03:30 ± 30 min): `zypper refresh`, dann `zypper dup --dry-run --details` mit XML-Ausgabe.
-2. **Einstufung** nach festen Regeln (`[rules]` in der Konfiguration):
+1. **Daily** (`twguard-check.timer`, 03:30 ± 30 min): `zypper refresh`, then `zypper dup --dry-run --details` with XML output.
+2. **Classification** by fixed rules (`[rules]` in the configuration):
 
-   | Fall | Einstufung |
+   | Case | Result |
    |---|---|
-   | Normale Updates, Kernel, entfernte alte Bibliotheken | Routine: wird eingespielt |
-   | Pakete aus `block` (Bootloader, SSH, Netzwerk) | Freigabe nötig |
-   | Versionssprung bei Paketen aus `watch` (z. B. systemd 258 → 259) | Freigabe nötig |
-   | Paket aus `watch` ohne bekannte Ausgangsversion | Freigabe nötig |
-   | Neues oder entferntes Paket aus `watch` (z. B. `postgresql18-server`) | Freigabe nötig |
-   | Unerwartete Entfernungen, mehr als `max_removals` Entfernungen | Freigabe nötig |
-   | Downgrade, Anbieter- oder Architekturwechsel | Freigabe nötig |
-   | Solver-Konflikt | nur per SSH lösbar |
+   | Normal updates, kernel, removal of old libraries | routine: gets installed |
+   | Packages from `block` (boot loader, SSH, network) | approval required |
+   | Version jump of a package from `watch` (e.g. systemd 258 → 259) | approval required |
+   | Package from `watch` without a known previous version | approval required |
+   | New or removed package from `watch` (e.g. `postgresql18-server`) | approval required |
+   | Unexpected removals, more than `max_removals` removals | approval required |
+   | Downgrade, vendor or architecture change | approval required |
+   | Solver conflict | can only be resolved via SSH |
 
-3. **Routine** wird im Modus `auto` mit `zypper dup --no-refresh` eingespielt (gleicher Repo-Stand wie im Probelauf; snapper legt wie immer Snapshots an). Danach kommt eine *stille* Telegram-Nachricht. Ist ein Neustart nötig, wird daraus ein eigener offener Punkt.
-4. **Offene Punkte** (Freigabe, Neustart, Fehler) bleiben bestehen, bis der Zustand behoben ist. Der Bot erinnert nach einer Eskalationsleiter:
+3. **Routine** updates are installed in `auto` mode with `zypper dup --no-refresh` (same repository state as the dry run; snapper takes snapshots as usual), followed by a *silent* Telegram message. If a reboot is needed, that becomes an open issue of its own.
+4. **Open issues** (approval, reboot, error) stay open until the state is fixed. The bot reminds you on an escalation ladder:
 
-   | Offen seit | Erinnerung |
+   | Open for | Reminder |
    |---|---|
-   | sofort | einmal, dann täglich |
-   | 2 Tagen | alle 8 Stunden |
-   | 5 Tagen | alle 3 Stunden |
-   | 10 Tagen | stündlich |
+   | right away | once, then daily |
+   | 2 days | every 8 hours |
+   | 5 days | every 3 hours |
+   | 10 days | hourly |
 
-   Nachts (22–7 Uhr) ist Ruhe. Mit `/later` lässt sich zweimal aufschieben, jeweils höchstens 72 Stunden. Vorübergehende Fehler (Repo nicht erreichbar) werden erst nach einem Tag gemeldet. Läuft drei Tage lang keine Prüfung erfolgreich, kommt ebenfalls eine Meldung.
+   Nights (22:00–07:00) are quiet. `/later` postpones twice, at most 72 hours each. Temporary errors (repository unreachable) are only reported after a day. If no check succeeds for three days, that is reported too.
 
-**Beobachtungsmodus** (`mode = "observe"` in `[general]`, Standard nach der Installation): Der Timer prüft und meldet wie sonst, spielt aber nichts ein. Routine-Updates kommen als stille Meldung „würde eingespielt“ (je Stand einmal), mit einer Schaltfläche „Diesmal einspielen“. Freigaben wirken auch in diesem Modus. Erst mit `mode = "auto"` spielt twguard Routine-Updates selbst ein. Jede nicht leere zypper-Ausgabe wird unter `/var/lib/twguard/plans/` gesichert (die letzten 20).
+**Observation mode** (`mode = "observe"` in `[general]`, the default after installation): the timer checks and reports as usual but installs nothing. Routine updates are reported silently as “would be installed” (once per state), with an “Install this time” button. Approvals also work in this mode. Only with `mode = "auto"` does twguard install routine updates by itself. Every non-empty zypper output is saved under `/var/lib/twguard/plans/` (the last 20).
 
-Eine Freigabe gilt nur für genau den gemeldeten Stand (Fingerabdruck der Paketliste mit Ausgangs- und Zielversion, Architektur und Repository). Kommt vorher ein neuer Snapshot, verfällt sie und es wird neu gemeldet. zypper rechnet beim Einspielen neu; weicht der dabei ausgeführte Plan vom geprüften ab (etwa durch ein paralleles `zypper ref`), meldet der Bericht die Unterschiede mit Ton.
+An approval is bound to exactly the reported state (fingerprint of the package list with old and new version, architecture and repository). If a new snapshot arrives first, the approval expires and the new state is reported. zypper recomputes the plan when installing; if the executed plan differs from the checked one (for example because of a parallel `zypper ref`), the report lists the differences, with sound.
 
-**Tägliches Briefing** (`[briefing]`, Standard 08:00): Jeder Server meldet sich einmal am Tag, auch wenn alles in Ordnung ist („☀️ server: alles in Ordnung“, mit letzter Prüfung, Kernel, Laufzeit und im Beobachtungsmodus den ausstehenden Paketen). Solange nichts offen ist, kommt es ohne Ton. Bleibt das Briefing eines Servers aus, ist er aus, ohne Netz oder der Bot läuft nicht.
+**Daily briefing** (`[briefing]`, default 08:00): every server reports once a day, also when everything is fine (“☀️ server: all good”, with the last check, kernel, uptime and, in observation mode, the pending packages). It is silent as long as nothing is open. If a server's briefing is missing, the server is off, offline or the bot is not running.
 
-Wer per SSH selbst `zypper dup` ausführt, braucht nichts weiter zu tun: Der Bot bemerkt die Änderung an der RPM-Datenbank und prüft sofort neu.
+If you run `zypper dup` yourself via SSH, nothing else is needed: the bot notices the change of the RPM database and checks again right away.
 
-## Einrichtung
+## Setup
 
-Schritt für Schritt in [INSTALL.md](INSTALL.md): Telegram-Bot anlegen, klonen, `./install.sh`, Token und IDs eintragen, Dienste starten. Kurz zu den Bausteinen:
+Step by step in [INSTALL.md](INSTALL.md): create a Telegram bot, clone, `./install.sh`, enter token and IDs, start the services. In short:
 
-- **Ein Bot pro Server**, alle Bots in einer gemeinsamen Gruppe. Beim @BotFather `/setprivacy` → **Disable**, damit ein einfaches `/status` alle Bots erreicht.
-- Optional das Admin-Recht **Nachrichten löschen**: Dann räumen die Bots Befehle und alte Meldungen weg. Telegram macht dabei aus einer Gruppe oft eine **Supergruppe mit neuer ID** (`-100…`); die Bots übernehmen sie und melden sie einmal, danach als `chat_id` eintragen.
-- `install.sh` baut `twguard` als einzelnes Python-Archiv (nur Standardbibliothek, Python ≥ 3.11) nach `/usr/local/sbin`, kopiert die systemd-Units und legt `/etc/twguard/config.toml` an, falls noch keine da ist (mit `mode = "observe"` und dem Pfad der Arbeitskopie unter `[update]`). Die Vorlage der installierten Version liegt immer als `/etc/twguard/config.default.toml` daneben; neue Einträge zeigt `diff -u /etc/twguard/config.toml /etc/twguard/config.default.toml`.
-- Die Arbeitskopie (z. B. `/root/tw-update-guard`) ist zugleich die Quelle für `/update`. Ein öffentlicher Klon per HTTPS genügt; für ein eigenes privates Repo eignet sich ein Deploy-Schlüssel ohne Schreibzugriff.
-- Ohne Git auf dem Server: `build/twguard.pyz` und die Dateien aus `systemd/` hinüberkopieren (dann ohne `/update`).
+- **One bot per server**, all bots in one shared group. With @BotFather `/setprivacy` → **Disable**, so that a plain `/status` reaches all bots.
+- Optionally the admin right **Delete messages**: the bots then clean up commands and old messages. Telegram often turns the group into a **supergroup with a new ID** (`-100…`); the bots adopt it and report it once, then enter it as `chat_id`.
+- `install.sh` builds `twguard` as a single Python archive (standard library only, Python ≥ 3.11) in `/usr/local/sbin`, copies the systemd units and creates `/etc/twguard/config.toml` if there is none yet (with `mode = "observe"` and the path of the working copy under `[update]`). The template of the installed version is always next to it as `/etc/twguard/config.default.toml`; `diff -u /etc/twguard/config.toml /etc/twguard/config.default.toml` shows new entries.
+- The working copy (e.g. `/root/tw-update-guard`) is also the source for `/update`. A public clone over HTTPS is enough; for a private repository of your own, use a read-only deploy key.
+- Without Git on the server: copy `build/twguard.pyz` and the files from `systemd/` over (then without `/update`).
 
-## Befehle in Telegram
+## Telegram commands
 
-In der Gruppe gelten Befehle für einen bestimmten Server nur, wenn sie **als Antwort auf eine Nachricht dieses Bots** kommen oder mit `@botname` versehen sind. Im privaten Chat mit dem Bot ist das nicht nötig.
+In a group, commands for a specific server only apply as a **reply to a message from that bot** or with `@botname`. In a private chat with the bot this is not needed.
 
-| Befehl | Wirkung |
+| Command | Effect |
 |---|---|
-| `/status` | offene Punkte; ohne `@botname` antworten alle Server |
-| `/details` | Paketliste des letzten Probelaufs |
-| `/approve` | gemeldetes Update freigeben und einspielen |
-| `/check` | sofort prüfen; eine Wartemeldung erscheint sofort und wird nach dem Prüflauf durch das Ergebnis ersetzt |
-| `/later 12h`, `/later 2d` | Erinnerungen aufschieben (begrenzt) |
-| `/reboot` | Neustart in 1 Minute; nach dem Start meldet sich der Server zurück |
-| `/cancel` | geplanten Neustart abbrechen |
-| `/update` | neuen Stand von twguard holen und zur Bestätigung anzeigen; ohne `@botname` antworten alle Server |
-| `/version` | Version, Git-Stand und Modus |
-| `/help` | alle Befehle; ohne `@botname` antwortet nur der Bot mit `help_full`. Verschwindet nach 5 Minuten |
-| `/keyboard` | feste Tastatur einblenden: „📊 Status“, „🔄 Alle prüfen“, „⬆️ Update“, „🏷️ Version“, „❓ Hilfe“ (gelten für alle Server; ein Server versteht eine Taste erst ab der Version, die sie eingeführt hat). Die Tasten hängen an der Nachricht „⌨️ Tastatur …“; die bleibt deshalb stehen. `/keyboard off` löscht sie und blendet die Tasten damit aus |
+| `/status` | open issues; without `@botname` all servers answer |
+| `/details` | package list of the last dry run |
+| `/approve` | approve and install the reported update |
+| `/check` | check now; a waiting message appears at once and is replaced by the result |
+| `/later 12h`, `/later 2d` | postpone reminders (limited) |
+| `/reboot` | reboot in 1 minute; the server reports back after the restart |
+| `/cancel` | cancel a scheduled reboot |
+| `/update` | fetch a new twguard version and offer it for confirmation; without `@botname` all servers answer |
+| `/version` | version, Git commit and mode |
+| `/help` | all commands; without `@botname` only the bot with `help_full` answers. Disappears after 5 minutes |
+| `/keyboard` | show a permanent keyboard: “📊 Status”, “🔄 Check all”, “⬆️ Update”, “🏷️ Version”, “❓ Help” (they apply to all servers; a server understands a key only from the version that introduced it). The keys belong to the message “⌨️ Keyboard …”, so that message stays. `/keyboard off` deletes it and thereby hides the keys |
 
-Alle Befehle stehen außerdem im Menü neben der Eingabezeile.
+All commands are also in the menu next to the input line.
 
-Die Meldungen haben Schaltflächen für die wichtigsten Befehle (Freigeben, Details, 1 Tag später, Neu starten, Neustart abbrechen, Neu prüfen). Eine Schaltfläche geht nur an den Bot, der die Nachricht geschickt hat; folgenreiche Schaltflächen verschwinden nach dem ersten Druck. „Freigeben“ gilt nur für den Stand, der in dieser Nachricht gemeldet wurde.
+**Language:** `language = "en"` (default) or `"de"` in `[general]` sets the language of the Telegram output per server, including buttons, command menu and the HTML file; then run `systemctl restart twguard-bot`. Every server understands the permanent keyboard in all languages, even if it comes from a bot with a different language. Messages already sent and the reasons of open issues stay in the old language until they are generated again.
 
-## Update von twguard selbst (OTA)
+Messages have buttons for the most important commands (Approve, Details, 1 day later, Reboot, Cancel reboot, Check again). A button only reaches the bot that sent the message; buttons with consequences disappear after the first press. “Approve” only applies to the state reported in that message.
 
-`/update` holt per `git fetch` den Stand von `origin/main` in die Arbeitskopie (`[update] repo`) und zeigt die neuen Commits mit der Schaltfläche „Einspielen“. Danach läuft `twguard self-update` als eigene Unit `twguard-update`:
+## Updating twguard itself (OTA)
 
-1. Fast-Forward auf genau den angezeigten Commit (lokale Änderungen oder abweichende Historie: Abbruch).
-2. Unit-Tests der neuen Fassung; schlagen sie fehl, bleibt alles beim Alten.
-3. Die laufende Version wird als `/usr/local/sbin/twguard.prev` gesichert, `install.sh` baut und installiert die neue und startet den Bot neu.
-4. Meldet sich der neue Bot innerhalb von 90 Sekunden, schreibt er „läuft jetzt mit …“. Sonst kommen die alte Version, die alten systemd-Units und der alte Git-Stand zurück, mit einer Meldung (auch, wenn dabei etwas schiefging).
+`/update` runs `git fetch` for `origin/main` in the working copy (`[update] repo`) and shows the new commits with an “Install” button. Then `twguard self-update` runs as a separate unit, `twguard-update`:
 
-Protokoll: `journalctl -u twguard-update`.
+1. Fast-forward to exactly the commit shown (local changes or diverged history: abort).
+2. Unit tests of the new version; if they fail, everything stays as it was.
+3. The running version is saved as `/usr/local/sbin/twguard.prev`, `install.sh` builds and installs the new one and restarts the bot.
+4. If the new bot reports within 90 seconds, it writes “now running …”. Otherwise the old version, the old systemd units and the old Git state are restored, with a message (also if something goes wrong while doing so).
 
-Rückmeldung: Bei Befehlen zeigt Telegram sofort „schreibt …“, bei Schaltflächen kurz „Läuft …“. `/check`, „Jetzt prüfen“ und Freigaben senden sofort eine Wartemeldung, die der Prüflauf später durch sein Ergebnis ersetzt (auch „keine Updates“).
+Log: `journalctl -u twguard-update`.
 
-**Aufgeräumter Chat:** Je Server und Thema bleibt höchstens eine Nachricht stehen.
-- Befehle werden nach der Antwort gelöscht (Admin-Recht nötig). Hilfe, Version, Details und Bestätigungen löschen sich nach 2 bis 5 Minuten selbst.
-- `/status`, Briefing und Erinnerungen ersetzen ihren Vorgänger. Eine Erinnerung kommt also weiterhin neu (mit Ton), die vorige verschwindet.
-- Schaltflächen bearbeiten die Nachricht, an der sie hängen: „Freigeben“ macht daraus die Wartemeldung und dann das Ergebnis, „Details“ klappt die Paketliste auf (nach Name, umschaltbar auf „nach Version“ mit gruppierten Paketen, bei langen Listen mit Seiten; „📄 Als Datei“ schickt alle Pakete als HTML-Datei; „◀️ Zurück“ wieder zu), „1 Tag später“ vermerkt die Aufschiebung, „Neu starten“ zeigt den Neustart und nach dem Start „wieder da“.
-- Erledigte Punkte bleiben als „✅ … erledigt“ stehen, ohne Schaltflächen.
-- Stille Update-Berichte bleiben bis zum nächsten Briefing; das fasst sie zusammen und löscht sie.
-- Telegram erlaubt Löschen nur in den ersten 48 Stunden. Ältere Nachrichten kürzt der Bot stattdessen auf eine Zeile.
+Feedback: for commands Telegram immediately shows “typing …”, for buttons briefly “Running …”. `/check`, “Check now” and approvals immediately send a waiting message that the check later replaces with its result (also “no updates”).
 
-Befehle werden nur von den Benutzer-IDs in `allowed_user_ids` angenommen, nur aus dem konfigurierten Chat oder dem privaten Chat, und nur, wenn sie höchstens 10 Minuten alt sind. Es gibt keine Shell-Befehle über Telegram.
+**Tidy chat:** at most one message stays per server and topic.
+- Commands are deleted after the answer (admin right needed). Help, version, details and confirmations delete themselves after 2 to 5 minutes.
+- `/status`, briefing and reminders replace their predecessor. A reminder therefore still arrives as new (with sound), the previous one disappears.
+- Buttons edit the message they belong to: “Approve” turns it into the waiting message and then the result, “Details” expands the package list (by name, switchable to “by version” with grouped packages, paged if long; “📄 As a file” sends all packages as an HTML file; “◀️ Back” collapses it), “1 day later” notes the postponement, “Reboot” shows the reboot and “back” after the restart.
+- Resolved issues remain as “✅ … resolved”, without buttons.
+- Silent update reports stay until the next briefing, which summarizes and deletes them.
+- Telegram only allows deleting within the first 48 hours. The bot shortens older messages to one line instead.
 
-## Auf der Kommandozeile
+Commands are only accepted from the user IDs in `allowed_user_ids`, only from the configured chat or a private chat, and only if they are at most 10 minutes old. There are no shell commands via Telegram.
+
+## Command line
 
 ```bash
-twguard status                      # offene Punkte
-twguard check --dry-run             # Einstufung ohne Wirkung
-twguard classify datei.xml          # gespeicherte zypper-XML-Ausgabe einstufen
+twguard status                      # open issues
+twguard check --dry-run             # classification without any effect
+twguard classify file.xml           # classify a saved zypper XML output
 journalctl -u twguard-check -u twguard-bot
-journalctl -u twguard-bot | grep -E 'langsam|Verbindung'   # Telegram-Aufrufe über 3 s, mit Dauer je Phase
-journalctl -u twguard-bot | grep 'Fehler in einer Stunde'   # mehr Abruf- und Sendefehler als max_errors_per_hour
+journalctl -u twguard-bot | grep -E 'slow|connection'   # Telegram calls over 3 s, with duration per phase
+journalctl -u twguard-bot | grep 'errors in one hour'   # more fetch and send errors than max_errors_per_hour
 ```
 
-## Grenzen
+## Limits
 
-- Ein OTA-Update führt Code aus dem Git-Repo als root aus. Wer auf `main` des Repos pushen darf, aus dem die Server holen, steuert damit die Server. Grüne Tests schützen nicht vor absichtlich schädlichem Code. Wer dem Original-Repo nicht vertrauen will, lässt die Server aus einem eigenen Fork holen und übernimmt Änderungen nach Durchsicht.
-- Ist der Server ganz aus oder ohne Netz, schweigt auch der Bot. Dafür braucht es eine Überwachung von außen (z. B. Uptime Kuma).
-- Solver-Konflikte lassen sich nicht über Telegram lösen.
-- Dienste mit alten Bibliotheken werden nur gemeldet, nicht neu gestartet.
+- An OTA update runs code from the Git repository as root. Whoever can push to `main` of the repository your servers pull from controls your servers; passing tests do not protect against malicious code. If you do not want to trust this repository, let your servers pull from your own fork and review changes before merging.
+- If the server is off or offline, the bot is silent too. Use external monitoring for that (e.g. Uptime Kuma).
+- Solver conflicts cannot be resolved via Telegram.
+- Services using outdated libraries are only reported, not restarted.
 
-## Sicherheit
+## Security
 
-Schwachstellen bitte nicht öffentlich melden, sondern wie in [SECURITY.md](SECURITY.md) beschrieben.
+Please do not report vulnerabilities publicly; see [SECURITY.md](SECURITY.md).
 
-## Entstehung
+## Credits
 
-twguard ist im Dialog mit KI-Assistenten entstanden: [Claude Code](https://claude.com/claude-code) (Anthropic) hat den größten Teil des Codes geschrieben, OpenAI Codex hat ihn mehrfach auf Fehler und Sicherheitsprobleme geprüft. Entwurf, Anforderungen, Tests auf echten Servern und alle Entscheidungen: DemoFreak.
+twguard was written in dialogue with AI assistants: [Claude Code](https://claude.com/claude-code) (Anthropic) wrote most of the code, OpenAI Codex reviewed it several times for bugs and security issues. Design, requirements, testing on real servers and all decisions: DemoFreak.
 
-## Lizenz
+## License
 
 Copyright © 2026 DemoFreak
 
-Dieses Programm ist freie Software: Sie können es unter den Bedingungen der GNU General Public License, Version 3 oder (nach Ihrer Wahl) jeder späteren Version, weitergeben und/oder verändern. Es wird in der Hoffnung verbreitet, dass es nützlich ist, aber **ohne jede Gewährleistung**. Den vollständigen Text enthält [LICENSE](LICENSE). SPDX: `GPL-3.0-or-later`.
+This program is free software: you can redistribute it and/or modify it under the terms of the GNU General Public License as published by the Free Software Foundation, either version 3 of the License, or (at your option) any later version. It is distributed in the hope that it will be useful, but **without any warranty**. See [LICENSE](LICENSE). SPDX: `GPL-3.0-or-later`.

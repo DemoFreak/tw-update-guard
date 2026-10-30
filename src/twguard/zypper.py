@@ -10,6 +10,8 @@ import subprocess
 import xml.etree.ElementTree as ET
 from dataclasses import dataclass, field
 
+from .i18n import tr
+
 log = logging.getLogger(__name__)
 
 # Abschnitte von <install-summary>, in der Reihenfolge der zypper-Ausgabe
@@ -103,7 +105,7 @@ def parse_plan(xml_text: str, exit_code: int = 0) -> Plan:
     try:
         root = ET.fromstring(xml_text)
     except ET.ParseError as e:
-        plan.errors.append(f"zypper-Ausgabe nicht lesbar: {e}")
+        plan.errors.append(tr("zypper-Ausgabe nicht lesbar: {error}", error=e))
         if plan.exit_code in OK_CODES:
             plan.exit_code = -1
         return plan
@@ -148,12 +150,12 @@ def _run(args: list[str], xml: bool = True, timeout: float | None = None) -> sub
         cmd.append("--xmlout")
     cmd += args
     env = dict(os.environ, LC_ALL="C.UTF-8")
-    log.info("starte: %s", " ".join(cmd))
+    log.info(tr("starte: %s"), " ".join(cmd))
     try:
         return subprocess.run(cmd, capture_output=True, text=True, env=env, timeout=timeout)
     except subprocess.TimeoutExpired:
-        log.error("%s: keine Antwort nach %d s, abgebrochen", " ".join(cmd), timeout)
-        return subprocess.CompletedProcess(cmd, EXIT_TIMEOUT, "", f"keine Antwort nach {timeout:.0f} s, abgebrochen")
+        log.error(tr("%s: keine Antwort nach %d s, abgebrochen"), " ".join(cmd), timeout)
+        return subprocess.CompletedProcess(cmd, EXIT_TIMEOUT, "", tr("keine Antwort nach {n} s, abgebrochen", n=f"{timeout:.0f}"))
 
 
 def refresh() -> list[str]:
@@ -164,7 +166,7 @@ def refresh() -> list[str]:
     if p.returncode == EXIT_TIMEOUT:
         return [f"zypper refresh: {p.stderr}"]
     errors = parse_plan(p.stdout, p.returncode).errors
-    return errors or [f"zypper refresh: Exit-Code {p.returncode}", p.stderr.strip()]
+    return errors or [tr("zypper refresh: Exit-Code {rc}", rc=p.returncode), p.stderr.strip()]
 
 
 def dry_run(dup_args: list[str]) -> Plan:
@@ -174,7 +176,7 @@ def dry_run(dup_args: list[str]) -> Plan:
     plan = parse_plan(p.stdout, p.returncode)
     plan.raw = p.stdout
     if plan.failed and not plan.errors:
-        plan.errors.append(f"zypper dup --dry-run: Exit-Code {p.returncode} {p.stderr.strip()}")
+        plan.errors.append(tr("zypper dup --dry-run: Exit-Code {rc} {stderr}", rc=p.returncode, stderr=p.stderr.strip()))
     return plan
 
 
@@ -217,12 +219,12 @@ def needs_rebooting() -> bool | None:
         return True
     if rc == 0:
         return False
-    log.warning("zypper needs-rebooting: Exit-Code %s", rc)
+    log.warning(tr("zypper needs-rebooting: Exit-Code %s"), rc)
     return None
 
 
 def services_needing_restart() -> list[str]:
     p = _run(["ps", "-sss"], xml=False, timeout=QUERY_TIMEOUT)
     if p.returncode == EXIT_TIMEOUT:
-        log.warning("zypper ps: %s", p.stderr)
+        log.warning(tr("zypper ps: %s"), p.stderr)
     return sorted({line.strip() for line in p.stdout.splitlines() if line.strip()})

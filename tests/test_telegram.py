@@ -2,6 +2,7 @@ import socket
 import unittest
 from unittest import mock
 
+import testlang  # noqa: F401
 from twguard import telegram
 from twguard.telegram import ErrorMeter, Telegram, TelegramError, connect, format_phases, multipart
 

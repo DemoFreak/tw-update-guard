@@ -12,7 +12,8 @@ from html import escape
 from pathlib import Path
 
 from . import COMMIT, __version__, config, state
-from .notify import TITLES, fmt_age
+from .i18n import set_language, tr, trn
+from .notify import fmt_age, title
 from .rules import classify, describe
 from .telegram import Telegram, TelegramError
 from .zypper import parse_plan
@@ -23,8 +24,9 @@ def _config(path: str | None, required: bool = True) -> config.Config:
         cfg = config.load(path)
     except FileNotFoundError:
         if required:
-            raise SystemExit(f"Keine Konfiguration gefunden ({path or config.DEFAULT_PATH})")
+            raise SystemExit(tr("Keine Konfiguration gefunden ({path})", path=path or config.DEFAULT_PATH))
         return config.Config()
+    set_language(cfg.language)
     apply_chat_migration(cfg)
     return cfg
 
@@ -37,7 +39,7 @@ def apply_chat_migration(cfg: config.Config) -> None:
         return  # z. B. ohne root kein Zugriff auf den Zustand
     if migration and migration.get("from") == cfg.chat_id:
         logging.getLogger(__name__).warning(
-            "chat_id %s in der Konfiguration ist veraltet, nutze %s (bitte eintragen)",
+            tr("chat_id %s in der Konfiguration ist veraltet, nutze %s (bitte eintragen)"),
             cfg.chat_id, migration["to"])
         cfg.chat_id = migration["to"]
 
@@ -47,23 +49,27 @@ def cmd_classify(cfg: config.Config, file: str, exit_code: int) -> int:
     verdict = classify(plan, cfg.rules)
     print(describe(plan))
     print()
-    print("Einstufung:", "Routine" if verdict.auto else "Freigabe nötig")
+    print(tr("Einstufung:"), tr("Routine") if verdict.auto else tr("Freigabe nötig"))
     for reason in verdict.reasons:
         print("  -", reason)
-    print("Fingerabdruck:", plan.fingerprint())
+    print(tr("Fingerabdruck:"), plan.fingerprint())
     return 0
 
 
 def cmd_status(cfg: config.Config) -> int:
     st = state.load(cfg.state_dir / "state.json")
     now = time.time()
-    last = f"vor {fmt_age(now - st.last_check_ok)}" if st.last_check_ok else "nie"
-    print(f"{cfg.hostname}: letzte erfolgreiche Prüfung {last}")
-    if not st.issues:
-        print("Nichts offen.")
+    last = tr("vor {age}", age=fmt_age(now - st.last_check_ok)) if st.last_check_ok else tr("nie")
+    print(tr("{host}: letzte erfolgreiche Prüfung {last}", host=cfg.hostname, last=last))
+    if not st.issues and not st.pending_text:
+        print(tr("Nichts offen."))
+    elif not st.issues:
+        print(tr("Keine offenen Punkte."))
+    if st.pending_text:
+        print(tr("Ausstehend, nicht eingespielt (Beobachtungsmodus): {plan}", plan=st.pending_text))
     for issue in st.issues.values():
-        print(f"\n[{issue.kind}] {TITLES.get(issue.kind, issue.kind)}, seit {fmt_age(now - issue.since)}, "
-              f"{issue.notify_count} Meldungen")
+        print(f"\n[{issue.kind}] " + tr("{title}, seit {age}", title=title(issue.kind), age=fmt_age(now - issue.since))
+              + ", " + trn("{n} Meldung", "{n} Meldungen", issue.notify_count))
         if issue.detail:
             print(issue.detail)
     return 0
@@ -84,7 +90,7 @@ def bot_running() -> bool:
 def cmd_telegram_ids(cfg: config.Config, attempts: int = 3) -> int:
     # Ein laufender Bot bestätigt die Nachrichten sofort; danach liefert getUpdates hier nichts mehr
     if bot_running():
-        print(BOT_RUNNING, file=sys.stderr)
+        print(tr(BOT_RUNNING), file=sys.stderr)
         return 1
     tg = Telegram(cfg.token, cfg.chat_id)
     for attempt in range(1, attempts + 1):
@@ -93,43 +99,54 @@ def cmd_telegram_ids(cfg: config.Config, attempts: int = 3) -> int:
             break
         except TelegramError as e:
             if "Conflict" in str(e):
-                print(BOT_RUNNING, file=sys.stderr)
+                print(tr(BOT_RUNNING), file=sys.stderr)
                 return 1
             if attempt == attempts:
                 raise
-            print(f"Versuch {attempt} gescheitert ({e}), neuer Versuch …", file=sys.stderr)
+            print(tr("Versuch {n} gescheitert ({error}), neuer Versuch …", n=attempt, error=e), file=sys.stderr)
     if not updates:
-        print("Keine Nachrichten. Schreib dem Bot (in der Gruppe: /start@botname) und versuch es erneut.")
+        print(tr("Keine Nachrichten. Schreib dem Bot (in der Gruppe: /start@botname) und versuch es erneut."))
     for update in updates:
         msg = update.get("message") or {}
         chat = msg.get("chat") or {}
         user = msg.get("from") or {}
-        print(f"Chat {chat.get('id')} ({chat.get('type')}, {chat.get('title') or chat.get('username', '')}) "
-              f"– Benutzer {user.get('id')} ({user.get('username') or user.get('first_name', '')}): "
+        print(f"Chat {chat.get('id')} ({chat.get('type')}, {chat.get('title') or chat.get('username', '')}) – "
+              + tr("Benutzer") + f" {user.get('id')} ({user.get('username') or user.get('first_name', '')}): "
               f"{(msg.get('text') or '')[:40]}")
     return 0
 
 
+def _early_language(argv: list[str] | None) -> None:
+    """Sprache schon für --help setzen; ohne lesbare Konfiguration (kein root) bleibt die Vorgabe."""
+    early = argparse.ArgumentParser(add_help=False)
+    early.add_argument("--config")
+    try:
+        set_language(config.load(early.parse_known_args(argv)[0].config).language)
+    except (OSError, ValueError, SystemExit):
+        pass
+
+
 def main(argv: list[str] | None = None) -> int:
+    _early_language(argv)
     p = argparse.ArgumentParser(
         prog="twguard",
-        description="Tumbleweed-Updates: Routine einspielen, Kritisches melden und nachhaken.",
+        description=tr("Tumbleweed-Updates: Routine einspielen, Kritisches melden und nachhaken."),
     )
-    p.add_argument("--config", help=f"Konfigurationsdatei (Standard: {config.DEFAULT_PATH})")
+    p.add_argument("--config", help=tr("Konfigurationsdatei (Standard: {path})", path=config.DEFAULT_PATH))
     p.add_argument("-v", "--verbose", action="store_true")
     p.add_argument("--version", action="version", version=f"{__version__} ({COMMIT})")
     sub = p.add_subparsers(dest="command", required=True)
-    c = sub.add_parser("check", help="Repos auffrischen, einstufen, Routine-Updates einspielen (Timer)")
-    c.add_argument("--dry-run", action="store_true", help="nur einstufen und ausgeben; nichts einspielen, nichts senden")
-    sub.add_parser("bot", help="Telegram-Bot und Erinnerungen (Dienst)")
-    sub.add_parser("status", help="offene Punkte anzeigen")
-    cl = sub.add_parser("classify", help="gespeicherte Ausgabe von 'zypper --xmlout dup --dry-run --details' einstufen")
+    c = sub.add_parser("check", help=tr("Repos auffrischen, einstufen, Routine-Updates einspielen (Timer)"))
+    c.add_argument("--dry-run", action="store_true", help=tr("nur einstufen und ausgeben; nichts einspielen, nichts senden"))
+    sub.add_parser("bot", help=tr("Telegram-Bot und Erinnerungen (Dienst)"))
+    sub.add_parser("status", help=tr("offene Punkte anzeigen"))
+    cl = sub.add_parser("classify", help=tr("gespeicherte Ausgabe von 'zypper --xmlout dup --dry-run --details' einstufen"))
     cl.add_argument("file")
-    cl.add_argument("--exit-code", type=int, default=0, help="Exit-Code des zypper-Laufs")
-    sub.add_parser("telegram-ids", help="Chat- und Benutzer-IDs aus den letzten Nachrichten an den Bot zeigen")
-    sub.add_parser("test-message", help="Testnachricht an den konfigurierten Chat senden")
-    su = sub.add_parser("self-update", help="twguard aus der Git-Arbeitskopie aktualisieren (startet /update)")
-    su.add_argument("commit", help="Ziel-Commit (vollständiger Hash)")
+    cl.add_argument("--exit-code", type=int, default=0, help=tr("Exit-Code des zypper-Laufs"))
+    sub.add_parser("telegram-ids", help=tr("Chat- und Benutzer-IDs aus den letzten Nachrichten an den Bot zeigen"))
+    sub.add_parser("test-message", help=tr("Testnachricht an den konfigurierten Chat senden"))
+    su = sub.add_parser("self-update", help=tr("twguard aus der Git-Arbeitskopie aktualisieren (startet /update)"))
+    su.add_argument("commit", help=tr("Ziel-Commit (vollständiger Hash)"))
     args = p.parse_args(argv)
 
     logging.basicConfig(level=logging.DEBUG if args.verbose else logging.INFO,
@@ -162,7 +179,7 @@ def _run_command(args: argparse.Namespace) -> int:
         from .ota import self_update
         return self_update(cfg, args.commit)
     if args.command == "test-message":
-        Telegram(cfg.token, cfg.chat_id).send(f"👋 Testnachricht von <b>{escape(cfg.hostname)}</b>")
-        print("gesendet")
+        Telegram(cfg.token, cfg.chat_id).send(tr("👋 Testnachricht von <b>{host}</b>", host=escape(cfg.hostname)))
+        print(tr("gesendet"))
         return 0
     return 2

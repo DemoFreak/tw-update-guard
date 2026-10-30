@@ -2,6 +2,7 @@ import tomllib
 import unittest
 from pathlib import Path
 
+import testlang  # noqa: F401
 from twguard.config import Config
 from twguard.rules import Rules, classify, version_key
 from twguard.zypper import Plan, Solvable
@@ -132,6 +133,11 @@ class ExampleConfigTest(unittest.TestCase):
         with open(Path(__file__).parent.parent / "config.example.toml", "rb") as f:
             data = tomllib.load(f)
         self.assertEqual(Rules(**data["rules"]), Rules())
+
+    def test_example_language_matches_default(self):
+        with open(Path(__file__).parent.parent / "config.example.toml", "rb") as f:
+            data = tomllib.load(f)
+        self.assertEqual(data["general"]["language"], Config.language)
 
     def test_example_error_limit_matches_default(self):
         with open(Path(__file__).parent.parent / "config.example.toml", "rb") as f:

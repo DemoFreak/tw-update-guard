@@ -4,6 +4,7 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
+import testlang  # noqa: F401
 from twguard import ota, state
 from twguard.bot import Bot, parse_duration
 from twguard.config import Config
@@ -26,7 +27,7 @@ def message(text, chat=GROUP, user=USER, reply_to=None, age=0):
 class BotTest(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
-        cfg = Config(token="x", chat_id=-100, allowed_user_ids=[42], hostname="server1",
+        cfg = Config(language="de", token="x", chat_id=-100, allowed_user_ids=[42], hostname="server1",
                      state_dir=Path(self.tmp.name))
         self.tg = FakeTelegram()
         self.bot = Bot(cfg, tg=self.tg, me=ME)
@@ -321,8 +322,8 @@ class BotTest(unittest.TestCase):
         self.assertIn("server1", self.tg.sent[0])
 
     def test_keyboard_has_two_rows(self):
-        from twguard.bot import KEYBOARD
-        self.assertEqual([len(row) for row in KEYBOARD["keyboard"]], [2, 3])
+        from twguard.bot import keyboard_markup
+        self.assertEqual([len(row) for row in keyboard_markup()["keyboard"]], [2, 3])
 
     def test_keyboard_command_sends_persistent_keyboard(self):
         self.bot.handle(message("/keyboard@server1_bot"))
@@ -384,6 +385,28 @@ class BotTest(unittest.TestCase):
             self.bot.handle(message("/cancel@server1_bot"))
         self.assertIn("abgebrochen", self.tg.edited[1][1])
         self.assertEqual(self.tg.edited[1][0], 5)
+
+    def test_status_shows_pending_instead_of_nothing_open(self):
+        with state.locked(self.bot.cfg.state_dir) as st:
+            st.pending_text = "24 Pakete, Download 12 MB"
+        text, _ = self.bot.status_view()
+        self.assertIn("ausstehend: 24 Pakete", text)
+        self.assertNotIn("nichts offen", text)
+
+    def test_briefing_shows_pending_only_while_pending(self):
+        with state.locked(self.bot.cfg.state_dir) as st:
+            st.last_plan_text = "24 Pakete, Download 12 MB"
+        self.bot.maybe_briefing(self.at(8, 0))
+        self.assertNotIn("ausstehend", self.tg.sent[-1])
+
+    def test_rpmdb_change_rechecks_pending(self):
+        with state.locked(self.bot.cfg.state_dir) as st:
+            st.pending_text = "24 Pakete"
+            st.rpmdb_mtime = 1.0
+        with mock.patch.object(self.bot, "_rpmdb_mtime", return_value=2.0), \
+                mock.patch.object(self.bot, "check_reboot"), mock.patch.object(self.bot, "start_check") as start:
+            self.bot.tick()
+        start.assert_called_once()
 
     def test_briefing_replaces_previous_and_folds_reports(self):
         with state.locked(self.bot.cfg.state_dir) as st:

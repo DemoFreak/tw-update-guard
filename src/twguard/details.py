@@ -7,7 +7,8 @@ import re
 import time
 from html import escape
 
-from .rules import SECTION_TITLES
+from .i18n import current, tr
+from .rules import SECTION_TITLES, plan_summary
 from .zypper import Plan
 
 VIEWS = ("name", "version")
@@ -21,7 +22,7 @@ SEPARATORS = ".-:+~_"
 def snapshot(plan: Plan) -> dict:
     """Was die Anzeige braucht, als JSON-taugliche Daten für den Zustand."""
     return {
-        "summary": f"{plan.packages_to_change} Pakete, Download {plan.download_size / 1e6:.0f} MB",
+        "summary": plan_summary(plan),
         "rows": [[section, s.name, s.edition_old, s.edition, s.repository] for section in SECTION_TITLES for s in plan.get(section)],
         "problems": plan.problems,
     }
@@ -68,7 +69,7 @@ def _by_version(rows: list[list[str]]) -> list[str]:
             part = ", ".join(escape(n) for n in names[start:start + GROUP_NAMES])
             label = ""
             if _is_rebuild(old, new) and not labelled:
-                label, labelled = "<i>nur neu gebaut:</i>\n", True
+                label, labelled = tr("<i>nur neu gebaut:</i>") + "\n", True
             blocks.append(f"{label}{version_change(old, new)}\n  {part}")
     return blocks
 
@@ -82,7 +83,7 @@ def pages(plan: dict, view: str) -> list[str]:
         items = [row[1:4] for row in rows if row[0] == section]
         if not items:
             continue
-        heading = f"<b>{escape(title)} ({len(items)})</b>"
+        heading = f"<b>{escape(tr(title))} ({len(items)})</b>"
         current += f"\n\n{heading}"
         for block in build(items):
             if len(current) + len(block) + 2 > PAGE_LIMIT:
@@ -141,21 +142,22 @@ def file_html(plan: dict, host: str, at: float) -> str:
     """Eigenständige Seite im Stil von `zypper list-updates`: alle Pakete, ohne Skripte und Fremdinhalte."""
     rows = plan.get("rows", [])
     jumps = sum(1 for r in rows if r[2] and r[2] != r[3] and not _is_rebuild(r[2], r[3]))
-    parts = [f"<h1>{escape(host)}</h1><p>{escape(plan.get('summary', ''))}, davon {jumps} mit neuer Version; "
-             f"Stand {time.strftime('%d.%m.%Y %H:%M', time.localtime(at))}</p>"
-             "<p>Hervorgehoben: neue Version. Grau: nur neu gebaut.</p>"]
+    when = time.strftime(tr("%d.%m.%Y %H:%M"), time.localtime(at))
+    info = tr("{summary}, davon {jumps} mit neuer Version; Stand {when}",
+              summary=escape(plan.get("summary", "")), jumps=jumps, when=when)
+    parts = [f"<h1>{escape(host)}</h1><p>{info}</p><p>{tr('Hervorgehoben: neue Version. Grau: nur neu gebaut.')}</p>"]
     for section, title in SECTION_TITLES.items():
         items = sorted(r[1:] for r in rows if r[0] == section)
         if items:
-            parts.append(f"<h2>{escape(title)} ({len(items)})</h2>")
+            parts.append(f"<h2>{escape(tr(title))} ({len(items)})</h2>")
             parts += [_file_row(*item) for item in items]
     parts += [f"<p>{escape(problem)}</p>" for problem in plan.get("problems", [])]
-    return ('<!doctype html><html lang="de"><head><meta charset="utf-8">'
+    return (f'<!doctype html><html lang="{current()}"><head><meta charset="utf-8">'
             '<meta name="viewport" content="width=device-width, initial-scale=1">'
-            f"<title>Pakete {escape(host)}</title><style>{FILE_STYLE}</style></head><body>"
+            f"<title>{tr('Pakete {host}', host=escape(host))}</title><style>{FILE_STYLE}</style></head><body>"
             + "\n".join(parts) + "</body></html>\n")
 
 
 def file_name(host: str, at: float) -> str:
     safe = re.sub(r"[^A-Za-z0-9.-]+", "_", host)
-    return f"pakete-{safe}-{time.strftime('%Y%m%d-%H%M', time.localtime(at))}.html"
+    return f"{tr('pakete')}-{safe}-{time.strftime('%Y%m%d-%H%M', time.localtime(at))}.html"

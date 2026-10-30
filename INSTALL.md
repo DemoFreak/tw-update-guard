@@ -1,61 +1,64 @@
-# Installation (Kurzfassung)
+# Installation (short version)
 
-🇬🇧 [English version](INSTALL.en.md)
+🇩🇪 [Deutsche Fassung](INSTALL.de.md)
 
-Für jeden Server, als root. Voraussetzungen: openSUSE Tumbleweed, `git`, Python ≥ 3.11 (ist auf Tumbleweed vorhanden), ein Telegram-Konto. Weitere Pakete braucht twguard nicht.
+For each server, as root. Requirements: openSUSE Tumbleweed, `git`, Python ≥ 3.11 (part of Tumbleweed), a Telegram account. twguard needs no other packages.
 
-## 1. Telegram-Bot anlegen
+Messages are in English by default; German is available (step 3).
 
-1. Bei **@BotFather**: `/newbot` → Name und Benutzername (z. B. `server1_updates_bot`) → Token notieren.
-2. Ebenfalls bei @BotFather: `/setprivacy` → Bot wählen → **Disable**. Sonst sieht der Bot in der Gruppe nur gezielt an ihn gerichtete Befehle.
-3. Eine Gruppe anlegen (bei mehreren Servern: eine für alle) und den Bot hinzufügen. Optional das Admin-Recht **Nachrichten löschen** geben, dann räumt der Bot Befehle und alte Meldungen weg. Telegram macht daraus oft eine Supergruppe mit neuer ID; twguard bemerkt das und meldet die neue ID.
+## 1. Create a Telegram bot
 
-## 2. Installieren
+1. With **@BotFather**: `/newbot` → name and username (e.g. `server1_updates_bot`) → note the token.
+2. Also with @BotFather: `/setprivacy` → choose the bot → **Disable**. Otherwise the bot only sees commands addressed to it in a group.
+3. Create a group (with several servers: one for all of them) and add the bot. Optionally grant the admin right **Delete messages**, then the bot cleans up commands and old messages. Telegram often turns the group into a supergroup with a new ID; twguard notices this and reports the new ID.
+
+## 2. Install
 
 ```bash
 git clone https://github.com/DemoFreak/tw-update-guard.git /root/tw-update-guard
 cd /root/tw-update-guard && ./install.sh
 ```
 
-`install.sh` baut `twguard` als einzelne Datei nach `/usr/local/sbin`, kopiert die systemd-Units und legt `/etc/twguard/config.toml` an (Beobachtungsmodus: prüft und meldet, spielt nichts ein). Es startet noch keinen Dienst. Ein erneuter Aufruf schadet nicht und zeigt die nächsten Schritte wieder an.
+`install.sh` builds `twguard` as a single file in `/usr/local/sbin`, copies the systemd units and creates `/etc/twguard/config.toml` (observe mode: checks and reports, installs nothing). It does not start any service yet. Running it again is harmless and shows the next steps again.
 
-## 3. Konfigurieren
+## 3. Configure
 
-1. Token in `/etc/twguard/config.toml` unter `[telegram]` eintragen.
-2. In der Gruppe `/start@server1_updates_bot` schreiben, dann:
+1. Put the token into `/etc/twguard/config.toml` under `[telegram]`.
+2. Write `/start@server1_updates_bot` in the group, then:
    ```bash
    twguard telegram-ids
    ```
-   Die angezeigte Chat-ID als `chat_id` und deine Benutzer-ID unter `allowed_user_ids` eintragen.
-3. Bei genau einem Server `help_full = true` setzen; nur er beantwortet `/help` an alle.
+   Enter the chat ID shown as `chat_id` and your user ID under `allowed_user_ids`.
+3. Set `help_full = true` on exactly one server; only that one answers `/help` sent to all bots.
+4. For German output set `language = "de"` in `[general]`.
 
-## 4. Prüfen und starten
+## 4. Test and start
 
 ```bash
-twguard check --dry-run      # Einstufung ansehen; ändert nichts, sendet nichts
-twguard test-message         # Telegram prüfen
+twguard check --dry-run      # show the classification; changes nothing, sends nothing
+twguard test-message         # test Telegram
 systemctl enable --now twguard-check.timer twguard-bot.service
 ```
 
-Im Gruppenchat `/status` schreiben; jeder Server antwortet. `/keyboard@server1_updates_bot` blendet eine Tastatur mit den wichtigsten Befehlen ein.
+Write `/status` in the group; every server answers. `/keyboard@server1_updates_bot` shows a keyboard with the most important commands.
 
-Wenn die Meldungen eine Weile stimmen, in `[general]` `mode = "auto"` setzen und `systemctl restart twguard-bot`. Ab dann spielt twguard Routine-Updates selbst ein.
+Once the reports look right for a while, set `mode = "auto"` in `[general]` and run `systemctl restart twguard-bot`. From then on twguard installs routine updates by itself.
 
-## Aktualisieren
+## Updating
 
-In Telegram `/update` (oder die Taste „⬆️ Update“): Der Bot zeigt die neuen Commits und spielt sie nach Bestätigung ein, mit Tests vorher und Rückfall auf die alte Version. Von Hand:
+In Telegram `/update` (or the “⬆️ Update” key): the bot shows the new commits and installs them after confirmation, running the tests first and falling back to the old version on failure. Manually:
 
 ```bash
 cd /root/tw-update-guard && git pull --ff-only && ./install.sh
 ```
 
-Neue Konfigurationseinträge zeigt `diff -u /etc/twguard/config.toml /etc/twguard/config.default.toml`.
+New configuration entries: `diff -u /etc/twguard/config.toml /etc/twguard/config.default.toml`.
 
-## Entfernen
+## Removing
 
 ```bash
 systemctl disable --now twguard-check.timer twguard-bot.service
 rm /etc/systemd/system/twguard-{check.service,check.timer,bot.service} /usr/local/sbin/twguard*
 systemctl daemon-reload
-rm -r /etc/twguard /var/lib/twguard    # Konfiguration und Zustand
+rm -r /etc/twguard /var/lib/twguard    # configuration and state
 ```

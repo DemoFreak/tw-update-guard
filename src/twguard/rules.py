@@ -7,6 +7,7 @@ import re
 from dataclasses import dataclass, field
 from fnmatch import fnmatchcase
 
+from .i18n import tr, trn
 from .zypper import Plan, Solvable
 
 
@@ -71,7 +72,7 @@ def classify(plan: Plan, rules: Rules) -> Verdict:
     if plan.problems:
         return Verdict(
             auto=False,
-            reasons=["Solver-Konflikt, nur per SSH lösbar:", *plan.problems],
+            reasons=[tr("Solver-Konflikt, nur per SSH lösbar:"), *plan.problems],
             approvable=False,
         )
 
@@ -81,7 +82,7 @@ def classify(plan: Plan, rules: Rules) -> Verdict:
         ("to-change-arch", "Architekturwechsel"),
         ("to-change-vendor", "Anbieterwechsel"),
     ):
-        reasons += [f"{text}: {s.label()}" for s in plan.get(section)]
+        reasons += [f"{tr(text)}: {s.label()}" for s in plan.get(section)]
 
     installs = plan.get("to-install")
     upgrades = plan.get("to-upgrade") + plan.get("to-downgrade")
@@ -90,10 +91,10 @@ def classify(plan: Plan, rules: Rules) -> Verdict:
 
     for s in changed:
         if _matches(s.name, rules.block):
-            reasons.append(f"kritisches Paket: {s.label()}")
+            reasons.append(tr("kritisches Paket: {package}", package=s.label()))
     for s in removals:
         if _matches(s.name, rules.block):
-            reasons.append(f"kritisches Paket wird entfernt: {s.label()}")
+            reasons.append(tr("kritisches Paket wird entfernt: {package}", package=s.label()))
 
     for s in upgrades:
         depth = _watch_depth(s.name, rules.watch)
@@ -101,14 +102,14 @@ def classify(plan: Plan, rules: Rules) -> Verdict:
             continue
         # Ohne Ausgangsversion lässt sich ein Sprung nicht ausschließen
         if not s.edition_old:
-            reasons.append(f"Ausgangsversion unbekannt: {s.label()}")
+            reasons.append(tr("Ausgangsversion unbekannt: {package}", package=s.label()))
         elif version_key(s.edition_old, depth) != version_key(s.edition, depth):
-            reasons.append(f"Versionssprung: {s.label()}")
+            reasons.append(tr("Versionssprung: {package}", package=s.label()))
 
     installed_names = {s.name for s in installs}
     for s in installs:
         if _watch_depth(s.name, rules.watch) and not _matches(s.name, rules.block):
-            reasons.append(f"neues Paket: {s.label()}")
+            reasons.append(tr("neues Paket: {package}", package=s.label()))
 
     # Bei mehrfach installierbaren Paketen (Kernel) ersetzt die neue Version die alte
     unexpected = [
@@ -117,11 +118,11 @@ def classify(plan: Plan, rules: Rules) -> Verdict:
         and not _matches(s.name, rules.routine_removals)
         and not _matches(s.name, rules.block)
     ]
-    reasons += [f"wird entfernt: {s.label()}" for s in unexpected]
+    reasons += [tr("wird entfernt: {package}", package=s.label()) for s in unexpected]
     if len(removals) > rules.max_removals:
-        reasons.append(f"{len(removals)} Pakete werden entfernt (Grenze {rules.max_removals})")
+        reasons.append(tr("{n} Pakete werden entfernt (Grenze {limit})", n=len(removals), limit=rules.max_removals))
     if rules.max_packages and plan.packages_to_change > rules.max_packages:
-        reasons.append(f"{plan.packages_to_change} Pakete (Grenze {rules.max_packages})")
+        reasons.append(tr("{n} Pakete (Grenze {limit})", n=plan.packages_to_change, limit=rules.max_packages))
 
     reboot_expected = plan.need_reboot or any(_matches(s.name, rules.reboot) for s in changed)
     reasons = list(dict.fromkeys(reasons))
@@ -131,7 +132,7 @@ def classify(plan: Plan, rules: Rules) -> Verdict:
 def _first_lines(items: list[Solvable], limit: int) -> list[str]:
     lines = [f"  {s.label()}" for s in items[:limit]]
     if len(items) > limit:
-        lines.append(f"  … und {len(items) - limit} weitere")
+        lines.append("  " + tr("… und {n} weitere", n=len(items) - limit))
     return lines
 
 
@@ -146,13 +147,18 @@ SECTION_TITLES = {
 }
 
 
+def plan_summary(plan: Plan) -> str:
+    return trn("{n} Paket, Download {mb} MB", "{n} Pakete, Download {mb} MB", plan.packages_to_change,
+               mb=f"{plan.download_size / 1e6:.0f}")
+
+
 def describe(plan: Plan, per_section: int = 40) -> str:
     """Lesbare Übersicht des Plans für /details."""
-    lines = [f"{plan.packages_to_change} Pakete, Download {plan.download_size / 1e6:.0f} MB"]
+    lines = [plan_summary(plan)]
     for section, title in SECTION_TITLES.items():
         items = plan.get(section)
         if items:
-            lines.append(f"{title} ({len(items)}):")
+            lines.append(f"{tr(title)} ({len(items)}):")
             lines += _first_lines(items, per_section)
     lines += plan.problems
     return "\n".join(lines)

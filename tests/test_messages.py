@@ -1,6 +1,7 @@
 import time
 import unittest
 
+import testlang  # noqa: F401
 from twguard import messages
 from twguard.config import Config
 from twguard.notify import send_due
@@ -53,7 +54,7 @@ class ReminderTest(unittest.TestCase):
     def setUp(self):
         self.tg = FakeTelegram()
         self.st = State()
-        self.cfg = Config(hostname="server1")
+        self.cfg = Config(language="de", hostname="server1")
         self.cfg.escalation.quiet_hours = ""
 
     def test_reminder_replaces_previous_reminder(self):
