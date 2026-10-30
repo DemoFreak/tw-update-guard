@@ -48,7 +48,7 @@ Step by step in [INSTALL.md](INSTALL.md): create a Telegram bot, clone, `./insta
 
 - **One bot per server**, all bots in one shared group. With @BotFather `/setprivacy` → **Disable**, so that a plain `/status` reaches all bots.
 - Optionally the admin right **Delete messages**: the bots then clean up commands and old messages. Telegram often turns the group into a **supergroup with a new ID** (`-100…`); the bots adopt it and report it once, then enter it as `chat_id`.
-- `install.sh` builds `twguard` as a single Python archive (standard library only, Python ≥ 3.11) in `/usr/local/sbin`, copies the systemd units and creates `/etc/twguard/config.toml` if there is none yet (with `mode = "observe"` and the path of the working copy under `[update]`). The template of the installed version is always next to it as `/etc/twguard/config.default.toml`; `diff -u /etc/twguard/config.toml /etc/twguard/config.default.toml` shows new entries.
+- `install.sh` builds `twguard` as a single Python archive (standard library only, Python ≥ 3.11) in `/usr/local/sbin`, copies the systemd units and creates a short `/etc/twguard/config.toml` if there is none yet (only the required values and the path of the working copy under `[update]`). Only enter what differs: everything else comes from the defaults in the program, so new defaults arrive with each update. All options are explained in `/etc/twguard/config.default.toml`, which every update replaces. `twguard config-diff` prints the values of an existing configuration that differ from the defaults (including the token), so you can shorten it.
 - The working copy (e.g. `/root/tw-update-guard`) is also the source for `/update`. A public clone over HTTPS is enough; for a private repository of your own, use a read-only deploy key.
 - Without Git on the server: copy `build/twguard.pyz` and the files from `systemd/` over (then without `/update`).
 
@@ -106,6 +106,7 @@ Commands are only accepted from the user IDs in `allowed_user_ids`, only from th
 twguard status                      # open issues
 twguard check --dry-run             # classification without any effect
 twguard classify file.xml           # classify a saved zypper XML output
+twguard config-diff                 # configuration values that differ from the defaults
 journalctl -u twguard-check -u twguard-bot
 journalctl -u twguard-bot | grep -E 'slow|connection'   # Telegram calls over 3 s, with duration per phase
 journalctl -u twguard-bot | grep 'errors in one hour'   # more fetch and send errors than max_errors_per_hour

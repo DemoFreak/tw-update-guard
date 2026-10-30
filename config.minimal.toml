@@ -1,0 +1,17 @@
+# tw-update-guard – /etc/twguard/config.toml (mode 0600, contains the bot token)
+#
+# Only enter what differs from the defaults; everything else comes from the program,
+# so new defaults arrive with each update. All options with explanations:
+# /etc/twguard/config.default.toml
+
+[telegram]
+# Token from @BotFather; one bot per server
+token = "123456789:ABCdefGHIjklMNOpqrSTUvwxYZ"
+# Group (negative ID) or private chat; find it with: twguard telegram-ids
+chat_id = -1001234567890
+# Who may give commands (Telegram user IDs)
+allowed_user_ids = [123456789]
+
+[update]
+# Git working copy of tw-update-guard on this server; /update fetches from there
+# repo = "/root/tw-update-guard"

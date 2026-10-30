@@ -30,11 +30,15 @@ if [ -d .git ]; then
     sed -i "s|^# repo = .*|repo = \"$(pwd)\"|" /etc/twguard/config.default.toml
 fi
 if [ ! -e /etc/twguard/config.toml ]; then
-    install -m 0600 /etc/twguard/config.default.toml /etc/twguard/config.toml
+    # Kurz: nur was abweicht; alles andere kommt aus den Vorgaben im Programm
+    install -m 0600 config.minimal.toml /etc/twguard/config.toml
+    if [ -d .git ]; then
+        sed -i "s|^# repo = .*|repo = \"$(pwd)\"|" /etc/twguard/config.toml
+    fi
     echo "New configuration: /etc/twguard/config.toml – enter token, chat_id and allowed_user_ids."
 else
     echo "Template of this version: /etc/twguard/config.default.toml"
-    echo "  New entries: diff -u /etc/twguard/config.toml /etc/twguard/config.default.toml"
+    echo "  All options are explained there; only values that differ belong in config.toml (twguard config-diff)."
 fi
 systemctl daemon-reload
 # Laufenden Bot auf die neue Version umstellen

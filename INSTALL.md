@@ -19,7 +19,7 @@ git clone https://github.com/DemoFreak/tw-update-guard.git /root/tw-update-guard
 cd /root/tw-update-guard && ./install.sh
 ```
 
-`install.sh` builds `twguard` as a single file in `/usr/local/sbin`, copies the systemd units and creates `/etc/twguard/config.toml` (observe mode: checks and reports, installs nothing). It does not start any service yet. Running it again is harmless and shows the next steps again.
+`install.sh` builds `twguard` as a single file in `/usr/local/sbin`, copies the systemd units and creates a short `/etc/twguard/config.toml` with only the required values (the default is observation mode: checks and reports, installs nothing; all options are in `config.default.toml` next to it). It does not start any service yet. Running it again is harmless and shows the next steps again.
 
 ## 3. Configure
 
@@ -52,7 +52,7 @@ In Telegram `/update` (or the “⬆️ Update” key): the bot shows the new co
 cd /root/tw-update-guard && git pull --ff-only && ./install.sh
 ```
 
-New configuration entries: `diff -u /etc/twguard/config.toml /etc/twguard/config.default.toml`.
+Your `config.toml` only needs the values that differ from the defaults; new options arrive with the update and are explained in `/etc/twguard/config.default.toml`. To shorten an older, complete file, `twguard config-diff` prints what is left (including the token); keep a backup, then replace the file with that output. Comments are not carried over.
 
 ## Removing
 

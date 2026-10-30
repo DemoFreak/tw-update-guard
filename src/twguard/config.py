@@ -3,10 +3,11 @@
 
 from __future__ import annotations
 
+import json
 import os
 import socket
 import tomllib
-from dataclasses import dataclass, field
+from dataclasses import asdict, dataclass, field
 from pathlib import Path
 
 from .i18n import LANGUAGES, tr
@@ -74,8 +75,59 @@ class Config:
         return self.mode != "auto"
 
 
+def resolve_path(path: str | Path | None = None) -> Path:
+    return Path(path or os.environ.get("TWGUARD_CONFIG") or DEFAULT_PATH)
+
+
+def _defaults() -> dict[str, dict]:
+    """Die Vorgaben im Programm, gegliedert wie die Konfigurationsdatei."""
+    cfg = Config()
+    return {
+        "telegram": {"token": cfg.token, "chat_id": cfg.chat_id, "allowed_user_ids": cfg.allowed_user_ids,
+                     "help_full": cfg.help_full, "max_errors_per_hour": cfg.max_errors_per_hour},
+        "general": {"hostname": cfg.hostname, "dup_args": cfg.dup_args, "report_routine": cfg.report_routine,
+                    "mode": cfg.mode, "language": cfg.language, "state_dir": str(cfg.state_dir)},
+        "rules": asdict(cfg.rules),
+        "escalation": asdict(cfg.escalation),
+        "update": asdict(cfg.update),
+        "briefing": asdict(cfg.briefing),
+    }
+
+
+def changed_values(path: str | Path | None = None) -> dict[str, dict]:
+    """Was in der Datei steht und von den Vorgaben abweicht; alles Übrige kann entfallen."""
+    with open(resolve_path(path), "rb") as f:
+        data = tomllib.load(f)
+    defaults = _defaults()
+    changed = {}
+    for section, values in data.items():
+        known = defaults.get(section, {})
+        different = {k: v for k, v in values.items() if k not in known or v != known[k]}
+        if different:
+            changed[section] = different
+    return changed
+
+
+def _toml_value(value) -> str:
+    if isinstance(value, bool):
+        return "true" if value else "false"
+    if isinstance(value, list):
+        return "[" + ", ".join(_toml_value(v) for v in value) + "]"
+    if isinstance(value, str):
+        return json.dumps(value, ensure_ascii=False)
+    return str(value)
+
+
+def to_toml(sections: dict[str, dict]) -> str:
+    blocks = []
+    for section, values in sections.items():
+        lines = [f"[{section}]", *(f"{key} = {_toml_value(value)}" for key, value in values.items())]
+        blocks.append("\n".join(lines))
+    return "\n\n".join(blocks) + "\n" if blocks else ""
+
+
 def load(path: str | Path | None = None) -> Config:
-    path = Path(path or os.environ.get("TWGUARD_CONFIG") or DEFAULT_PATH)
+    path = resolve_path(path)
     with open(path, "rb") as f:
         data = tomllib.load(f)
     tg = data.get("telegram", {})

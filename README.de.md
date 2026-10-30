@@ -46,7 +46,7 @@ Schritt für Schritt in [INSTALL.de.md](INSTALL.de.md): Telegram-Bot anlegen, kl
 
 - **Ein Bot pro Server**, alle Bots in einer gemeinsamen Gruppe. Beim @BotFather `/setprivacy` → **Disable**, damit ein einfaches `/status` alle Bots erreicht.
 - Optional das Admin-Recht **Nachrichten löschen**: Dann räumen die Bots Befehle und alte Meldungen weg. Telegram macht dabei aus einer Gruppe oft eine **Supergruppe mit neuer ID** (`-100…`); die Bots übernehmen sie und melden sie einmal, danach als `chat_id` eintragen.
-- `install.sh` baut `twguard` als einzelnes Python-Archiv (nur Standardbibliothek, Python ≥ 3.11) nach `/usr/local/sbin`, kopiert die systemd-Units und legt `/etc/twguard/config.toml` an, falls noch keine da ist (mit `mode = "observe"` und dem Pfad der Arbeitskopie unter `[update]`). Die Vorlage der installierten Version liegt immer als `/etc/twguard/config.default.toml` daneben; neue Einträge zeigt `diff -u /etc/twguard/config.toml /etc/twguard/config.default.toml`.
+- `install.sh` baut `twguard` als einzelnes Python-Archiv (nur Standardbibliothek, Python ≥ 3.11) nach `/usr/local/sbin`, kopiert die systemd-Units und legt eine kurze `/etc/twguard/config.toml` an, falls noch keine da ist (nur die Pflichtwerte und den Pfad der Arbeitskopie unter `[update]`). Einzutragen ist nur, was abweicht: Alles andere kommt aus den Vorgaben im Programm, neue Vorgaben kommen also mit jedem Update. Alle Einstellungen erklärt `/etc/twguard/config.default.toml`, die jedes Update ersetzt. `twguard config-diff` zeigt von einer vorhandenen Konfiguration die Werte, die von den Vorgaben abweichen (auch den Token), damit sie sich kürzen lässt.
 - Die Arbeitskopie (z. B. `/root/tw-update-guard`) ist zugleich die Quelle für `/update`. Ein öffentlicher Klon per HTTPS genügt; für ein eigenes privates Repo eignet sich ein Deploy-Schlüssel ohne Schreibzugriff.
 - Ohne Git auf dem Server: `build/twguard.pyz` und die Dateien aus `systemd/` hinüberkopieren (dann ohne `/update`).
 
@@ -104,6 +104,7 @@ Befehle werden nur von den Benutzer-IDs in `allowed_user_ids` angenommen, nur au
 twguard status                      # offene Punkte
 twguard check --dry-run             # Einstufung ohne Wirkung
 twguard classify datei.xml          # gespeicherte zypper-XML-Ausgabe einstufen
+twguard config-diff                 # Werte der Konfiguration, die von den Vorgaben abweichen
 journalctl -u twguard-check -u twguard-bot
 journalctl -u twguard-bot | grep -E 'langsam|Verbindung'   # Telegram-Aufrufe über 3 s, mit Dauer je Phase (language = "en": 'slow|connection')
 journalctl -u twguard-bot | grep 'Fehler in einer Stunde'   # mehr Abruf- und Sendefehler als max_errors_per_hour (language = "en": 'errors in one hour')

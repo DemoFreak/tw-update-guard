@@ -349,6 +349,8 @@ then write /start@botname in the group again and repeat twguard telegram-ids."""
     "Exit-Code des zypper-Laufs": "exit code of the zypper run",
     "Chat- und Benutzer-IDs aus den letzten Nachrichten an den Bot zeigen":
         "show chat and user IDs from the latest messages to the bot",
+    "nur die Werte der Konfiguration zeigen, die von den Vorgaben abweichen":
+        "show only the configuration values that differ from the defaults",
     "Testnachricht an den konfigurierten Chat senden": "send a test message to the configured chat",
     "twguard aus der Git-Arbeitskopie aktualisieren (startet /update)": "update twguard from the Git working copy (started by /update)",
     "Ziel-Commit (vollständiger Hash)": "target commit (full hash)",

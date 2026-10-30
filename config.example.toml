@@ -1,4 +1,6 @@
-# tw-update-guard – /etc/twguard/config.toml (mode 0600, contains the bot token)
+# tw-update-guard – all options with their defaults (/etc/twguard/config.default.toml).
+# This file is only a reference and is replaced by every update. Your settings belong in
+# /etc/twguard/config.toml (mode 0600, contains the bot token), and only those that differ.
 
 [telegram]
 # Token from @BotFather; one bot per server

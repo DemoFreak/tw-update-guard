@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
 """tw-update-guard: Routine-Updates einspielen, Kritisches melden und nachhaken."""
 
-__version__ = "0.7.2"
+__version__ = "0.7.3"
 
 # install.sh schreibt beim Bauen den Git-Stand nach _build.py
 try:

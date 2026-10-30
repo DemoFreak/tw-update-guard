@@ -1,11 +1,17 @@
 import contextlib
 import io
+import tempfile
 import unittest
+from pathlib import Path
 from unittest import mock
 
 import testlang  # noqa: F401
 from twguard import cli, config
+from twguard.i18n import set_language
 from twguard.telegram import Telegram, TelegramError
+
+
+ROOT = Path(__file__).parent.parent
 
 
 def run_ids(**patches):
@@ -49,6 +55,51 @@ class TelegramIdsTest(unittest.TestCase):
             rc = cli.main(["telegram-ids"])
         self.assertEqual(rc, 1)
         self.assertIn("Telegram: getUpdates: timed out", err.getvalue())
+
+
+class ConfigDiffTest(unittest.TestCase):
+    def setUp(self):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        self.path = Path(tmp.name) / "config.toml"
+
+    def diff(self, text):
+        self.path.write_text(text)
+        return config.changed_values(self.path)
+
+    def test_only_differences_remain(self):
+        changed = self.diff('[telegram]\ntoken = "t"\nhelp_full = false\n[general]\nmode = "observe"\nlanguage = "de"\n'
+                            '[update]\nbranch = "main"\n')
+        self.assertEqual(changed, {"telegram": {"token": "t"}, "general": {"language": "de"}})
+
+    def test_full_example_shortens_to_required_values(self):
+        changed = config.changed_values(ROOT / "config.example.toml")
+        self.assertEqual(list(changed), ["telegram"])
+        self.assertEqual(set(changed["telegram"]), {"token", "chat_id", "allowed_user_ids"})
+
+    def test_output_loads_to_same_configuration(self):
+        original = ('[telegram]\ntoken = "a\\"b"\nchat_id = -5\nallowed_user_ids = [1, 2]\nhelp_full = true\n'
+                    '[general]\nhostname = "h"\nmode = "auto"\n[rules]\nwatch = ["x:2"]\n'
+                    '[escalation]\nladder = [[0, 12], [48, 1.5]]\n[briefing]\nat = ""\n')
+        before = self.diff(original)
+        self.assertEqual(config.changed_values(self.path), before)
+        full = config.load(self.path)
+        self.path.write_text(config.to_toml(before))
+        self.assertEqual(config.load(self.path), full)
+
+    def test_command_prints_differences(self):
+        self.addCleanup(set_language, "de")  # main() übernimmt die Sprache aus der Datei
+        self.path.write_text('[telegram]\ntoken = "t"\n')
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            self.assertEqual(cli.main(["--config", str(self.path), "config-diff"]), 0)
+        self.assertEqual(out.getvalue(), '[telegram]\ntoken = "t"\n')
+
+    def test_minimal_template_is_valid_and_short(self):
+        cfg = config.load(ROOT / "config.minimal.toml")
+        self.assertEqual(cfg.mode, "observe")
+        self.assertEqual(cfg.rules, config.Config().rules)
+        self.assertEqual(set(config.changed_values(ROOT / "config.minimal.toml")), {"telegram"})
 
 
 if __name__ == "__main__":
