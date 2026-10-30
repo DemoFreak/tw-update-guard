@@ -138,6 +138,7 @@ EN = {
 /cancel – geplanten Neustart abbrechen
 /update – neuen Stand von twguard holen (ohne @botname: alle Server)
 /version – Version und Modus
+/language en – Sprache bis zum nächsten Neustart des Bots ändern (ohne @botname: alle Server)
 /help – diese Hilfe (ohne @botname antwortet nur ein Server, gezielt jeder)
 /keyboard – feste Tastatur einblenden (/keyboard off: ausblenden)
 
@@ -153,6 +154,7 @@ Meldungen haben dafür auch Schaltflächen.""":
 /cancel – cancel a scheduled reboot
 /update – fetch the new twguard version (without @botname: all servers)
 /version – version and mode
+/language de – change the language until the next restart of the bot (without @botname: all servers)
 /help – this help (without @botname only one server answers, when addressed each one does)
 /keyboard – show the permanent keyboard (/keyboard off: hide it)
 
@@ -168,6 +170,15 @@ Messages also have buttons for this.""",
     "Neuen Stand von twguard holen": "Fetch the new twguard version",
     "Version und Modus": "Version and mode",
     "Hilfe": "Help",
+    "Sprache bis zum Neustart ändern": "Change the language until restart",
+    "🌐 <b>{host}</b>: Sprache {language}, in der Konfiguration {configured}. Ändern: /language en oder /language de":
+        "🌐 <b>{host}</b>: language {language}, in the configuration {configured}. To change: /language en or /language de",
+    "Format: /language en oder /language de": "Format: /language en or /language de",
+    "🌐 <b>{host}</b>: Sprache {language}, wie in der Konfiguration.": "🌐 <b>{host}</b>: language {language}, as in the configuration.",
+    "🌐 <b>{host}</b>: Sprache {language} bis zum nächsten Neustart des Bots. Die Konfiguration enthält {configured}. "
+    "Damit es dauerhaft gilt, in /etc/twguard/config.toml unter [general] <code>language = \"{language}\"</code> eintragen.":
+        "🌐 <b>{host}</b>: language {language} until the next restart of the bot. The configuration says {configured}. "
+        "To make it permanent, set <code>language = \"{language}\"</code> under [general] in /etc/twguard/config.toml.",
     "🟢 <b>{host}</b> ist wieder da (Kernel {kernel}).": "🟢 <b>{host}</b> is back (kernel {kernel}).",
     "Feste Tastatur einblenden": "Show the permanent keyboard",
     "Seit {age} keine erfolgreiche Prüfung. Läuft twguard-check.timer?":

@@ -18,7 +18,7 @@ from pathlib import Path
 
 from . import COMMIT, __version__, details, messages, ota, state, zypper
 from .config import Config
-from .i18n import EN, set_language, tr
+from .i18n import EN, LANGUAGES, current, set_language, tr
 from .notify import (adopt_migration, clip, fmt_age, format_briefing, format_issue, format_status, issue_buttons,
                      mark_resolved, minutes_of_day, send_due, stamp, title)
 from .telegram import Buttons, Telegram, TelegramError
@@ -49,6 +49,7 @@ HELP = """Befehle. In der Gruppe als Antwort auf eine Nachricht dieses Bots oder
 /cancel – geplanten Neustart abbrechen
 /update – neuen Stand von twguard holen (ohne @botname: alle Server)
 /version – Version und Modus
+/language en – Sprache bis zum nächsten Neustart des Bots ändern (ohne @botname: alle Server)
 /help – diese Hilfe (ohne @botname antwortet nur ein Server, gezielt jeder)
 /keyboard – feste Tastatur einblenden (/keyboard off: ausblenden)
 
@@ -66,6 +67,7 @@ MENU = [
     ("cancel", "Geplanten Neustart abbrechen"),
     ("update", "Neuen Stand von twguard holen"),
     ("version", "Version und Modus"),
+    ("language", "Sprache bis zum Neustart ändern"),
     ("help", "Hilfe"),
     ("keyboard", "Feste Tastatur einblenden"),
 ]
@@ -132,6 +134,7 @@ class Bot:
             "help": (self.cmd_help, False),
             "update": (self.cmd_update, False),
             "version": (self.cmd_version, False),
+            "language": (self.cmd_language, False),
             "details": (self.cmd_details, True),
             "approve": (self.cmd_approve, True),
             "check": (self.cmd_check, True),
@@ -174,11 +177,10 @@ class Bot:
                 self.tick()
 
     def startup(self) -> None:
-        try:
-            self.tg.set_commands([(command, tr(text)) for command, text in MENU])
-        except TelegramError as e:
-            log.warning(tr("Befehlsmenü nicht gesetzt: %s"), e)
+        self._set_menu()
         with state.locked(self.cfg.state_dir) as st:
+            # Eine mit /language gewählte Sprache gilt nur bis zum Neustart
+            st.language_override = ""
             self.offset = st.tg_offset
             st.first_seen = st.first_seen or time.time()
             if st.reboot_requested_at and boot_time() > st.reboot_requested_at:
@@ -533,6 +535,29 @@ class Bot:
         return (f"🖥 <b>{self.host}</b> (@{escape(self.me['username'])}) · twguard {escape(__version__)} "
                 f"({escape(COMMIT)}) · {mode}")
 
+    def cmd_language(self, args: list[str], addressed: bool = False) -> Out:
+        """Sprache zur Laufzeit ändern; die Konfiguration bleibt unberührt, ein Neustart gilt wieder sie."""
+        configured = self.cfg.language
+        if not args:
+            return Out(tr("🌐 <b>{host}</b>: Sprache {language}, in der Konfiguration {configured}. "
+                          "Ändern: /language en oder /language de", host=self.host, language=current(),
+                          configured=configured), ttl=LONG)
+        language = args[0].lower()
+        if language not in LANGUAGES:
+            return Out(tr("Format: /language en oder /language de"), ttl=SHORT)
+        set_language(language)
+        with state.locked(self.cfg.state_dir) as st:
+            st.language_override = "" if language == configured else language
+        self._set_menu()
+        self._renew_keyboard()
+        if language == configured:
+            return Out(tr("🌐 <b>{host}</b>: Sprache {language}, wie in der Konfiguration.",
+                          host=self.host, language=language), topic="language")
+        return Out(tr("🌐 <b>{host}</b>: Sprache {language} bis zum nächsten Neustart des Bots. Die Konfiguration "
+                      "enthält {configured}. Damit es dauerhaft gilt, in /etc/twguard/config.toml unter [general] "
+                      "<code>language = \"{language}\"</code> eintragen.",
+                      host=self.host, language=language, configured=configured), topic="language")
+
     def cmd_help(self, args: list[str], addressed: bool = False) -> Out | None:
         # An alle antwortet nur der Bot mit help_full, sonst stünde die Liste mehrfach da;
         # welche Server erreichbar sind, zeigen /status und /version
@@ -551,8 +576,11 @@ class Bot:
             if previous:
                 return Out(tr("Die Tastatur-Nachricht ist älter als 48 Stunden; bitte von Hand löschen."), ttl=SHORT)
             return Out(tr("Dieser Bot hat keine Tastatur eingeblendet."), ttl=SHORT)
-        return Out(tr("⌨️ Tastatur für alle Server. Diese Nachricht nicht löschen, sonst verschwinden die Tasten "
-                      "(/keyboard off blendet sie aus)."), markup=keyboard_markup(), topic="keyboard")
+        return Out(self.keyboard_text(), markup=keyboard_markup(), topic="keyboard")
+
+    def keyboard_text(self) -> str:
+        return tr("⌨️ Tastatur für alle Server. Diese Nachricht nicht löschen, sonst verschwinden die Tasten "
+                  "(/keyboard off blendet sie aus).")
 
     # --- Schaltflächen ----------------------------------------------------
 
@@ -717,6 +745,24 @@ class Bot:
             messages.edit(self.tg, pressed, tr("✖️ verworfen"))
 
     # --- Hilfsfunktionen --------------------------------------------------
+
+    def _set_menu(self) -> None:
+        try:
+            self.tg.set_commands([(command, tr(text)) for command, text in MENU])
+        except TelegramError as e:
+            log.warning(tr("Befehlsmenü nicht gesetzt: %s"), e)
+
+    def _renew_keyboard(self) -> None:
+        """Eine eingeblendete Tastatur in der neuen Sprache senden; die alte versteht der Bot weiterhin."""
+        with state.locked(self.cfg.state_dir) as st:
+            old = st.messages.get("keyboard")
+            if not old:
+                return
+            try:
+                messages.replace(self.tg, st, "keyboard", self.keyboard_text(), chat_id=old["chat_id"],
+                                 markup=keyboard_markup())
+            except TelegramError as e:
+                log.debug(tr("Nachricht nicht gesendet: %s"), e)
 
     def _take_over(self, pressed: dict, text: str, buttons: Buttons | None = None,
                    request: bool = False, topic: str = "") -> None:

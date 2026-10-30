@@ -45,6 +45,9 @@ class State:
     observed_fingerprint: str = ""
     # Beobachtungsmodus: Routine-Plan, der noch nicht eingespielt ist (Zusammenfassung), sonst leer
     pending_text: str = ""
+    # Mit /language gewählte Sprache, solange sie von der Konfiguration abweicht; der Bot löscht
+    # sie bei jedem Start, ein Neustart fällt also auf die Konfiguration zurück
+    language_override: str = ""
     # OTA: laufendes Update {"commit", "chat_id", "message_id", "at"}; Ergebnis meldet der neue Bot
     update_request: dict = field(default_factory=dict)
     # Commit, mit dem der Bot zuletzt gestartet ist

@@ -21,9 +21,9 @@ from html import escape
 from pathlib import Path
 
 from . import COMMIT, messages, state
-from .i18n import set_language, tr
+from .i18n import tr
 from .config import Config, Update
-from .notify import clip
+from .notify import clip, use_language
 from .telegram import Telegram
 
 log = logging.getLogger(__name__)
@@ -127,7 +127,7 @@ def _restart_bot() -> None:
 
 def self_update(cfg: Config, commit: str) -> int:
     """Läuft als Unit `twguard-update`: einspielen, prüfen, bei Fehlern zurückrollen."""
-    set_language(cfg.language)
+    use_language(cfg)
     repo = cfg.update.repo
     tg = Telegram(cfg.token, cfg.chat_id)
     with state.locked(cfg.state_dir) as st:

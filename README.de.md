@@ -65,12 +65,13 @@ In der Gruppe gelten Befehle für einen bestimmten Server nur, wenn sie **als An
 | `/cancel` | geplanten Neustart abbrechen |
 | `/update` | neuen Stand von twguard holen und zur Bestätigung anzeigen; ohne `@botname` antworten alle Server |
 | `/version` | Version, Git-Stand und Modus |
+| `/language en`, `/language de` | Sprache zur Laufzeit ändern; ohne `@botname` alle Server. Gilt bis zum nächsten Neustart des Bots, die Konfiguration bleibt unverändert |
 | `/help` | alle Befehle; ohne `@botname` antwortet nur der Bot mit `help_full`. Verschwindet nach 5 Minuten |
 | `/keyboard` | feste Tastatur einblenden: „📊 Status“, „🔄 Alle prüfen“, „⬆️ Update“, „🏷️ Version“, „❓ Hilfe“ (gelten für alle Server; ein Server versteht eine Taste erst ab der Version, die sie eingeführt hat). Die Tasten hängen an der Nachricht „⌨️ Tastatur …“; die bleibt deshalb stehen. `/keyboard off` löscht sie und blendet die Tasten damit aus |
 
 Alle Befehle stehen außerdem im Menü neben der Eingabezeile.
 
-**Sprache:** `language = "en"` (Standard) oder `"de"` in `[general]` bestimmt die Sprache der Telegram-Ausgabe je Server, einschließlich Schaltflächen, Befehlsmenü und HTML-Datei; danach `systemctl restart twguard-bot`. Die feste Tastatur versteht jeder Server in allen Sprachen, auch wenn sie von einem Bot mit anderer Sprache stammt. Bereits gesendete Meldungen und die Begründungen offener Punkte bleiben in der alten Sprache, bis sie neu erzeugt werden. Auch die Ausgaben von `twguard` auf der Kommandozeile und `--help` folgen dieser Einstellung, sobald die Konfiguration lesbar ist. Das Protokoll (Journal) ebenso.
+**Sprache:** `language = "en"` (Standard) oder `"de"` in `[general]` bestimmt die Sprache der Telegram-Ausgabe je Server, einschließlich Schaltflächen, Befehlsmenü und HTML-Datei; danach `systemctl restart twguard-bot`. `/language` ändert sie zur Laufzeit und weist darauf hin; ein Neustart des Bots (auch durch `/update` oder einen Reboot) gilt wieder die Konfiguration, dauerhaft wird eine Änderung also erst durch den Eintrag dort. Die feste Tastatur versteht jeder Server in allen Sprachen, auch wenn sie von einem Bot mit anderer Sprache stammt. Bereits gesendete Meldungen und die Begründungen offener Punkte bleiben in der alten Sprache, bis sie neu erzeugt werden. Auch die Ausgaben von `twguard` auf der Kommandozeile und `--help` folgen dieser Einstellung, sobald die Konfiguration lesbar ist. Das Protokoll (Journal) ebenso.
 
 Die Meldungen haben Schaltflächen für die wichtigsten Befehle (Freigeben, Details, 1 Tag später, Neu starten, Neustart abbrechen, Neu prüfen). Eine Schaltfläche geht nur an den Bot, der die Nachricht geschickt hat; folgenreiche Schaltflächen verschwinden nach dem ersten Druck. „Freigeben“ gilt nur für den Stand, der in dieser Nachricht gemeldet wurde.
 

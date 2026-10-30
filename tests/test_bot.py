@@ -8,6 +8,7 @@ import testlang  # noqa: F401
 from twguard import ota, state
 from twguard.bot import Bot, parse_duration
 from twguard.config import Config
+from twguard.i18n import current, set_language
 
 from fakes import FakeTelegram
 
@@ -385,6 +386,49 @@ class BotTest(unittest.TestCase):
             self.bot.handle(message("/cancel@server1_bot"))
         self.assertIn("abgebrochen", self.tg.edited[1][1])
         self.assertEqual(self.tg.edited[1][0], 5)
+
+    def test_language_switches_at_runtime_and_hints_at_config(self):
+        self.addCleanup(set_language, "de")
+        self.bot.handle(message("/language en"))
+        self.assertEqual(current(), "en")
+        self.assertIn("/etc/twguard/config.toml", self.tg.sent[-1])
+        self.assertIn('language = "en"', self.tg.sent[-1])
+        self.assertIn("until the next restart", self.tg.sent[-1])
+        self.assertIn(("status", "Open issues (all servers)"), self.tg.commands)
+        with state.locked(self.bot.cfg.state_dir) as st:
+            self.assertEqual(st.language_override, "en")
+
+    def test_language_back_to_config_clears_override(self):
+        self.addCleanup(set_language, "de")
+        self.bot.handle(message("/language en"))
+        self.bot.handle(message("/language de"))
+        self.assertIn("wie in der Konfiguration", self.tg.sent[-1])
+        with state.locked(self.bot.cfg.state_dir) as st:
+            self.assertEqual(st.language_override, "")
+
+    def test_language_rejects_unknown_and_shows_current(self):
+        self.bot.handle(message("/language fr"))
+        self.assertIn("Format: /language", self.tg.sent[-1])
+        self.assertEqual(current(), "de")
+        self.bot.handle(message("/language"))
+        self.assertIn("Sprache de, in der Konfiguration de", self.tg.sent[-1])
+
+    def test_restart_returns_to_configured_language(self):
+        self.addCleanup(set_language, "de")
+        self.bot.handle(message("/language en"))
+        restarted = Bot(self.bot.cfg, self.tg, self.bot.me)
+        self.assertEqual(current(), "de")
+        restarted.startup()
+        with state.locked(self.bot.cfg.state_dir) as st:
+            self.assertEqual(st.language_override, "")
+
+    def test_language_renews_keyboard(self):
+        self.addCleanup(set_language, "de")
+        self.bot.handle(message("/keyboard@server1_bot"))
+        old = self.tg.next_id
+        self.bot.handle(message("/language en"))
+        self.assertIn(old, self.tg.deleted)
+        self.assertTrue(any("Keyboard for all servers" in text for text in self.tg.sent))
 
     def test_status_shows_pending_instead_of_nothing_open(self):
         with state.locked(self.bot.cfg.state_dir) as st:

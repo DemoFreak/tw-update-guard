@@ -67,12 +67,13 @@ In a group, commands for a specific server only apply as a **reply to a message 
 | `/cancel` | cancel a scheduled reboot |
 | `/update` | fetch a new twguard version and offer it for confirmation; without `@botname` all servers answer |
 | `/version` | version, Git commit and mode |
+| `/language en`, `/language de` | change the language at runtime; without `@botname` all servers. Lasts until the next restart of the bot; the configuration is not changed |
 | `/help` | all commands; without `@botname` only the bot with `help_full` answers. Disappears after 5 minutes |
 | `/keyboard` | show a permanent keyboard: “📊 Status”, “🔄 Check all”, “⬆️ Update”, “🏷️ Version”, “❓ Help” (they apply to all servers; a server understands a key only from the version that introduced it). The keys belong to the message “⌨️ Keyboard …”, so that message stays. `/keyboard off` deletes it and thereby hides the keys |
 
 All commands are also in the menu next to the input line.
 
-**Language:** `language = "en"` (default) or `"de"` in `[general]` sets the language of the Telegram output per server, including buttons, command menu and the HTML file; then run `systemctl restart twguard-bot`. Every server understands the permanent keyboard in all languages, even if it comes from a bot with a different language. Messages already sent and the reasons of open issues stay in the old language until they are generated again.
+**Language:** `language = "en"` (default) or `"de"` in `[general]` sets the language of the Telegram output per server, including buttons, command menu and the HTML file; then run `systemctl restart twguard-bot`. `/language` changes it at runtime and says so; a bot restart (also through `/update` or a reboot) returns to the configuration, so to make a change permanent you enter it there. Every server understands the permanent keyboard in all languages, even if it comes from a bot with a different language. Messages already sent and the reasons of open issues stay in the old language until they are generated again.
 
 Messages have buttons for the most important commands (Approve, Details, 1 day later, Reboot, Cancel reboot, Check again). A button only reaches the bot that sent the message; buttons with consequences disappear after the first press. “Approve” only applies to the state reported in that message.
 

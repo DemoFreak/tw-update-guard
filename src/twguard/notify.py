@@ -9,8 +9,9 @@ from html import escape
 
 from . import messages
 from .config import Config, Escalation
-from .i18n import tr, trn
+from .i18n import LANGUAGES, set_language, tr, trn
 from .state import Issue, State
+from .state import load as load_state
 from .telegram import Buttons, Telegram, TelegramError
 
 log = logging.getLogger(__name__)
@@ -24,6 +25,15 @@ TITLES = {
 }
 # Das Aussehen ändert sich mit der Stufe, damit keine Gewöhnung an eine Form entsteht
 ICONS = ("ℹ️", "⚠️", "🔴", "🚨")
+
+
+def use_language(cfg: Config) -> None:
+    """Sprache für Prüflauf und Update: die mit /language gewählte, sonst die aus der Konfiguration."""
+    try:
+        override = load_state(cfg.state_dir / "state.json").language_override
+    except (OSError, ValueError):
+        override = ""  # z. B. ohne root kein Zugriff auf den Zustand
+    set_language(override if override in LANGUAGES else cfg.language)
 
 
 def title(kind: str) -> str:

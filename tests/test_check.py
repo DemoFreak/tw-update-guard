@@ -7,6 +7,7 @@ from unittest import mock
 import testlang  # noqa: F401
 from twguard import check, state
 from twguard.config import Config
+from twguard.i18n import set_language
 from twguard.zypper import Plan, Solvable
 
 from fakes import FakeTelegram
@@ -55,6 +56,14 @@ class CheckTest(unittest.TestCase):
             st.approved_fingerprint = fingerprint
         check.run(cfg)
         self.apply.assert_called_once()
+
+    def test_uses_language_chosen_at_runtime(self):
+        self.addCleanup(set_language, "de")
+        cfg = self.cfg("observe")
+        with state.locked(cfg.state_dir) as st:
+            st.language_override = "en"
+        check.run(cfg)
+        self.assertIn("Observation mode", self.tg.sent[0])
 
     def test_observe_remembers_pending_until_applied(self):
         cfg = self.cfg("observe")

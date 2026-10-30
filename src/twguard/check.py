@@ -10,9 +10,9 @@ from pathlib import Path
 
 from . import details, messages, state, zypper
 from .config import Config
-from .i18n import set_language, tr
+from .i18n import tr
 from .notify import (adopt_migration, format_issue, format_observed, format_reasons, format_report, issue_buttons,
-                     observed_buttons, send_due)
+                     observed_buttons, send_due, use_language)
 from .rules import classify, describe, plan_summary
 from .telegram import Buttons, Telegram, TelegramError
 
@@ -75,7 +75,7 @@ def _fail(cfg: Config, tg: Telegram, kind: str, detail: str) -> int:
 
 def run(cfg: Config, dry_run: bool = False) -> int:
     tg = Telegram(cfg.token, cfg.chat_id)
-    set_language(cfg.language)
+    use_language(cfg)
     try:
         return _run(cfg, tg, dry_run)
     finally:
