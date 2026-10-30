@@ -352,8 +352,13 @@ then write /start@botname in the group again and repeat twguard telegram-ids."""
     "nur die Werte der Konfiguration zeigen, die von den Vorgaben abweichen":
         "show only the configuration values that differ from the defaults",
     "Testnachricht an den konfigurierten Chat senden": "send a test message to the configured chat",
-    "twguard aus der Git-Arbeitskopie aktualisieren (startet /update)": "update twguard from the Git working copy (started by /update)",
-    "Ziel-Commit (vollständiger Hash)": "target commit (full hash)",
+    "twguard aus der Git-Arbeitskopie aktualisieren": "update twguard from the Git working copy",
+    "Ziel-Commit (Standard: neuester Stand)": "target commit (default: latest version)",
+    "twguard ist aktuell ({commit}).": "twguard is up to date ({commit}).",
+    "Aktualisiere auf {commit} …": "Updating to {commit} …",
+    "twguard läuft jetzt mit {commit}.": "twguard is now running {commit}.",
+    "Update fehlgeschlagen, siehe die Meldung in Telegram und oben.": "Update failed, see the message in Telegram and above.",
+    "Unbekannter Commit: {commit}": "Unknown commit: {commit}",
 }
 
 TRANSLATIONS = {"de": {}, "en": EN}

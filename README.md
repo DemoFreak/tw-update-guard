@@ -107,6 +107,7 @@ twguard status                      # open issues
 twguard check --dry-run             # classification without any effect
 twguard classify file.xml           # classify a saved zypper XML output
 twguard config-diff                 # configuration values that differ from the defaults
+twguard self-update                 # update to the latest version, like /update
 journalctl -u twguard-check -u twguard-bot
 journalctl -u twguard-bot | grep -E 'slow|connection'   # Telegram calls over 3 s, with duration per phase
 journalctl -u twguard-bot | grep 'errors in one hour'   # more fetch and send errors than max_errors_per_hour

@@ -1,3 +1,5 @@
+import contextlib
+import io
 import os
 import subprocess
 import tempfile
@@ -136,6 +138,72 @@ class SelfUpdateTest(CheckRemoteTest):
 
     # Die Tests der Basisklasse hier nicht wiederholen
     test_up_to_date = test_new_commits = test_local_changes_refused = test_not_configured = None
+
+
+class CommandTest(unittest.TestCase):
+    def setUp(self):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        self.cfg = Config(language="de", state_dir=Path(tmp.name), update=Update(repo="/r"))
+        self.pending = ota.Pending("a" * 40, "b" * 40, ["bbb neu"])
+        for name, target in (("check", "check_remote"), ("update", "self_update")):
+            patcher = mock.patch.object(ota, target)
+            setattr(self, name, patcher.start())
+            self.addCleanup(patcher.stop)
+        self.check.return_value = self.pending
+        self.update.return_value = 0
+
+    def run_command(self, commit=""):
+        out, err = io.StringIO(), io.StringIO()
+        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+            rc = ota.command(self.cfg, commit)
+        return rc, out.getvalue(), err.getvalue()
+
+    def test_without_commit_takes_latest(self):
+        rc, out, _ = self.run_command()
+        self.assertEqual(rc, 0)
+        self.update.assert_called_once_with(self.cfg, "b" * 40)
+        self.assertIn("läuft jetzt mit bbbbbbbbbbbb", out)
+
+    def test_up_to_date_does_nothing(self):
+        self.check.return_value = ota.Pending("a" * 40, "a" * 40, [])
+        rc, out, _ = self.run_command()
+        self.assertEqual(rc, 0)
+        self.update.assert_not_called()
+        self.assertIn("aktuell", out)
+
+    def test_unknown_commit_is_rejected_without_update(self):
+        with mock.patch.object(ota, "_git", side_effect=ota.UpdateError("x")):
+            rc, _, err = self.run_command("commit")
+        self.assertEqual(rc, 2)
+        self.update.assert_not_called()
+        self.assertIn("Unbekannter Commit: commit", err)
+
+    def test_given_commit_is_resolved_to_full_hash(self):
+        with mock.patch.object(ota, "_git", return_value="c" * 40):
+            self.run_command("ccc")
+        self.update.assert_called_once_with(self.cfg, "c" * 40)
+
+    def test_unit_started_by_bot_goes_straight_to_update(self):
+        with state.locked(self.cfg.state_dir) as st:
+            st.update_request = {"commit": "d" * 40}
+        self.assertEqual(self.run_command("d" * 40)[0], 0)
+        self.update.assert_called_once_with(self.cfg, "d" * 40)
+        self.check.assert_not_called()
+
+    def test_without_commit_while_update_runs(self):
+        with state.locked(self.cfg.state_dir) as st:
+            st.update_request = {"commit": "d" * 40}
+        rc, _, err = self.run_command()
+        self.assertEqual(rc, 1)
+        self.update.assert_not_called()
+        self.assertIn("läuft bereits", err)
+
+    def test_failed_update_is_reported(self):
+        self.update.return_value = 1
+        rc, out, _ = self.run_command()
+        self.assertEqual(rc, 1)
+        self.assertIn("fehlgeschlagen", out)
 
 
 class StartupReportTest(unittest.TestCase):

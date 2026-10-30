@@ -46,10 +46,10 @@ Once the reports look right for a while, set `mode = "auto"` in `[general]` and 
 
 ## Updating
 
-In Telegram `/update` (or the “⬆️ Update” key): the bot shows the new commits and installs them after confirmation, running the tests first and falling back to the old version on failure. Manually:
+In Telegram `/update` (or the “⬆️ Update” key): the bot shows the new commits and installs them after confirmation, running the tests first and falling back to the old version on failure. The same on the console:
 
 ```bash
-cd /root/tw-update-guard && git pull --ff-only && ./install.sh
+twguard self-update
 ```
 
 Your `config.toml` only needs the values that differ from the defaults; new options arrive with the update and are explained in `/etc/twguard/config.default.toml`. To shorten an older, complete file, `twguard config-diff` prints what is left (including the token); keep a backup, then replace the file with that output. Comments are not carried over.

@@ -105,6 +105,7 @@ twguard status                      # offene Punkte
 twguard check --dry-run             # Einstufung ohne Wirkung
 twguard classify datei.xml          # gespeicherte zypper-XML-Ausgabe einstufen
 twguard config-diff                 # Werte der Konfiguration, die von den Vorgaben abweichen
+twguard self-update                 # auf den neuesten Stand aktualisieren, wie /update
 journalctl -u twguard-check -u twguard-bot
 journalctl -u twguard-bot | grep -E 'langsam|Verbindung'   # Telegram-Aufrufe über 3 s, mit Dauer je Phase (language = "en": 'slow|connection')
 journalctl -u twguard-bot | grep 'Fehler in einer Stunde'   # mehr Abruf- und Sendefehler als max_errors_per_hour (language = "en": 'errors in one hour')

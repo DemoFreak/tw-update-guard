@@ -125,6 +125,40 @@ def _restart_bot() -> None:
     subprocess.run(["systemctl", "restart", "--no-block", BOT_UNIT], check=False)
 
 
+def command(cfg: Config, commit: str = "") -> int:
+    """`twguard self-update [commit]`: als Unit von /update gestartet oder von Hand auf der Konsole.
+
+    Von Hand: ohne Commit der neueste Stand, ein ungültiger wird abgewiesen, bevor etwas geschieht.
+    """
+    if state.load(cfg.state_dir / "state.json").update_request:
+        # Der Bot hat das Update gestartet; das Ergebnis geht in seine Nachricht
+        if commit:
+            return self_update(cfg, commit)
+        print(tr("Ein Update läuft bereits."), file=sys.stderr)
+        return 1
+    try:
+        pending = check_remote(cfg.update)
+        target = _resolve(cfg.update.repo, commit) if commit else pending.target
+    except UpdateError as e:
+        print(e, file=sys.stderr)
+        return 2
+    if not commit and not pending.commits:
+        print(tr("twguard ist aktuell ({commit}).", commit=COMMIT))
+        return 0
+    print(tr("Aktualisiere auf {commit} …", commit=target[:12]))
+    rc = self_update(cfg, target)
+    print(tr("twguard läuft jetzt mit {commit}.", commit=target[:12]) if rc == 0
+          else tr("Update fehlgeschlagen, siehe die Meldung in Telegram und oben."))
+    return rc
+
+
+def _resolve(repo: str, commit: str) -> str:
+    try:
+        return _git(repo, "rev-parse", "--verify", "--quiet", f"{commit}^{{commit}}")
+    except UpdateError:
+        raise UpdateError(tr("Unbekannter Commit: {commit}", commit=commit)) from None
+
+
 def self_update(cfg: Config, commit: str) -> int:
     """Läuft als Unit `twguard-update`: einspielen, prüfen, bei Fehlern zurückrollen."""
     use_language(cfg)

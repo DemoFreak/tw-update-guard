@@ -44,10 +44,10 @@ Wenn die Meldungen eine Weile stimmen, in `[general]` `mode = "auto"` setzen und
 
 ## Aktualisieren
 
-In Telegram `/update` (oder die Taste „⬆️ Update“): Der Bot zeigt die neuen Commits und spielt sie nach Bestätigung ein, mit Tests vorher und Rückfall auf die alte Version. Von Hand:
+In Telegram `/update` (oder die Taste „⬆️ Update“): Der Bot zeigt die neuen Commits und spielt sie nach Bestätigung ein, mit Tests vorher und Rückfall auf die alte Version. Dasselbe auf der Konsole:
 
 ```bash
-cd /root/tw-update-guard && git pull --ff-only && ./install.sh
+twguard self-update
 ```
 
 Die `config.toml` braucht nur die Werte, die von den Vorgaben abweichen; neue Einstellungen kommen mit dem Update und sind in `/etc/twguard/config.default.toml` erklärt. Um eine ältere, vollständige Datei zu kürzen, zeigt `twguard config-diff`, was übrig bleibt (auch den Token); Sicherung anlegen, dann die Datei durch diese Ausgabe ersetzen. Kommentare werden nicht übernommen.

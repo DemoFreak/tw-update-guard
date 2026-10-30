@@ -57,6 +57,15 @@ class TelegramIdsTest(unittest.TestCase):
         self.assertIn("Telegram: getUpdates: timed out", err.getvalue())
 
 
+class UsageTest(unittest.TestCase):
+    def test_placeholders_are_marked(self):
+        for command, usage in (("self-update", "[<commit>]"), ("classify", "<file>")):
+            out = io.StringIO()
+            with contextlib.redirect_stdout(out), self.assertRaises(SystemExit):
+                cli.main([command, "--help"])
+            self.assertIn(usage, out.getvalue())
+
+
 class ConfigDiffTest(unittest.TestCase):
     def setUp(self):
         tmp = tempfile.TemporaryDirectory()

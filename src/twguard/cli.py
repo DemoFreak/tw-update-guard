@@ -141,13 +141,13 @@ def main(argv: list[str] | None = None) -> int:
     sub.add_parser("bot", help=tr("Telegram-Bot und Erinnerungen (Dienst)"))
     sub.add_parser("status", help=tr("offene Punkte anzeigen"))
     cl = sub.add_parser("classify", help=tr("gespeicherte Ausgabe von 'zypper --xmlout dup --dry-run --details' einstufen"))
-    cl.add_argument("file")
+    cl.add_argument("file", metavar="<file>")
     cl.add_argument("--exit-code", type=int, default=0, help=tr("Exit-Code des zypper-Laufs"))
     sub.add_parser("telegram-ids", help=tr("Chat- und Benutzer-IDs aus den letzten Nachrichten an den Bot zeigen"))
     sub.add_parser("config-diff", help=tr("nur die Werte der Konfiguration zeigen, die von den Vorgaben abweichen"))
     sub.add_parser("test-message", help=tr("Testnachricht an den konfigurierten Chat senden"))
-    su = sub.add_parser("self-update", help=tr("twguard aus der Git-Arbeitskopie aktualisieren (startet /update)"))
-    su.add_argument("commit", help=tr("Ziel-Commit (vollständiger Hash)"))
+    su = sub.add_parser("self-update", help=tr("twguard aus der Git-Arbeitskopie aktualisieren"))
+    su.add_argument("commit", nargs="?", default="", metavar="<commit>", help=tr("Ziel-Commit (Standard: neuester Stand)"))
     args = p.parse_args(argv)
 
     logging.basicConfig(level=logging.DEBUG if args.verbose else logging.INFO,
@@ -177,8 +177,8 @@ def _run_command(args: argparse.Namespace) -> int:
     if args.command == "telegram-ids":
         return cmd_telegram_ids(cfg)
     if args.command == "self-update":
-        from .ota import self_update
-        return self_update(cfg, args.commit)
+        from .ota import command
+        return command(cfg, args.commit)
     if args.command == "config-diff":
         print(config.to_toml(config.changed_values(args.config)), end="")
         return 0
