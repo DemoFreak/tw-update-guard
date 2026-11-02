@@ -76,6 +76,13 @@ at = "08:00"
 # Silent as long as nothing is open
 silent = true
 
+[services]
+# After an update, twguard offers to restart services that still hold deleted files.
+# Not offered: services whose restart would end sessions or cut off the network; they
+# get renewed by the next reboot. ["*"] turns the offer off.
+exclude = ["dbus*", "systemd-*", "user@*", "getty@*", "serial-getty@*", "display-manager*",
+           "NetworkManager*", "wicked*", "network*", "auditd"]
+
 [update]
 # Git working copy of tw-update-guard on this server; /update fetches the new
 # version from there (git fetch). Empty = disabled. install.sh enters the path itself.

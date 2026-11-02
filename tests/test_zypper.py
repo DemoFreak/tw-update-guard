@@ -94,7 +94,7 @@ class ParsePlanTest(unittest.TestCase):
             self.assertTrue(plan.failed)
             self.assertIn("keine Antwort", plan.errors[0])
             self.assertIsNone(zypper.needs_rebooting())
-            self.assertEqual(zypper.services_needing_restart(), [])
+            self.assertIsNone(zypper.services_needing_restart())
             limits = [c.kwargs["timeout"] for c in run.call_args_list]
         self.assertEqual(limits, [1800, 1800, 120, 120])
 

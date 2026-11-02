@@ -112,6 +112,28 @@ class SelfUpdateTest(CheckRemoteTest):
         self.assertEqual(self.installed.read_text(), "alt")
         self.assertIn("fehlgeschlagen", self.sent[0])
 
+    def test_missing_installer_rolls_back(self):
+        def install(cmd, *args, **kw):
+            if cmd == ["./install.sh"]:
+                self.installed.write_text("halb neu")
+                raise FileNotFoundError("install.sh")
+        self.run_cmd.side_effect = install
+        self.assertEqual(ota.self_update(self.cfg, self.target), 1)
+        self.assertEqual(git(self.server, "rev-parse", "HEAD"), self.old)
+        self.assertEqual(self.installed.read_text(), "alt")
+        self.assertIn("fehlgeschlagen", self.sent[0])
+
+    def test_failed_backup_rolls_back(self):
+        with mock.patch.object(ota.shutil, "copy2", side_effect=OSError("Platte voll")):
+            self.assertEqual(ota.self_update(self.cfg, self.target), 1)
+        self.assertEqual(git(self.server, "rev-parse", "HEAD"), self.old)
+        self.assertIn("Platte voll", self.sent[0])
+
+    def test_run_turns_process_errors_into_update_error(self):
+        mock.patch.stopall()
+        with self.assertRaises(ota.UpdateError):
+            ota._run(["/gibt/es/nicht"], self.tmp.name, 5)
+
     def test_bot_not_starting_rolls_back(self):
         def install(cmd, *args, **kw):
             if cmd == ["./install.sh"]:

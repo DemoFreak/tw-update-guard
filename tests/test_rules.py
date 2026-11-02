@@ -5,7 +5,7 @@ from pathlib import Path
 import testlang  # noqa: F401
 from twguard.config import Config
 from twguard.rules import Rules, classify, version_key
-from twguard.zypper import Plan, Solvable
+from twguard.zypper import Plan, Solvable, parse_plan
 
 
 def plan(**sections) -> Plan:
@@ -94,6 +94,22 @@ class ClassifyTest(unittest.TestCase):
         v = classify(p, self.rules)
         self.assertFalse(v.auto)
         self.assertFalse(v.approvable)
+
+    def test_conflict_message_is_short(self):
+        p = parse_plan((Path(__file__).parent / "fixtures" / "conflict-real.xml").read_text(), exit_code=4)
+        v = classify(p, self.rules)
+        self.assertEqual(len(v.reasons), 2)
+        self.assertIn("postfix", v.reasons[1])
+        self.assertIn("conflicts with", v.reasons[1])
+        self.assertNotIn("Solution", "\n".join(v.reasons))
+
+    def test_many_conflicts_are_capped(self):
+        p = plan()
+        p.problems = [f"Problem: {i}: Detailed information:\n- a{i} conflicts with b" + "x" * 500 for i in range(5)]
+        v = classify(p, self.rules)
+        self.assertEqual(len(v.reasons), 5)  # Überschrift, drei Konflikte, Hinweis auf den Rest
+        self.assertLess(len(v.reasons[1]), 210)
+        self.assertIn("2 weitere", v.reasons[4])
 
     def test_dovecot_switch_23_to_24(self):
         # dovecot 2.3 → 2.4 braucht eine neue Konfiguration

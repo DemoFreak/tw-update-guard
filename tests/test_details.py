@@ -99,5 +99,9 @@ class PagesTest(unittest.TestCase):
                 parser.feed(page)
                 self.assertEqual(parser.open, [])
 
+    def test_long_problem_keeps_its_solutions(self):
+        problem = "Problem: 1: Detailed information:\n" + "- x\n" * 400 + " Solution 1: weg"
+        self.assertIn("Solution 1", "".join(pages({"summary": "", "rows": [], "problems": [problem]}, "name")))
+
     def test_problems_are_shown(self):
         self.assertIn("Problem &lt;x&gt;", pages({"summary": "0 Pakete", "rows": [], "problems": ["Problem <x>"]}, "name")[0])

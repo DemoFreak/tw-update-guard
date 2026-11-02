@@ -14,6 +14,8 @@ from .zypper import Plan
 VIEWS = ("name", "version")
 # Telegram erlaubt 4096 Zeichen; HTML-Auszeichnungen zählen hier mit, das lässt Reserve
 PAGE_LIMIT = 3500
+# Ein Konflikt samt Lösungen; steht nur hier, die Meldung nennt ihn in einer Zeile
+PROBLEM_LIMIT = 3000
 # Hält auch sehr große Gruppen unter PAGE_LIMIT, sie gehen dann als weitere Gruppe weiter
 GROUP_NAMES = 40
 SEPARATORS = ".-:+~_"
@@ -92,7 +94,7 @@ def pages(plan: dict, view: str) -> list[str]:
                 current = heading
             current += f"\n{block}" if view == "name" else f"\n\n{block}"
     for problem in plan.get("problems", []):
-        block = escape(problem[:1000])
+        block = escape(problem[:PROBLEM_LIMIT])
         if len(current) + len(block) + 2 > PAGE_LIMIT:
             result.append(current)
             current = ""

@@ -16,7 +16,7 @@ from dataclasses import dataclass
 from html import escape
 from pathlib import Path
 
-from . import COMMIT, __version__, details, messages, ota, state, zypper
+from . import COMMIT, __version__, details, messages, ota, restarts, state, zypper
 from .config import Config
 from .i18n import EN, LANGUAGES, current, set_language, tr
 from .notify import (adopt_migration, clip, fmt_age, format_briefing, format_issue, format_status, issue_buttons,
@@ -31,6 +31,8 @@ RPMDB_PATHS = (Path("/usr/lib/sysimage/rpm/rpmdb.sqlite"), Path("/var/lib/rpm/rp
 MAX_COMMAND_AGE = 600
 TICK_SECONDS = 60
 REBOOT_CHECK_SECONDS = 1800
+# So lange wird höchstens auf das Ende eingereihter Dienst-Neustarts gewartet
+RESTART_TIMEOUT = 900
 # Nach einem Fehler bei getUpdates: erst kurz, dann länger warten
 RETRY_SECONDS = (2, 5, 15, 30)
 # Briefing wird nachgeholt, wenn der Bot zur Uhrzeit nicht lief, aber nur in diesem Zeitfenster
@@ -173,6 +175,7 @@ class Bot:
                 updates = []
             for update in updates:
                 self.process(update)
+            self.watch_restart()
             if time.time() - self.last_tick >= TICK_SECONDS:
                 self.tick()
 
@@ -236,6 +239,7 @@ class Bot:
             self.check_reboot()
 
         self.sync_migration()
+        self.deliver_restart_reports()
         with state.locked(self.cfg.state_dir) as st:
             base = st.last_check_ok or st.first_seen
             stale = base and now - base > self.cfg.escalation.stale_after_hours * 3600
@@ -278,6 +282,7 @@ class Bot:
 
     def check_reboot(self) -> None:
         self.last_reboot_check = time.time()
+        self.check_services()
         needed = zypper.needs_rebooting()
         if needed is None:
             return
@@ -286,6 +291,128 @@ class Bot:
                 st.open_issue("reboot", tr("zypper needs-rebooting meldet einen ausstehenden Neustart."))
             elif not needed and st.resolve("reboot"):
                 mark_resolved(self.cfg, st, self.tg)
+
+    def check_services(self) -> None:
+        # Während twguard selbst einspielt, ändert sich die Liste noch; der Prüflauf gleicht sie am Ende ab
+        if self._check_running():
+            return
+        found = zypper.services_needing_restart()
+        if found is None:
+            return
+        with state.locked(self.cfg.state_dir) as st:
+            restarts.note(st, found, self.cfg.services.exclude)
+
+    def watch_restart(self) -> None:
+        """Ergebnis eingereihter Dienst-Neustarts ermitteln, sobald systemd sie abgearbeitet hat."""
+        with state.locked(self.cfg.state_dir) as st:
+            request = dict(st.restart_request)
+        if not request:
+            return
+        names, errors = request["services"], request.get("errors", {})
+        waiting = [name for name in names if name not in errors]
+        timed_out = time.time() - request["at"] >= RESTART_TIMEOUT
+        jobs = restarts.pending(waiting)
+        if jobs:
+            if timed_out and not request.get("overdue"):
+                self._report_overdue(request, jobs)
+            return
+        if jobs is None and not timed_out:
+            return
+        current = restarts.states(waiting) if waiting else {}
+        found = zypper.services_needing_restart()
+        # Unbekannt ist kein Ergebnis: weiter nachfragen, erst an der Grenze ehrlich melden
+        if (found is None or "unknown" in current.values()) and not timed_out:
+            return
+        # Ohne Auskunft über die Aufträge kann auch ein aktiver Dienst noch auf seinen Neustart warten
+        unsettled = waiting if jobs is None else [name for name, s in current.items() if s == "unknown"]
+        current = {name: s for name, s in current.items() if name not in unsettled}
+        text, loud = self.restart_result(current, found, errors, unsettled)
+        with state.locked(self.cfg.state_dir) as st:
+            st.restart_request = {}
+            if found is not None:
+                restarts.note(st, found, self.cfg.services.exclude)
+            st.restart_reports.append({"chat_id": request["chat_id"], "message_id": request["message_id"],
+                                       "at": time.time(), "text": text, "loud": loud})
+        self.deliver_restart_reports()
+
+    def _report_overdue(self, request: dict, overdue: list[str]) -> None:
+        """Einmal warnen und weiter beobachten: Der Auftrag besteht noch und kann auch noch scheitern."""
+        text = f"⏳ <b>{self.host}</b>: " + tr(
+            "Neustart nach {minutes} Minuten nicht abgeschlossen, systemd arbeitet noch daran: {services}. "
+            "Das Ergebnis folgt.", minutes=RESTART_TIMEOUT // 60, services=escape(", ".join(overdue)))
+        with state.locked(self.cfg.state_dir) as st:
+            if st.restart_request:
+                st.restart_request["overdue"] = True
+            # Ohne message_id: Die Wartemeldung bleibt für das endgültige Ergebnis stehen
+            st.restart_reports.append({"chat_id": request["chat_id"], "at": time.time(), "text": text, "loud": True})
+        self.deliver_restart_reports()
+
+    def deliver_restart_reports(self) -> None:
+        """Ergebnisse bleiben gespeichert, bis Telegram sie angenommen hat; `tick` versucht es erneut."""
+        with state.locked(self.cfg.state_dir) as st:
+            if not st.restart_reports:
+                return
+            kept = [report for report in st.restart_reports if not self._deliver_restart_report(report)]
+            delivered = len(kept) < len(st.restart_reports)
+            st.restart_reports = kept
+            if delivered:
+                send_due(self.cfg, st, self.tg)
+
+    def _deliver_restart_report(self, report: dict) -> bool:
+        if not report["loud"]:
+            return messages.edit_or_send(self.tg, report, report["text"]) is not None
+        # Ein gescheiterter Dienst steht nicht mehr in `zypper ps`; nur diese Meldung weist auf ihn hin
+        try:
+            self.tg.send(report["text"], chat_id=report["chat_id"])
+        except TelegramError as e:
+            log.debug(tr("Nachricht nicht gesendet: %s"), e)
+            return False
+        if report.get("message_id"):
+            messages.retire(self.tg, report)
+        return True
+
+    def restart_result(self, current: dict[str, str], found: list[str] | None, errors: dict[str, str],
+                       unsettled: list[str] = ()) -> tuple[str, bool]:
+        """Text des Ergebnisses und ob es mit Ton kommen muss."""
+        running = [name for name, s in current.items() if s == "active"]
+        stopped = [f"{name} ({s})" for name, s in current.items() if s != "active"]
+        rejected = [f"{name} ({clip(e, 300)})" for name, e in errors.items()]
+
+        def line(icon: str, text: str) -> str:
+            return f"{icon} <b>{self.host}</b>: {text}"
+
+        def join(names: list[str]) -> str:
+            return escape(", ".join(names))
+
+        lines = []
+        if found is None:
+            if running:
+                lines.append(line("⚠️", tr("läuft, aber zypper ps gab keine Auskunft über alte Dateien: {services}",
+                                           services=join(running))))
+        else:
+            renewed = [name for name in running if name not in found]
+            old = [name for name in running if name in found]
+            if renewed:
+                lines.append(line("✅", tr("neu gestartet: {services}", services=join(renewed))))
+            if old:
+                lines.append(line("⚠️", tr("nutzt weiter alte Dateien: {services}", services=join(old))))
+        if stopped:
+            lines.append(line("🔴", tr("nach dem Neustart nicht aktiv: {services}", services=join(stopped))))
+        if rejected:
+            lines.append(line("🔴", tr("Neustart abgewiesen: {services}", services=join(rejected))))
+        if unsettled:
+            lines.append(line("⚠️", tr("Ergebnis des Neustarts unbekannt, systemd gab keine Auskunft: {services}",
+                                       services=join(list(unsettled)))))
+        return "\n".join(lines), bool(stopped or rejected or unsettled) or found is None
+
+    def _check_running(self) -> bool:
+        """Läuft der Prüflauf? Als oneshot steht er währenddessen auf „activating“, nicht „active“."""
+        try:
+            p = subprocess.run(["systemctl", "is-active", CHECK_UNIT], capture_output=True, text=True,
+                               timeout=restarts.SYSTEMCTL_TIMEOUT)
+        except (OSError, subprocess.TimeoutExpired):
+            return True
+        return p.stdout.strip() in ("active", "activating", "reloading", "deactivating")
 
     def start_check(self) -> None:
         subprocess.run(["systemctl", "start", "--no-block", CHECK_UNIT], check=False)
@@ -372,10 +499,9 @@ class Bot:
             nav.append((f"{page}/{len(all_pages)}", f"details:{view}:{page}"))
         if page < len(all_pages):
             nav.append(("➡️", f"details:{view}:{page + 1}"))
-        first = [(label, f"details:{other}:1")]
-        if plan.get("rows"):
-            first.append((tr("📄 Als Datei"), "file"))
-        rows = [first, *([nav] if nav else []), *back_row]
+        # Ohne Pakete (Solver-Konflikt) gibt es nichts umzuschalten oder als Datei zu schicken
+        first = [(label, f"details:{other}:1"), (tr("📄 Als Datei"), "file")] if plan.get("rows") else []
+        rows = [*([first] if first else []), *([nav] if nav else []), *back_row]
         return f"<b>{self.host}</b>\n{all_pages[page - 1]}", rows
 
     def cmd_details(self, args: list[str], addressed: bool = False) -> Out:
@@ -385,8 +511,23 @@ class Bot:
     def cmd_approve(self, args: list[str], addressed: bool = False) -> Out:
         error = self.approve()
         if error:
+            self._show_unseen_plan()
             return Out(error, ttl=SHORT)
         return Out(self.approved_text(), topic="status", start_check=True)
+
+    def _show_unseen_plan(self) -> None:
+        """Einen noch nicht gezeigten Plan sofort melden, auch in der Ruhezeit: es wird gerade gefragt."""
+        with state.locked(self.cfg.state_dir) as st:
+            issue = st.issues.get("manual")
+            if issue is None or not issue.approvable or issue.fingerprint == st.manual_shown:
+                return
+            text = format_issue(self.cfg.hostname, issue, time.time(), self.cfg.escalation)
+            try:
+                messages.replace(self.tg, st, "issue:manual", text, issue_buttons(issue))
+            except TelegramError as e:
+                log.debug(tr("Nachricht nicht gesendet: %s"), e)
+                return
+            st.manual_shown = issue.fingerprint
 
     def approved_text(self) -> str:
         return tr("⏳ Freigegeben. <b>{host}</b> spielt das Update ein; das Ergebnis erscheint hier.", host=self.host)
@@ -404,6 +545,9 @@ class Bot:
                 return tr("Das lässt sich nicht per Telegram freigeben, bitte per SSH lösen.")
             elif fingerprint and fingerprint != issue.fingerprint:
                 return tr("Diese Meldung gilt einem älteren Stand. /status zeigt den aktuellen.")
+            elif not fingerprint and issue.fingerprint != st.manual_shown:
+                # /approve nennt keinen Stand; er darf nur gelten, was zuletzt zu sehen war
+                return tr("Der Plan hat sich geändert, nichts freigegeben. Bitte die aktuelle Meldung prüfen.")
             else:
                 st.approved_fingerprint = issue.fingerprint
         return ""
@@ -517,7 +661,7 @@ class Bot:
         with state.locked(self.cfg.state_dir) as st:
             if st.update_request:
                 return tr("Ein Update läuft bereits.")
-            messages.release(st, pressed["message_id"])
+            messages.release(st, pressed)
             st.update_request = {"commit": commit, "chat_id": pressed["chat_id"],
                                  "message_id": pressed["message_id"], "at": time.time()}
         error = ota.start(commit)
@@ -609,6 +753,8 @@ class Bot:
             "reboot": self.press_reboot,
             "cancel": self.press_cancel,
             "update": self.press_update,
+            "restart": self.press_restart,
+            "resolved": self.press_resolved,
             "dismiss": self.press_dismiss,
         }.get(action)
         if handler is None:
@@ -632,13 +778,13 @@ class Bot:
             # Ursprünglichen Inhalt merken, damit „Zurück“ ihn genau so wiederherstellt;
             # Umschalten und Blättern (mit `arg`) zeigen schon die Liste
             if not arg:
-                st.collapsed[str(pressed["message_id"])] = {
+                st.collapsed[messages.key(pressed)] = {
                     "text": msg.get("text", ""),
                     "entities": msg.get("entities", []),
                     "reply_markup": msg.get("reply_markup", {}),
                     "at": time.time(),
                 }
-            back = str(pressed["message_id"]) in st.collapsed
+            back = messages.key(pressed) in st.collapsed
         messages.edit(self.tg, pressed, *self.details_view(arg, back))
 
     def press_file(self, cq: dict, pressed: dict, arg: str) -> None:
@@ -665,7 +811,7 @@ class Bot:
 
     def press_back(self, cq: dict, pressed: dict, arg: str) -> None:
         with state.locked(self.cfg.state_dir) as st:
-            original = st.collapsed.pop(str(pressed["message_id"]), None)
+            original = st.collapsed.pop(messages.key(pressed), None)
         if original is None:
             self._answer(cq, tr("Nicht mehr verfügbar."))
             messages.edit(self.tg, pressed, self.details_view()[0])
@@ -686,13 +832,15 @@ class Bot:
                 return
             text = format_issue(self.cfg.hostname, issue, time.time(), self.cfg.escalation)
             text += tr("\n\n⏰ Aufgeschoben bis {when}", when=stamp(issue.snoozed_until))
-            buttons = issue_buttons(issue, later=False)
-        messages.edit(self.tg, pressed, text, buttons)
+            buttons = issue_buttons(issue, later=False, services=st.restart_services)
+            # Die Nachricht zeigt danach den aktuellen Stand, auch wenn sie einen älteren zeigte
+            if messages.edit(self.tg, pressed, text, buttons) and kind == "manual":
+                st.manual_shown = issue.fingerprint
 
     def press_check(self, cq: dict, pressed: dict, arg: str) -> None:
         self._answer(cq, tr("Prüfung läuft …"))
         with state.locked(self.cfg.state_dir) as st:
-            on_status = st.messages.get("status", {}).get("message_id") == pressed["message_id"]
+            on_status = messages.same(st.messages.get("status", {}), pressed)
         if on_status:
             # Die Statusnachricht selbst wird zur Wartemeldung und dann zum Ergebnis
             self._take_over(pressed, self.checking_text(), request=True, topic="status")
@@ -705,7 +853,7 @@ class Bot:
         self._answer(cq)
         text, buttons = self.status_view()
         with state.locked(self.cfg.state_dir) as st:
-            on_status = st.messages.get("status", {}).get("message_id") == pressed["message_id"]
+            on_status = messages.same(st.messages.get("status", {}), pressed)
         if on_status:
             messages.edit(self.tg, pressed, text, buttons)
         else:
@@ -724,7 +872,7 @@ class Bot:
         text = self.cancel()
         self._answer(cq, plain(text))
         with state.locked(self.cfg.state_dir) as st:
-            messages.release(st, pressed["message_id"])
+            messages.release(st, pressed)
         messages.edit(self.tg, pressed, text)
 
     def press_update(self, cq: dict, pressed: dict, commit: str) -> None:
@@ -737,10 +885,84 @@ class Bot:
         messages.edit(self.tg, pressed, tr("⏳ <b>{host}</b>: Update auf {commit} läuft, der Bot startet gleich neu; "
                                            "das Ergebnis erscheint hier.", host=self.host, commit=escape(commit[:12])))
 
+    def press_restart(self, cq: dict, pressed: dict, arg: str) -> None:
+        """Einen Dienst oder (`*:<Kennung>`) genau die gezeigte Liste neu starten."""
+        with state.locked(self.cfg.state_dir) as st:
+            running, listed = bool(st.restart_request), list(st.restart_services)
+            updating = bool(st.update_request)
+        if running or updating:
+            self._answer(cq, tr("Ein Neustart läuft bereits.") if running else tr("Ein Update läuft bereits."), alert=True)
+            return
+        if self._check_running():
+            self._answer(cq, tr("Gerade läuft ein Prüflauf, nichts neu gestartet. Bitte danach erneut."), alert=True)
+            return
+        found = zypper.services_needing_restart()
+        if found is None:
+            self._answer(cq, tr("zypper ps gab keine Auskunft, nichts neu gestartet."), alert=True)
+            return
+        if arg.startswith("*:"):
+            names = listed if arg == f"*:{restarts.digest(listed)}" and set(listed) <= set(found) else []
+        else:
+            names = [arg] if arg in listed and arg in found else []
+        if not names:
+            self._offer_current(cq, pressed, found)
+            return
+        # Erst alles festhalten und anzeigen: Ist der Bot selbst dabei, wird er gleich beendet
+        with state.locked(self.cfg.state_dir) as st:
+            messages.release(st, pressed)
+            st.resolve("services")
+            st.restart_services = []
+            st.restart_request = {"chat_id": pressed["chat_id"], "message_id": pressed["message_id"],
+                                  "at": time.time(), "services": names}
+        self._answer(cq, tr("Neustart läuft …"))
+        messages.edit(self.tg, pressed, tr("⏳ <b>{host}</b>: starte neu: {services}. Das Ergebnis erscheint hier.",
+                                           host=self.host, services=escape(", ".join(names))))
+        # Abgewiesene merken, bevor sich der Bot selbst einreiht: Das kann ihn sofort beenden
+        self._note_restart_errors(restarts.start([n for n in names if n != restarts.BOT_SERVICE]))
+        if restarts.BOT_SERVICE in names:
+            self._note_restart_errors(restarts.start([restarts.BOT_SERVICE]))
+
+    def _note_restart_errors(self, errors: dict[str, str]) -> None:
+        if errors:
+            with state.locked(self.cfg.state_dir) as st:
+                st.restart_request["errors"] = {**st.restart_request.get("errors", {}), **errors}
+
+    def _offer_current(self, cq: dict, pressed: dict, found: list[str]) -> None:
+        """Alter Knopf: nichts neu starten, sondern in dieser Nachricht den aktuellen Stand zeigen."""
+        self._answer(cq, tr("Die Liste hat sich geändert, nichts neu gestartet."), alert=True)
+        with state.locked(self.cfg.state_dir) as st:
+            restarts.note(st, found, self.cfg.services.exclude)
+            issue = st.issues.get("services")
+            messages.release(st, pressed)
+            if issue is None:
+                text, buttons = f"✅ <b>{self.host}</b>: " + tr("Dieser Neustart ist nicht mehr nötig."), None
+            else:
+                text = format_issue(self.cfg.hostname, issue, time.time(), self.cfg.escalation)
+                buttons = issue_buttons(issue, services=st.restart_services)
+                old = st.messages.get("issue:services")
+                messages.claim(st, "issue:services", {"chat_id": pressed["chat_id"], "message_id": pressed["message_id"],
+                                                      "at": pressed["at"]})
+                if old and not messages.same(old, pressed):
+                    messages.retire(self.tg, old)
+            messages.edit(self.tg, pressed, text, buttons)
+
+    def press_resolved(self, cq: dict, pressed: dict, kind: str) -> None:
+        """Fehlgeschlagenes Einspielen als von Hand behoben quittieren."""
+        if kind != "apply-failed":
+            self._answer(cq, tr("Unbekannte Schaltfläche."))
+            return
+        self._answer(cq)
+        with state.locked(self.cfg.state_dir) as st:
+            messages.release(st, pressed)
+            st.resolve(kind)
+            mark_resolved(self.cfg, st, self.tg)
+        messages.edit(self.tg, pressed, f"✅ <b>{self.host}</b>: " +
+                      tr("{title} – erledigt ({when})", title=title(kind), when=stamp(time.time())))
+
     def press_dismiss(self, cq: dict, pressed: dict, arg: str) -> None:
         self._answer(cq)
         with state.locked(self.cfg.state_dir) as st:
-            messages.release(st, pressed["message_id"])
+            messages.release(st, pressed)
         if not messages.delete(self.tg, pressed):
             messages.edit(self.tg, pressed, tr("✖️ verworfen"))
 
@@ -769,10 +991,10 @@ class Bot:
         """Gedrückte Nachricht umwidmen: neuer Inhalt, alte Themenzuordnung lösen, ggf. neue setzen."""
         with state.locked(self.cfg.state_dir) as st:
             old = st.messages.get(topic) if topic else None
-            messages.release(st, pressed["message_id"])
+            messages.release(st, pressed)
             if topic:
                 messages.claim(st, topic, pressed)
-                if old and old["message_id"] != pressed["message_id"]:
+                if old and not messages.same(old, pressed):
                     messages.retire(self.tg, old)
             if request:
                 st.check_request = {**pressed, "at": time.time()}

@@ -73,9 +73,11 @@ In a group, commands for a specific server only apply as a **reply to a message 
 
 All commands are also in the menu next to the input line.
 
+**Services holding old files:** After an update, and every 30 minutes, twguard asks `zypper ps` which services still hold deleted files. They become an open issue with one button per service and “Restart all”. A press restarts only services that were offered and that `zypper ps` still lists; the same message then shows the result, and a service that is not running afterwards is reported as a new message with sound. Services whose restart would end sessions or cut off the network (D-Bus, `systemd-*`, `user@*`, network services and the like) are not offered; `[services] exclude` sets the patterns, `["*"]` turns the offer off. These services get renewed by the next reboot.
+
 **Language:** `language = "en"` (default) or `"de"` in `[general]` sets the language of the Telegram output per server, including buttons, command menu and the HTML file; then run `systemctl restart twguard-bot`. `/language` changes it at runtime and says so; a bot restart (also through `/update` or a reboot) returns to the configuration, so to make a change permanent you enter it there. Every server understands the permanent keyboard in all languages, even if it comes from a bot with a different language. Messages already sent and the reasons of open issues stay in the old language until they are generated again.
 
-Messages have buttons for the most important commands (Approve, Details, 1 day later, Reboot, Cancel reboot, Check again). A button only reaches the bot that sent the message; buttons with consequences disappear after the first press. “Approve” only applies to the state reported in that message.
+Messages have buttons for the most important commands (Approve, Details, 1 day later, Reboot, Cancel reboot, Restart service, Check again). A button only reaches the bot that sent the message; buttons with consequences disappear after the first press. “Approve” only applies to the state reported in that message.
 
 ## Updating twguard itself (OTA)
 

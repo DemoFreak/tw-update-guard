@@ -7,7 +7,7 @@ import logging
 import time
 from html import escape
 
-from . import messages
+from . import messages, restarts
 from .config import Config, Escalation
 from .i18n import LANGUAGES, set_language, tr, trn
 from .state import Issue, State
@@ -19,12 +19,16 @@ log = logging.getLogger(__name__)
 TITLES = {
     "manual": "Update braucht Freigabe",
     "reboot": "Neustart ausstehend",
+    "services": "Dienste nutzen alte Dateien",
     "error": "Update-Prüfung schlägt fehl",
     "apply-failed": "Update ist fehlgeschlagen",
     "stale": "Keine Update-Prüfung mehr",
 }
 # Das Aussehen ändert sich mit der Stufe, damit keine Gewöhnung an eine Form entsteht
 ICONS = ("ℹ️", "⚠️", "🔴", "🚨")
+MAX_SERVICE_BUTTONS = 12
+# Grenze von Telegram für die Daten einer Schaltfläche
+MAX_CALLBACK_BYTES = 64
 
 
 def use_language(cfg: Config) -> None:
@@ -114,10 +118,25 @@ def _hint(issue: Issue) -> str:
         return tr("Bitte per SSH lösen (zypper dup). „Details“ zeigt den Konflikt.")
     if issue.kind == "reboot":
         return tr("Schaltflächen unten oder als Antwort /reboot (Neustart in 1 Minute), /later 1d.")
+    if issue.kind == "services":
+        return tr("Schaltflächen unten oder als Antwort /later 1d.")
+    if issue.kind == "apply-failed":
+        return tr("Bitte per SSH nachsehen: journalctl -u twguard-check. Danach „Behoben“ drücken; "
+                  "ein leerer Plan allein zeigt das nicht.")
     return tr("Bitte per SSH nachsehen: journalctl -u twguard-check")
 
 
-def issue_buttons(issue: Issue, later: bool = True) -> Buttons:
+def service_buttons(names: list[str]) -> Buttons:
+    """Je Dienst eine Schaltfläche, soweit Platz ist; mehrere zusammen mit „Alle“."""
+    single = [(f"🔁 {name}", f"restart:{name}") for name in names[:MAX_SERVICE_BUTTONS]
+              if len(f"restart:{name}".encode()) <= MAX_CALLBACK_BYTES]
+    rows = [single[i:i + 2] for i in range(0, len(single), 2)]
+    if len(names) > 1 or not single:
+        rows.append([(tr("🔁 Alle neu starten ({n})", n=len(names)), f"restart:*:{restarts.digest(names)}")])
+    return rows
+
+
+def issue_buttons(issue: Issue, later: bool = True, services: list[str] | None = None) -> Buttons:
     """Schaltflächen zu einem offenen Punkt; die Freigabe ist an den Fingerabdruck gebunden."""
     later_row = [[(tr("⏰ 1 Tag später"), f"later:24:{issue.kind}")]] if later else []
     if issue.kind == "manual":
@@ -126,6 +145,10 @@ def issue_buttons(issue: Issue, later: bool = True) -> Buttons:
         return [[("📋 Details", "details"), (tr("🔄 Neu prüfen"), "check")]]
     if issue.kind == "reboot":
         return [[(tr("🔁 Neu starten"), "reboot")], *later_row]
+    if issue.kind == "services":
+        return [*service_buttons(services or []), *later_row]
+    if issue.kind == "apply-failed":
+        return [[(tr("✅ Behoben"), f"resolved:{issue.kind}"), (tr("🔄 Neu prüfen"), "check")]]
     return [[(tr("🔄 Neu prüfen"), "check"), ("📊 Status", "status")]]
 
 
@@ -270,9 +293,11 @@ def send_due(cfg: Config, st: State, tg: Telegram, now: float | None = None) -> 
             continue
         try:
             messages.replace(tg, st, f"issue:{issue.kind}", format_issue(cfg.hostname, issue, now, cfg.escalation),
-                             buttons=issue_buttons(issue))
+                             buttons=issue_buttons(issue, services=st.restart_services))
         except TelegramError as e:
             log.debug(tr("Erinnerung nicht gesendet: %s"), e)
             continue
         issue.last_notified = now
         issue.notify_count += 1
+        if issue.kind == "manual":
+            st.manual_shown = issue.fingerprint

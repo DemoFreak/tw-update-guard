@@ -8,7 +8,7 @@ import time
 from html import escape
 from pathlib import Path
 
-from . import details, messages, state, zypper
+from . import details, messages, restarts, state, zypper
 from .config import Config
 from .i18n import tr
 from .notify import (adopt_migration, format_issue, format_observed, format_reasons, format_report, issue_buttons,
@@ -58,7 +58,7 @@ def finish(cfg: Config, tg: Telegram, text: str, buttons: Buttons | None = None,
         with state.locked(cfg.state_dir) as st:
             old = st.messages.get(topic)
             messages.claim(st, topic, shown)
-            if old and old["message_id"] != shown["message_id"]:
+            if old and not messages.same(old, shown):
                 messages.retire(tg, old)
     return shown is not None
 
@@ -138,16 +138,25 @@ def _run(cfg: Config, tg: Telegram, dry_run: bool) -> int:
 
     if not (verdict.auto or approved):
         log.info(tr("Freigabe nötig: %s"), "; ".join(verdict.reasons))
+        for problem in plan.problems:
+            log.info("%s", problem)
         detail = format_reasons(verdict.reasons)
         if expired:
             detail = tr("Die Freigabe galt einem älteren Stand und ist verfallen.") + "\n\n" + detail
         with state.locked(cfg.state_dir) as st:
+            previous = st.issues.get("manual")
+            changed = previous is not None and previous.fingerprint != fingerprint
             issue, _ = st.open_issue("manual", detail, fingerprint=fingerprint, approvable=verdict.approvable)
             now = time.time()
+            if changed:
+                # Ein anderer Plan ist ein neues Angebot: sofort melden, ein Aufschub galt dem alten
+                issue.last_notified = issue.snoozed_until = 0.0
+                issue.notify_count = issue.snooze_count = 0
             text, buttons = format_issue(cfg.hostname, issue, now, cfg.escalation), issue_buttons(issue)
         # Auf Anfrage sofort und vollständig antworten, auch in der Ruhezeit
         if finish(cfg, tg, text, buttons, topic="issue:manual"):
             with state.locked(cfg.state_dir) as st:
+                st.manual_shown = fingerprint
                 if "manual" in st.issues and not st.issues["manual"].last_notified:
                     st.issues["manual"].last_notified = now
                     st.issues["manual"].notify_count += 1
@@ -188,15 +197,19 @@ def _run(cfg: Config, tg: Telegram, dry_run: bool) -> int:
     warn = bool(deviation) or unverified
 
     reboot = rc == zypper.EXIT_REBOOT_NEEDED or zypper.needs_rebooting() is True
-    services = zypper.services_needing_restart()
+    found = zypper.services_needing_restart()
     with state.locked(cfg.state_dir) as st:
         st.resolve("manual")
         st.resolve("apply-failed")
         st.approved_fingerprint = ""
         if reboot and "reboot" not in st.issues:
             st.open_issue("reboot", tr("Nach dem Update ist ein Neustart nötig (Kernel oder Systembibliotheken)."))
+        if found is not None:
+            restarts.note(st, found, cfg.services.exclude)
         send_due(cfg, st, tg)
-    report = format_report(cfg.hostname, plan.packages_to_change, approved, reboot, services, deviation, unverified)
+    # Die übrigen Dienste bietet die Meldung des offenen Punkts zum Neustart an
+    skipped = restarts.split(found or [], cfg.services.exclude)[1]
+    report = format_report(cfg.hostname, plan.packages_to_change, approved, reboot, skipped, deviation, unverified)
     # Berichte bleiben bis zum nächsten Briefing stehen; das fasst sie zusammen und löscht sie
     entry = {"at": time.time(), "packages": plan.packages_to_change}
     if not finish(cfg, tg, report, loud=warn) and (cfg.report_routine or approved or warn):

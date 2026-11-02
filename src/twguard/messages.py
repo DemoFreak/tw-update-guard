@@ -25,14 +25,23 @@ def ref(sent: dict) -> dict:
     return {"chat_id": sent["chat"]["id"], "message_id": sent["message_id"], "at": time.time()}
 
 
-def release(st: State, message_id: int) -> None:
+def same(a: dict, b: dict) -> bool:
+    """Telegram vergibt Nachrichten-IDs je Chat; erst beide Angaben bestimmen eine Nachricht."""
+    return a.get("message_id") == b.get("message_id") and a.get("chat_id") == b.get("chat_id")
+
+
+def key(message: dict) -> str:
+    return f"{message['chat_id']}:{message['message_id']}"
+
+
+def release(st: State, message: dict) -> None:
     """Die Nachricht gehört danach keinem Thema mehr (z. B. weil sie umgewidmet wird)."""
-    for topic in [t for t, r in st.messages.items() if r.get("message_id") == message_id]:
+    for topic in [t for t, r in st.messages.items() if same(r, message)]:
         del st.messages[topic]
 
 
 def claim(st: State, topic: str, message: dict) -> None:
-    release(st, message["message_id"])
+    release(st, message)
     st.messages[topic] = message
 
 
@@ -68,8 +77,9 @@ def replace(tg: Telegram, st: State, topic: str, text: str, buttons: Buttons | N
     """Neue Nachricht zum Thema senden und danach die vorige entfernen. Wirft TelegramError."""
     old = st.messages.get(topic)
     sent = tg.send(text, chat_id=chat_id, silent=silent, buttons=buttons, markup=markup)
-    claim(st, topic, ref(sent))
-    if old and old["message_id"] != sent["message_id"]:
+    new = ref(sent)
+    claim(st, topic, new)
+    if old and not same(old, new):
         retire(tg, old)
     return sent
 

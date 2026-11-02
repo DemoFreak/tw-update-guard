@@ -1,3 +1,4 @@
+import subprocess
 import tempfile
 import time
 import unittest
@@ -5,10 +6,12 @@ from pathlib import Path
 from unittest import mock
 
 import testlang  # noqa: F401
-from twguard import ota, state
+from twguard import ota, restarts, state, zypper
 from twguard.bot import Bot, parse_duration
 from twguard.config import Config
 from twguard.i18n import current, set_language
+from twguard.notify import send_due
+from twguard.telegram import TelegramError
 
 from fakes import FakeTelegram
 
@@ -33,12 +36,15 @@ class BotTest(unittest.TestCase):
         self.tg = FakeTelegram()
         self.bot = Bot(cfg, tg=self.tg, me=ME)
         self.start_check = mock.patch.object(Bot, "start_check").start()
+        mock.patch.object(Bot, "_check_running", return_value=False).start()
+        self.found = mock.patch.object(zypper, "services_needing_restart", return_value=[]).start()
         self.addCleanup(mock.patch.stopall)
         self.addCleanup(self.tmp.cleanup)
 
     def open_manual(self, approvable=True):
         with state.locked(self.bot.cfg.state_dir) as st:
             st.open_issue("manual", "• kritisches Paket", fingerprint="abc", approvable=approvable)
+            st.manual_shown = "abc"
 
     def test_status_broadcast_answered(self):
         self.bot.handle(message("/status"))
@@ -351,6 +357,356 @@ class BotTest(unittest.TestCase):
         self.bot.cfg.help_full = True
         self.bot.handle(message("/help"))
         self.assertIn("/approve", self.tg.sent[1])
+
+    def offer(self, *names):
+        with state.locked(self.bot.cfg.state_dir) as st:
+            restarts.note(st, list(names), self.bot.cfg.services.exclude)
+        self.found.return_value = list(names)
+
+    def test_tick_offers_restart_with_buttons(self):
+        self.found.return_value = ["postfix", "sshd"]
+        with mock.patch.object(zypper, "needs_rebooting", return_value=False):
+            self.bot.check_reboot()
+            self.bot.tick()
+        data = [b[1] for row in self.tg.buttons[0] for b in row]
+        self.assertEqual(data[:3], ["restart:postfix", "restart:sshd", f"restart:*:{restarts.digest(['postfix', 'sshd'])}"])
+        self.assertIn("later:24:services", data)
+
+    def test_no_scan_while_check_runs(self):
+        self.bot._check_running.return_value = True
+        self.bot.check_services()
+        self.found.assert_not_called()
+
+    def test_button_restarts_one_service(self):
+        self.offer("postfix", "sshd")
+        with mock.patch.object(restarts, "start", return_value={}) as start:
+            self.press("restart:sshd")
+        start.assert_called_once_with(["sshd"])
+        self.assertIn("sshd", self.tg.edited[-1][1])
+        self.assertIsNone(self.tg.edited[-1][2])
+        with state.locked(self.bot.cfg.state_dir) as st:
+            self.assertEqual(st.restart_request["services"], ["sshd"])
+            self.assertNotIn("services", st.issues)
+
+    def all_button(self, *names):
+        return f"restart:*:{restarts.digest(list(names))}"
+
+    def test_all_covers_only_what_was_offered(self):
+        self.offer("postfix", "sshd")
+        self.found.return_value = ["postfix", "sshd", "unseen"]
+        with mock.patch.object(restarts, "start", return_value={}) as start:
+            self.press(self.all_button("postfix", "sshd"))
+        start.assert_called_once_with(["postfix", "sshd"])
+
+    def test_old_all_button_does_not_cover_later_service(self):
+        self.offer("postfix", "sshd")
+        self.offer("mariadb", "postfix", "sshd")  # erkannt, aber z. B. in der Ruhezeit noch nicht gemeldet
+        with mock.patch.object(restarts, "start") as start:
+            self.press(self.all_button("postfix", "sshd"))
+        start.assert_not_called()
+        # Stattdessen zeigt die Nachricht jetzt den aktuellen Stand mit aktuellem Knopf
+        data = [b[1] for row in self.tg.edited[-1][2] for b in row]
+        self.assertIn(self.all_button("mariadb", "postfix", "sshd"), data)
+
+    def test_used_all_button_cannot_fire_again(self):
+        self.offer("sshd", "postfix")
+        with state.locked(self.bot.cfg.state_dir) as st:
+            names = list(st.restart_services)
+            st.restart_services = []
+        with mock.patch.object(restarts, "start") as start:
+            self.press(self.all_button(*names))
+        start.assert_not_called()
+
+    def test_unknown_scan_restarts_nothing(self):
+        self.offer("sshd")
+        self.found.return_value = None
+        with mock.patch.object(restarts, "start") as start:
+            self.press("restart:sshd")
+        start.assert_not_called()
+        with state.locked(self.bot.cfg.state_dir) as st:
+            self.assertIn("services", st.issues)
+
+    def test_no_restart_during_check_or_update(self):
+        self.offer("sshd")
+        self.bot._check_running.return_value = True
+        with mock.patch.object(restarts, "start") as start:
+            self.press("restart:sshd")
+            self.bot._check_running.return_value = False
+            with state.locked(self.bot.cfg.state_dir) as st:
+                st.update_request = {"commit": "x"}
+            self.press("restart:sshd")
+        start.assert_not_called()
+
+    def test_bot_itself_is_restarted_last_after_saving_errors(self):
+        self.offer("postfix", "twguard-bot", "zzz")
+        order = []
+
+        def start(names):
+            with state.locked(self.bot.cfg.state_dir) as st:
+                order.append((names, dict(st.restart_request.get("errors", {}))))
+            return {"zzz": "maskiert"} if "zzz" in names else {}
+
+        with mock.patch.object(restarts, "start", side_effect=start):
+            self.press(self.all_button("postfix", "twguard-bot", "zzz"))
+        self.assertEqual(order, [(["postfix", "zzz"], {}), (["twguard-bot"], {"zzz": "maskiert"})])
+
+    def test_button_cannot_restart_foreign_service(self):
+        self.offer("sshd")
+        self.found.return_value = ["sshd", "mariadb"]
+        with mock.patch.object(restarts, "start") as start:
+            self.press("restart:mariadb")
+        start.assert_not_called()
+
+    def test_gone_service_is_not_restarted_rest_offered_here(self):
+        self.offer("postfix", "sshd")
+        self.found.return_value = ["postfix"]
+        with mock.patch.object(restarts, "start") as start:
+            self.press("restart:sshd")
+        start.assert_not_called()
+        self.assertEqual([b[1] for b in self.tg.edited[-1][2][0]], ["restart:postfix"])
+        with state.locked(self.bot.cfg.state_dir) as st:
+            self.assertEqual(st.restart_services, ["postfix"])
+            self.assertEqual(st.messages["issue:services"]["message_id"], 5)
+
+    def test_second_press_while_running_refused(self):
+        self.offer("sshd")
+        with state.locked(self.bot.cfg.state_dir) as st:
+            st.restart_request = {"services": ["postfix"], "at": time.time(), "chat_id": -100, "message_id": 1}
+        with mock.patch.object(restarts, "start") as start:
+            self.press("restart:sshd")
+        start.assert_not_called()
+
+    def test_partly_rejected_restart_is_still_followed(self):
+        self.offer("postfix", "sshd")
+        with mock.patch.object(restarts, "start", return_value={"sshd": "Unit <x> masked"}):
+            self.press(self.all_button("postfix", "sshd"))
+        self.found.return_value = ["sshd"]
+        with mock.patch.object(restarts, "pending", return_value=[]) as pending, \
+                mock.patch.object(restarts, "states", return_value={"postfix": "active"}):
+            self.bot.watch_restart()
+        pending.assert_called_once_with(["postfix"])
+        self.assertIn("neu gestartet: postfix", self.tg.sent[0])
+        self.assertIn("Unit &lt;x&gt; masked", self.tg.sent[0])
+        self.assertFalse(self.tg.silent[0])
+        with state.locked(self.bot.cfg.state_dir) as st:
+            self.assertEqual(st.restart_services, ["sshd"])  # wird wieder angeboten
+
+    def running(self, *names):
+        with state.locked(self.bot.cfg.state_dir) as st:
+            st.restart_request = {"chat_id": -100, "message_id": 55, "at": time.time(), "services": list(names)}
+
+    def test_result_waits_for_jobs(self):
+        self.running("sshd")
+        with mock.patch.object(restarts, "pending", return_value=["sshd"]):
+            self.bot.watch_restart()
+        self.assertEqual(self.tg.edited, [])
+
+    def test_result_success_edits_message(self):
+        self.running("sshd")
+        self.found.return_value = []
+        with mock.patch.object(restarts, "pending", return_value=[]), \
+                mock.patch.object(restarts, "states", return_value={"sshd": "active"}):
+            self.bot.watch_restart()
+        self.assertEqual(self.tg.edited[-1][0], 55)
+        self.assertIn("✅", self.tg.edited[-1][1])
+        self.assertEqual(self.tg.sent, [])
+        with state.locked(self.bot.cfg.state_dir) as st:
+            self.assertEqual(st.restart_request, {})
+
+    def test_result_failure_is_new_message_with_sound(self):
+        self.running("sshd")
+        with mock.patch.object(restarts, "pending", return_value=[]), \
+                mock.patch.object(restarts, "states", return_value={"sshd": "failed"}):
+            self.bot.watch_restart()
+        self.assertIn("sshd (failed)", self.tg.sent[0])
+        self.assertFalse(self.tg.silent[0])
+        self.assertIn(55, self.tg.deleted)
+
+    def test_result_still_old_is_offered_again(self):
+        self.running("sshd")
+        self.found.return_value = ["sshd"]
+        with mock.patch.object(restarts, "pending", return_value=[]), \
+                mock.patch.object(restarts, "states", return_value={"sshd": "active"}):
+            self.bot.watch_restart()
+        self.assertIn("alte Dateien", self.tg.edited[-1][1])
+        self.assertIn("restart:sshd", [b[1] for row in self.tg.buttons[0] for b in row])
+
+    def test_conflict_details_have_no_list_buttons(self):
+        with state.locked(self.bot.cfg.state_dir) as st:
+            st.last_plan = {"summary": "0 Pakete", "rows": [], "problems": ["Problem: 1: x"]}
+        text, buttons = self.bot.details_view()
+        self.assertIn("Problem: 1: x", text)
+        self.assertEqual(buttons, [])
+        self.assertEqual(self.bot.details_view(back=True)[1], [[("◀️ Zurück", "back")]])
+
+    def test_unknown_scan_after_restart_waits_then_no_green(self):
+        self.running("sshd")
+        self.found.return_value = None
+        with mock.patch.object(restarts, "pending", return_value=[]), \
+                mock.patch.object(restarts, "states", return_value={"sshd": "active"}):
+            self.bot.watch_restart()
+            self.assertEqual(self.tg.sent + self.tg.edited, [])
+            with state.locked(self.bot.cfg.state_dir) as st:
+                st.restart_request["at"] -= 1000
+            self.bot.watch_restart()
+        self.assertNotIn("✅", self.tg.sent[0])
+        self.assertIn("keine Auskunft", self.tg.sent[0])
+
+    def test_result_survives_telegram_outage(self):
+        self.running("sshd")
+        self.found.return_value = []
+        send, edit = self.tg.send, self.tg.edit
+        error = TelegramError("Netz weg")
+        self.tg.send = self.tg.edit = mock.Mock(side_effect=error)
+        with mock.patch.object(restarts, "pending", return_value=[]) as pending, \
+                mock.patch.object(restarts, "states", return_value={"sshd": "failed"}):
+            self.bot.watch_restart()
+            with state.locked(self.bot.cfg.state_dir) as st:
+                self.assertIn("sshd (failed)", st.restart_reports[0]["text"])
+            self.assertEqual(self.tg.deleted, [])  # die Wartemeldung bleibt, solange nichts gemeldet ist
+            self.bot.deliver_restart_reports()
+            self.tg.send, self.tg.edit = send, edit
+            self.bot.deliver_restart_reports()
+        self.assertIn("sshd (failed)", self.tg.sent[0])
+        self.assertIn(55, self.tg.deleted)
+        with state.locked(self.bot.cfg.state_dir) as st:
+            self.assertEqual(st.restart_reports, [])
+
+    def test_second_result_during_outage_keeps_first(self):
+        self.found.return_value = []
+        send, edit = self.tg.send, self.tg.edit
+        self.tg.send = self.tg.edit = mock.Mock(side_effect=TelegramError("Netz weg"))
+        with mock.patch.object(restarts, "pending", return_value=[]):
+            self.running("sshd")
+            with mock.patch.object(restarts, "states", return_value={"sshd": "failed"}):
+                self.bot.watch_restart()
+            self.running("postfix")
+            with mock.patch.object(restarts, "states", return_value={"postfix": "active"}):
+                self.bot.watch_restart()
+        with state.locked(self.bot.cfg.state_dir) as st:
+            self.assertEqual(len(st.restart_reports), 2)
+        self.tg.send, self.tg.edit = send, edit
+        self.bot.deliver_restart_reports()
+        self.assertIn("sshd (failed)", self.tg.sent[0])
+        self.assertIn("neu gestartet: postfix", self.tg.edited[-1][1])
+        with state.locked(self.bot.cfg.state_dir) as st:
+            self.assertEqual(st.restart_reports, [])
+
+    def test_one_undeliverable_result_does_not_hold_back_others(self):
+        with state.locked(self.bot.cfg.state_dir) as st:
+            st.restart_reports = [{"chat_id": -100, "at": time.time(), "text": t, "loud": True} for t in ("a", "b")]
+        send = self.tg.send
+        self.tg.send = mock.Mock(side_effect=[TelegramError("x"), {"message_id": 9, "chat": {"id": -100}}])
+        self.bot.deliver_restart_reports()
+        self.tg.send = send
+        with state.locked(self.bot.cfg.state_dir) as st:
+            self.assertEqual([r["text"] for r in st.restart_reports], ["a"])
+
+    def overdue(self):
+        with state.locked(self.bot.cfg.state_dir) as st:
+            st.restart_request["at"] -= 1000
+
+    def test_job_past_limit_warns_once_and_keeps_watching(self):
+        self.running("sshd")
+        self.overdue()
+        self.found.return_value = []
+        with mock.patch.object(restarts, "pending", return_value=["sshd"]), \
+                mock.patch.object(restarts, "states", return_value={"sshd": "active"}):
+            self.bot.watch_restart()
+            self.bot.watch_restart()
+        self.assertEqual(len(self.tg.sent), 1)
+        self.assertIn("nicht abgeschlossen", self.tg.sent[0])
+        self.assertNotIn("✅", self.tg.sent[0])
+        self.assertNotIn(55, self.tg.deleted)  # die Wartemeldung bleibt für das Ergebnis
+        with state.locked(self.bot.cfg.state_dir) as st:
+            self.assertTrue(st.restart_request)
+        # Später endet der Auftrag: Auch ein spätes Scheitern wird gemeldet
+        with mock.patch.object(restarts, "pending", return_value=[]), \
+                mock.patch.object(restarts, "states", return_value={"sshd": "failed"}):
+            self.bot.watch_restart()
+        self.assertIn("sshd (failed)", self.tg.sent[1])
+        with state.locked(self.bot.cfg.state_dir) as st:
+            self.assertEqual(st.restart_request, {})
+
+    def test_unknown_jobs_past_limit_are_not_green(self):
+        self.running("sshd")
+        self.overdue()
+        self.found.return_value = []
+        with mock.patch.object(restarts, "pending", return_value=None), \
+                mock.patch.object(restarts, "states", return_value={"sshd": "active"}):
+            self.bot.watch_restart()
+        self.assertNotIn("✅", self.tg.sent[0])
+        self.assertIn("Ergebnis des Neustarts unbekannt", self.tg.sent[0])
+        self.assertFalse(self.tg.silent[0])
+        with state.locked(self.bot.cfg.state_dir) as st:
+            self.assertEqual(st.restart_request, {})
+
+    def test_unknown_jobs_within_limit_wait(self):
+        self.running("sshd")
+        with mock.patch.object(restarts, "pending", return_value=None):
+            self.bot.watch_restart()
+        self.assertEqual(self.tg.sent + self.tg.edited, [])
+
+    def test_check_running_understands_oneshot(self):
+        mock.patch.stopall()
+        results = {"activating": True, "active": True, "inactive": False, "failed": False}
+        for output, expected in results.items():
+            done = subprocess.CompletedProcess([], 3, output + "\n", "")
+            with mock.patch("twguard.bot.subprocess.run", return_value=done):
+                self.assertEqual(Bot._check_running(self.bot), expected, output)
+
+    def test_approve_refuses_plan_not_shown_and_shows_it(self):
+        self.open_manual()
+        with state.locked(self.bot.cfg.state_dir) as st:
+            st.open_issue("manual", "• neuer Plan B", fingerprint="bbb", approvable=True)
+        self.bot.handle(message("/approve", reply_to=ME))
+        self.start_check.assert_not_called()
+        self.assertIn("neuer Plan B", self.tg.sent[0])
+        self.assertEqual(self.tg.buttons[0][0][0][1], "approve:bbb")
+        with state.locked(self.bot.cfg.state_dir) as st:
+            self.assertEqual(st.approved_fingerprint, "")
+            self.assertEqual(st.manual_shown, "bbb")
+        # Jetzt ist B gezeigt und gilt
+        self.bot.handle(message("/approve", reply_to=ME))
+        self.start_check.assert_called_once()
+        with state.locked(self.bot.cfg.state_dir) as st:
+            self.assertEqual(st.approved_fingerprint, "bbb")
+
+    def test_reminder_counts_as_shown(self):
+        with state.locked(self.bot.cfg.state_dir) as st:
+            st.open_issue("manual", "x", fingerprint="abc", approvable=True)
+            self.bot.cfg.escalation.quiet_hours = ""
+            send_due(self.bot.cfg, st, self.tg)
+            self.assertEqual(st.manual_shown, "abc")
+
+    def test_resolved_button_closes_failed_apply(self):
+        with state.locked(self.bot.cfg.state_dir) as st:
+            st.open_issue("apply-failed", "Skript kaputt")
+        self.press("resolved:apply-failed")
+        self.assertIn("erledigt", self.tg.edited[-1][1])
+        with state.locked(self.bot.cfg.state_dir) as st:
+            self.assertNotIn("apply-failed", st.issues)
+
+    def test_resolved_button_only_for_failed_apply(self):
+        self.open_manual()
+        self.press("resolved:manual")
+        with state.locked(self.bot.cfg.state_dir) as st:
+            self.assertIn("manual", st.issues)
+
+    def test_same_message_id_in_other_chat_keeps_topic(self):
+        with state.locked(self.bot.cfg.state_dir) as st:
+            st.messages["issue:reboot"] = {"chat_id": -100, "message_id": 5, "at": time.time()}
+        self.press("dismiss", chat={"id": 42, "type": "private"})
+        with state.locked(self.bot.cfg.state_dir) as st:
+            self.assertIn("issue:reboot", st.messages)
+
+    def test_collapsed_details_are_kept_per_chat(self):
+        with state.locked(self.bot.cfg.state_dir) as st:
+            st.last_plan = {"summary": "0", "rows": [], "problems": []}
+        self.press("details")
+        self.press("details", chat={"id": 42, "type": "private"})
+        with state.locked(self.bot.cfg.state_dir) as st:
+            self.assertEqual(sorted(st.collapsed), ["-100:5", "42:5"])
 
     def test_help_expires(self):
         self.bot.handle(message("/help@server1_bot"))

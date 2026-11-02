@@ -112,6 +112,8 @@ def _run(cmd: list[str], cwd: str, timeout: int, env: dict[str, str] | None = No
         p = subprocess.run(cmd, cwd=cwd, capture_output=True, text=True, timeout=timeout, env=env or _env())
     except subprocess.TimeoutExpired as e:
         raise UpdateError(tr("{what}: keine Antwort nach {n} s", what=cmd[0], n=timeout)) from e
+    except OSError as e:
+        raise UpdateError(tr("{what} nicht ausführbar: {error}", what=cmd[0], error=e)) from e
     if p.returncode:
         tail = "\n".join((p.stdout + p.stderr).strip().splitlines()[-15:])
         raise UpdateError(tr("{what} endete mit Exit-Code {rc}:\n{tail}", what=" ".join(cmd), rc=p.returncode, tail=tail))
@@ -194,7 +196,7 @@ def self_update(cfg: Config, commit: str) -> int:
         installed = True
         _run(["./install.sh"], repo, 300)
         _restart_bot()
-    except UpdateError as e:
+    except (UpdateError, OSError) as e:
         log.error("%s", e)
         problems = _rollback(cfg, repo, old, installed)
         report(tr("❌ <b>{host}</b>: Update auf {commit} fehlgeschlagen, {result}\n<pre>{error}</pre>", host=host,

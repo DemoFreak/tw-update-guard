@@ -38,6 +38,29 @@ class CheckTest(unittest.TestCase):
     def cfg(self, mode):
         return Config(language="de", token="x", chat_id=-100, hostname="server1", mode=mode, state_dir=Path(self.tmp.name))
 
+    def test_changed_critical_plan_is_a_new_offer(self):
+        cfg = self.cfg("auto")
+        cfg.escalation.quiet_hours = ""
+        cfg.rules.max_packages = 1
+        plan_a, plan_b = routine_plan(), routine_plan()
+        plan_b.sections["to-upgrade"] = [Solvable("bash", "9.9-1.1", "x86_64", edition_old="5.3.2-1.1")]
+        self.dry_run.side_effect = lambda args: plan_a
+        plan_a.packages_to_change = plan_b.packages_to_change = 2
+        check.run(cfg)
+        self.assertEqual(len(self.tg.sent), 1)
+        with state.locked(cfg.state_dir) as st:
+            st.issues["manual"].snoozed_until = time.time() + 3600
+            st.issues["manual"].snooze_count = 2
+        check.run(cfg)  # gleicher Plan: keine neue Meldung
+        self.assertEqual(len(self.tg.sent), 1)
+        self.dry_run.side_effect = lambda args: plan_b
+        check.run(cfg)
+        self.assertEqual(len(self.tg.sent), 2)
+        with state.locked(cfg.state_dir) as st:
+            self.assertEqual(st.manual_shown, plan_b.fingerprint())
+            self.assertEqual(st.issues["manual"].snoozed_until, 0.0)
+            self.assertEqual(st.issues["manual"].snooze_count, 0)
+
     def test_observe_does_not_apply(self):
         cfg = self.cfg("observe")
         check.run(cfg)

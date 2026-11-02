@@ -6,6 +6,7 @@ from __future__ import annotations
 import hashlib
 import logging
 import os
+import re
 import subprocess
 import xml.etree.ElementTree as ET
 from dataclasses import dataclass, field
@@ -31,6 +32,9 @@ EXIT_RESTART_NEEDED = 103
 OK_CODES = {0, EXIT_REBOOT_NEEDED, EXIT_RESTART_NEEDED}
 # Eigener Code für „abgebrochen, weil keine Antwort“ (zypper selbst nutzt nur positive)
 EXIT_TIMEOUT = -1
+SERVICE_NAME = re.compile(r"[A-Za-z0-9][A-Za-z0-9:_.@\\-]*")
+# Laufen nur kurz und enden von selbst; twguard-check meldet sich sonst nach jedem Update selbst
+OWN_UNITS = {"twguard-check", "twguard-update"}
 
 # Zeitlimits: Abfragen im Bot dürfen ihn nicht blockieren; refresh und Probelauf brauchen
 # mit Debug- und Quell-Repos länger. Das Einspielen bekommt bewusst keins, ein Abbruch
@@ -223,8 +227,14 @@ def needs_rebooting() -> bool | None:
     return None
 
 
-def services_needing_restart() -> list[str]:
+def services_needing_restart() -> list[str] | None:
+    """Dienste, die gelöschte Dateien festhalten; None, wenn es nicht feststellbar war.
+
+    `-sss` statt der Tabelle von `-s`: nur die Namen, unabhängig von der Sprache.
+    """
     p = _run(["ps", "-sss"], xml=False, timeout=QUERY_TIMEOUT)
-    if p.returncode == EXIT_TIMEOUT:
+    if p.returncode not in OK_CODES:
         log.warning(tr("zypper ps: %s"), p.stderr)
-    return sorted({line.strip() for line in p.stdout.splitlines() if line.strip()})
+        return None
+    names = {line.strip() for line in p.stdout.splitlines()}
+    return sorted(n for n in names if SERVICE_NAME.fullmatch(n) and n not in OWN_UNITS)

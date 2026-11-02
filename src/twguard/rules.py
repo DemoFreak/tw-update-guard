@@ -10,6 +10,9 @@ from fnmatch import fnmatchcase
 from .i18n import tr, trn
 from .zypper import Plan, Solvable
 
+MAX_CONFLICT_LINES = 3
+CONFLICT_LINE_LIMIT = 200
+
 
 @dataclass
 class Rules:
@@ -68,11 +71,23 @@ def version_key(edition: str, depth: int) -> tuple[str, ...]:
     return tuple(re.findall(r"\d+", version)[:depth])
 
 
+def _conflict_lines(problems: list[str]) -> list[str]:
+    """Je Konflikt eine Zeile für die Meldung; den vollständigen Text samt Lösungen zeigt /details."""
+    lines = []
+    for problem in problems[:MAX_CONFLICT_LINES]:
+        details = [line.strip() for line in problem.splitlines() if line.strip().startswith("- ")]
+        line = (details or problem.splitlines())[0].removeprefix("- ")
+        lines.append(line if len(line) <= CONFLICT_LINE_LIMIT else line[:CONFLICT_LINE_LIMIT] + " …")
+    if len(problems) > MAX_CONFLICT_LINES:
+        lines.append(tr("… und {n} weitere (/details)", n=len(problems) - MAX_CONFLICT_LINES))
+    return lines
+
+
 def classify(plan: Plan, rules: Rules) -> Verdict:
     if plan.problems:
         return Verdict(
             auto=False,
-            reasons=[tr("Solver-Konflikt, nur per SSH lösbar:"), *plan.problems],
+            reasons=[tr("Solver-Konflikt, nur per SSH lösbar:"), *_conflict_lines(plan.problems)],
             approvable=False,
         )
 

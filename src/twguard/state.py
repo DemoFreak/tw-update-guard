@@ -18,7 +18,7 @@ from typing import Iterator
 class Issue:
     """Ein offener Punkt. Er verschwindet erst, wenn der Zustand behoben ist."""
 
-    kind: str  # manual, reboot, error, apply-failed, stale
+    kind: str  # manual, reboot, services, error, apply-failed, stale
     since: float
     detail: str = ""
     fingerprint: str = ""
@@ -67,6 +67,15 @@ class State:
     chat_migration: dict = field(default_factory=dict)
     # Aufgeklappte Details: message_id → ursprünglicher Inhalt {"text", "entities", "reply_markup", "at"}
     collapsed: dict = field(default_factory=dict)
+    # Dienste, die zum Neustart anstehen; „Alle“ trägt den Hash der gezeigten Liste (restarts.digest)
+    restart_services: list = field(default_factory=list)
+    # Laufender Neustart {"chat_id", "message_id", "at", "services", "errors", "overdue"}; überlebt den Neustart des Bots
+    restart_request: dict = field(default_factory=dict)
+    # Ergebnisse, die noch zugestellt werden müssen, je {"chat_id", "message_id", "at", "text", "loud"}
+    restart_reports: list = field(default_factory=list)
+    # Fingerabdruck des zuletzt tatsächlich gezeigten Plans; /approve gilt nur für ihn.
+    # Nicht in Issue: eine ältere Version scheitert nach dem Zurückrollen an unbekannten Feldern
+    manual_shown: str = ""
 
     def open_issue(self, kind: str, detail: str, now: float | None = None, **attrs) -> tuple[Issue, bool]:
         """Legt den Punkt an oder aktualisiert ihn; `since` bleibt dabei erhalten."""

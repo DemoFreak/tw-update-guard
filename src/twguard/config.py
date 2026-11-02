@@ -45,6 +45,14 @@ class Briefing:
     silent: bool = True
 
 
+@dataclass
+class Services:
+    # Diese Dienste bietet twguard nicht zum Neustart an (Muster); ["*"] schaltet das Angebot ab
+    exclude: list[str] = field(default_factory=lambda: [
+        "dbus*", "systemd-*", "user@*", "getty@*", "serial-getty@*", "display-manager*",
+        "NetworkManager*", "wicked*", "network*", "auditd"])
+
+
 MODES = ("observe", "auto")
 
 
@@ -69,6 +77,7 @@ class Config:
     escalation: Escalation = field(default_factory=Escalation)
     update: Update = field(default_factory=Update)
     briefing: Briefing = field(default_factory=Briefing)
+    services: Services = field(default_factory=Services)
 
     @property
     def observe(self) -> bool:
@@ -91,6 +100,7 @@ def _defaults() -> dict[str, dict]:
         "escalation": asdict(cfg.escalation),
         "update": asdict(cfg.update),
         "briefing": asdict(cfg.briefing),
+        "services": asdict(cfg.services),
     }
 
 
@@ -149,6 +159,7 @@ def load(path: str | Path | None = None) -> Config:
             escalation=Escalation(**data.get("escalation", {})),
             update=Update(**data.get("update", {})),
             briefing=Briefing(**data.get("briefing", {})),
+            services=Services(**data.get("services", {})),
         )
     except TypeError as e:
         raise SystemExit(tr("{path}: unbekannter Eintrag ({error})", path=path, error=e)) from e
