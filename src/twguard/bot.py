@@ -644,22 +644,27 @@ class Bot:
         text, buttons = self.reboot_view()
         return Out(text, buttons, topic="reboot")
 
-    def cancel(self) -> str:
-        """Geplanten Neustart abbrechen; Rückgabe: Text für die Neustart-Nachricht."""
+    def cancel(self) -> tuple[str, Buttons]:
+        """Geplanten Neustart abbrechen; Rückgabe: Text und Schaltflächen für die Neustart-Nachricht.
+
+        Ist der Neustart weiter nötig, bietet die Nachricht ihn wieder an wie die Erinnerung.
+        """
         p = subprocess.run(["shutdown", "-c"], capture_output=True, text=True)
         with state.locked(self.cfg.state_dir) as st:
             st.reboot_requested_at = 0.0
+            issue = st.issues.get("reboot")
         if p.returncode:
-            return tr("Abbrechen fehlgeschlagen: {error}", error=escape(p.stderr.strip()))
-        return tr("✖️ <b>{host}</b>: Neustart abgebrochen.", host=self.host)
+            return tr("Abbrechen fehlgeschlagen: {error}", error=escape(p.stderr.strip())), []
+        return (tr("✖️ <b>{host}</b>: Neustart abgebrochen.", host=self.host),
+                issue_buttons(issue) if issue else [])
 
     def cmd_cancel(self, args: list[str], addressed: bool = False) -> Out | None:
-        text = self.cancel()
+        text, buttons = self.cancel()
         with state.locked(self.cfg.state_dir) as st:
             previous = st.messages.pop("reboot", None)
-        if previous and messages.edit(self.tg, previous, text):
+        if previous and messages.edit(self.tg, previous, text, buttons):
             return None
-        return Out(text, ttl=SHORT)
+        return Out(text, buttons, ttl=0 if buttons else SHORT)
 
     def cmd_update(self, args: list[str], addressed: bool = False) -> Out:
         """Neuen Stand holen und zur Bestätigung anbieten."""
@@ -945,11 +950,11 @@ class Bot:
         self._take_over(cq, pressed, text, buttons, topic="reboot", kind="reboot")
 
     def press_cancel(self, cq: dict, pressed: dict, arg: str) -> None:
-        text = self.cancel()
+        text, buttons = self.cancel()
         self._answer(cq, plain(text))
         with state.locked(self.cfg.state_dir) as st:
             messages.release(st, pressed)
-        messages.edit(self.tg, pressed, text)
+        messages.edit(self.tg, pressed, text, buttons)
 
     def press_update(self, cq: dict, pressed: dict, commit: str) -> None:
         error = self.update_go(commit, pressed)

@@ -1022,6 +1022,23 @@ class BotTest(unittest.TestCase):
         self.assertIn("abgebrochen", self.tg.edited[1][1])
         self.assertEqual(self.tg.edited[1][0], 5)
 
+    def test_cancel_offers_reboot_again_while_needed(self):
+        self.open_reboot()
+        with mock.patch("subprocess.run", return_value=mock.Mock(returncode=0, stderr="")):
+            self.press("reboot")
+            self.press("cancel")
+        message_id, text, buttons = self.tg.edited[-1]
+        self.assertIn("abgebrochen", text)
+        self.assertIn("reboot", self.status_data(buttons))
+        self.assertIn("later:24:reboot", self.status_data(buttons))
+
+    def test_cancel_without_open_reboot_has_no_buttons(self):
+        with mock.patch("subprocess.run", return_value=mock.Mock(returncode=0, stderr="")):
+            self.press("reboot")
+            self.bot.handle(message("/cancel@server1_bot"))
+        self.assertIn("abgebrochen", self.tg.edited[-1][1])
+        self.assertFalse(self.tg.edited[-1][2])
+
     def test_language_switches_at_runtime_and_hints_at_config(self):
         self.addCleanup(set_language, "de")
         self.bot.handle(message("/language en"))

@@ -4,6 +4,10 @@ Published versions of tw-update-guard. Versions in between were development step
 published version. **Upgrade** notes name what you may have to change by hand; `twguard config-diff` shows which
 values in your `config.toml` differ from the defaults.
 
+## 0.9.2 – 2026-11-03
+
+- After "Cancel reboot", the message offers the reboot again (with "1 day later") while it is still needed
+
 ## 0.9.1 – 2026-11-03
 
 - Status and "Check now" ask `zypper needs-rebooting` first instead of waiting for the bot's check every 30 minutes,
