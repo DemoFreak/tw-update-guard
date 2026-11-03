@@ -114,12 +114,42 @@ class CheckTest(unittest.TestCase):
         with state.locked(cfg.state_dir) as st:
             self.assertEqual(st.check_request, {})
 
+    def test_requested_check_shows_progress_before_applying(self):
+        cfg = self.cfg("auto")
+        self.request(cfg)
+        shown = []
+        self.apply.side_effect = lambda args: (shown.extend(self.tg.edited), (0, "", routine_plan()))[1]
+        check.run(cfg)
+        # Während zypper läuft, steht schon „spielt ein“ in der Wartemeldung, danach das Ergebnis
+        self.assertEqual(len(shown), 1)
+        self.assertEqual(shown[0][0], 55)
+        self.assertIn("spielt das Update ein", shown[0][1])
+        self.assertEqual(self.tg.edited[-1][0], 55)
+        self.assertNotIn("spielt das Update ein", self.tg.edited[-1][1])
+
+    def test_timer_run_sends_no_progress(self):
+        check.run(self.cfg("auto"))
+        self.assertFalse([text for _, text, _ in self.tg.edited if "spielt das Update ein" in text])
+
     def test_requested_check_reports_nothing_to_do(self):
         cfg = self.cfg("auto")
         self.dry_run.side_effect = lambda args: Plan(raw="<stream/>")
         self.request(cfg)
         check.run(cfg)
         self.assertIn("keine Updates", self.tg.edited[0][1])
+        self.assertIsNone(self.tg.edited[0][2])
+
+    def test_nothing_to_do_keeps_open_items_operable(self):
+        cfg = self.cfg("auto")
+        self.dry_run.side_effect = lambda args: Plan(raw="<stream/>")
+        with state.locked(cfg.state_dir) as st:
+            st.open_issue("reboot", "Neustart nötig")
+        self.request(cfg)
+        check.run(cfg)
+        _, text, buttons = self.tg.edited[0]
+        self.assertIn("keine Updates", text)
+        self.assertIn("Neustart", text)
+        self.assertIn("reboot", [b[1] for row in buttons for b in row])
 
     def test_requested_check_reports_manual_issue_in_quiet_hours(self):
         cfg = self.cfg("auto")
@@ -198,7 +228,8 @@ class CheckTest(unittest.TestCase):
         self.request(cfg)
         check.run(cfg)
         self.assertIn(55, self.tg.deleted)  # Wartemeldung weg, Bearbeiten hätte keinen Ton
-        self.assertEqual(self.tg.edited, [])
+        # Bearbeitet wird nur der Zwischenstand vor dem Einspielen, nicht mit dem Ergebnis
+        self.assertEqual([text for _, text, _ in self.tg.edited if "spielt das Update ein" not in text], [])
         self.assertIn("nicht genau der geprüfte Plan", self.tg.sent[-1])
         self.assertFalse(self.tg.silent[-1])
 

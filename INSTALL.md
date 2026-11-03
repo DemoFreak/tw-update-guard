@@ -62,3 +62,5 @@ rm /etc/systemd/system/twguard-{check.service,check.timer,bot.service} /usr/loca
 systemctl daemon-reload
 rm -r /etc/twguard /var/lib/twguard    # configuration and state
 ```
+
+The Git working copy used for `/update` stays; delete it and, if you created one, its deploy key yourself. Remove the bot from the group or delete it via @BotFather.

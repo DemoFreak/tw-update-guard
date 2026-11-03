@@ -11,8 +11,8 @@ from pathlib import Path
 from . import details, messages, restarts, state, zypper
 from .config import Config
 from .i18n import tr
-from .notify import (adopt_migration, format_issue, format_observed, format_reasons, format_report, issue_buttons,
-                     observed_buttons, send_due, use_language)
+from .notify import (adopt_migration, format_issue, format_observed, format_reasons, format_report, format_status,
+                     issue_buttons, observed_buttons, send_due, status_buttons, use_language)
 from .rules import classify, describe, plan_summary
 from .telegram import Buttons, Telegram, TelegramError
 
@@ -62,6 +62,14 @@ def finish(cfg: Config, tg: Telegram, text: str, buttons: Buttons | None = None,
             if old and not messages.same(old, shown):
                 messages.retire(tg, old)
     return shown is not None
+
+
+def progress(cfg: Config, tg: Telegram, text: str) -> None:
+    """Zwischenstand in die Wartemeldung schreiben; `finish` ersetzt ihn durch das Ergebnis."""
+    with state.locked(cfg.state_dir) as st:
+        request = dict(st.check_request)
+    if request.get("message_id") and time.time() - request.get("at", 0) <= REQUEST_MAX_AGE:
+        messages.edit(tg, request, text)
 
 
 def _fail(cfg: Config, tg: Telegram, kind: str, detail: str) -> int:
@@ -134,7 +142,13 @@ def _run(cfg: Config, tg: Telegram, dry_run: bool) -> int:
             send_due(cfg, st, tg)
     if plan.empty:
         log.info(tr("nichts zu tun"))
-        finish(cfg, tg, f"✅ <b>{escape(cfg.hostname)}</b>: " + tr("Prüfung fertig, keine Updates."))
+        text, buttons = f"✅ <b>{escape(cfg.hostname)}</b>: " + tr("Prüfung fertig, keine Updates."), None
+        with state.locked(cfg.state_dir) as st:
+            # Die Antwort ersetzt oft die Statusnachricht: offene Punkte (z. B. Neustart) bleiben bedienbar
+            if st.issues:
+                text += "\n\n" + format_status(cfg.hostname, st, time.time())
+                buttons = status_buttons(st)
+        finish(cfg, tg, text, buttons)
         return 0
 
     if not (verdict.auto or approved):
@@ -184,6 +198,12 @@ def _run(cfg: Config, tg: Telegram, dry_run: bool) -> int:
         return 0
 
     log.info(tr("spiele %d Pakete ein (%s)"), plan.packages_to_change, tr("freigegeben") if approved else tr("Routine"))
+    # Das Einspielen dauert Minuten; nach /check soll sichtbar sein, dass es läuft und was kommt
+    text = tr("⏳ <b>{host}</b> spielt das Update ein: {summary}. Das Ergebnis erscheint hier.",
+              host=escape(cfg.hostname), summary=escape(plan_summary(plan)))
+    if verdict.reboot_expected:
+        text += "\n" + tr("Danach ist ein Neustart nötig.")
+    progress(cfg, tg, text)
     rc, output, applied = zypper.apply(cfg.dup_args)
     log.info(tr("zypper dup: Exit-Code %s\n%s"), rc, "\n".join(output.splitlines()[-200:]))
     if rc not in zypper.OK_CODES:

@@ -120,6 +120,9 @@ EN = {
     "Die Freigabe galt einem älteren Stand und ist verfallen.": "The approval was for an older state and has expired.",
     "(Unterschied nicht darstellbar, siehe Journal)": "(difference cannot be shown, see the journal)",
     "zypper dup endete mit Exit-Code {rc}:\n{tail}": "zypper dup ended with exit code {rc}:\n{tail}",
+    "⏳ <b>{host}</b> spielt das Update ein: {summary}. Das Ergebnis erscheint hier.":
+        "⏳ <b>{host}</b> is installing the update: {summary}. The result will appear here.",
+    "Danach ist ein Neustart nötig.": "A reboot will be required afterwards.",
     "Nach dem Update ist ein Neustart nötig (Kernel oder Systembibliotheken).":
         "A reboot is required after the update (kernel or system libraries).",
     # zypper
@@ -135,6 +138,7 @@ EN = {
     "kritisches Paket: {package}": "critical package: {package}",
     "kritisches Paket wird entfernt: {package}": "critical package will be removed: {package}",
     "Ausgangsversion unbekannt: {package}": "previous version unknown: {package}",
+    "neuer Kernel-Zweig: {package} (läuft: {running})": "new kernel branch: {package} (running: {running})",
     "Versionssprung: {package}": "version jump: {package}",
     "neues Paket: {package}": "new package: {package}",
     "wird entfernt: {package}": "will be removed: {package}",
@@ -294,6 +298,7 @@ Messages also have buttons for this.""",
         "If the group became a supergroup: set chat_id = %s in config.toml (currently %s)",
     "Datei nicht gesendet: %s": "file not sent: %s",
     "Details nicht zurückgeklappt: %s": "details not collapsed: %s",
+    "Details von Nachricht %s nicht zurückklappbar: Inhalt nicht gespeichert": "details of message %s cannot be collapsed: content not stored",
     "Antwort nicht gesendet: %s": "answer not sent: %s",
     "Nachricht nicht gesendet: %s": "message not sent: %s",
     "Schaltflächen im Briefing nicht angepasst: %s": "briefing buttons not updated: %s",

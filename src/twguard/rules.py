@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import os
 import re
 from dataclasses import dataclass, field
 from fnmatch import fnmatchcase
@@ -36,6 +37,9 @@ class Rules:
         "bareos-filedaemon", "samba:2", "docker", "containerd", "podman", "syncthing",
         "snapd", "fail2ban:2",
     ])
+    # Freigabe für einen neueren Kernel-Zweig als den laufenden ("muster:2": 7.3 → 7.4, nicht 7.3.1 → 7.3.2).
+    # Er ist nach dem Einspielen Standard im Bootmenü und startet bei jedem, auch ungeplanten, Neustart.
+    kernel: list[str] = field(default_factory=lambda: ["kernel-default:2", "kernel-longterm:2"])
     # Nur zur Information: Diese Pakete ziehen einen Neustart nach sich
     reboot: list[str] = field(default_factory=lambda: ["kernel-default", "kernel-longterm"])
     # Entfernungen, die bei Tumbleweed normal sind (alte Bibliotheksversionen u. Ä.)
@@ -83,7 +87,12 @@ def _conflict_lines(problems: list[str]) -> list[str]:
     return lines
 
 
-def classify(plan: Plan, rules: Rules) -> Verdict:
+def _branch(edition: str, depth: int) -> tuple[int, ...]:
+    return tuple(int(part) for part in version_key(edition, depth))
+
+
+def classify(plan: Plan, rules: Rules, running_kernel: str | None = None) -> Verdict:
+    """`running_kernel` wie `uname -r`, ohne Angabe der laufende."""
     if plan.problems:
         return Verdict(
             auto=False,
@@ -120,6 +129,13 @@ def classify(plan: Plan, rules: Rules) -> Verdict:
             reasons.append(tr("Ausgangsversion unbekannt: {package}", package=s.label()))
         elif version_key(s.edition_old, depth) != version_key(s.edition, depth):
             reasons.append(tr("Versionssprung: {package}", package=s.label()))
+
+    running = os.uname().release if running_kernel is None else running_kernel
+    for s in installs + upgrades:
+        depth = _watch_depth(s.name, rules.kernel)
+        # Ältere Zweige daneben (z. B. longterm) werden nicht Standard im Bootmenü
+        if depth and _branch(s.edition, depth) > _branch(running, depth):
+            reasons.append(tr("neuer Kernel-Zweig: {package} (läuft: {running})", package=s.label(), running=running))
 
     installed_names = {s.name for s in installs}
     for s in installs:

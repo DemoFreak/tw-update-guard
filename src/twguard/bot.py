@@ -20,7 +20,7 @@ from . import COMMIT, __version__, details, messages, ota, restarts, state, zypp
 from .config import Config
 from .i18n import EN, LANGUAGES, current, set_language, tr
 from .notify import (adopt_migration, button_kind, clip, fmt_age, format_briefing, format_issue, format_status,
-                     issue_buttons, is_due, mark_resolved, minutes_of_day, note_reminded, send_due, stamp, title)
+                     issue_buttons, is_due, status_buttons, mark_resolved, minutes_of_day, note_reminded, send_due, stamp, title)
 from .telegram import Buttons, Telegram, TelegramError
 
 log = logging.getLogger(__name__)
@@ -486,10 +486,10 @@ class Bot:
 
     def status_view(self) -> tuple[str, Buttons]:
         with state.locked(self.cfg.state_dir) as st:
-            text = format_status(self.cfg.hostname, st, time.time())
+            text, buttons = format_status(self.cfg.hostname, st, time.time()), status_buttons(st)
         if self.cfg.observe:
             text += f"\n<i>{tr('Beobachtungsmodus: Updates werden nur gemeldet.')}</i>"
-        return text, [[(tr("🔄 Jetzt prüfen"), "check"), ("📋 Details", "details")]]
+        return text, buttons
 
     def details_view(self, arg: str = "", back: bool = False) -> tuple[str, Buttons]:
         """Eine Seite der Paketliste; `arg` ist "ansicht:seite" aus der Schaltfläche."""
@@ -823,9 +823,16 @@ class Bot:
     def press_back(self, cq: dict, pressed: dict, arg: str) -> None:
         with state.locked(self.cfg.state_dir) as st:
             original = st.collapsed.pop(messages.key(pressed), None)
+            on_status = messages.same(st.messages.get("status", {}), pressed)
+        if on_status:
+            # Den Status neu aufbauen statt den alten Inhalt: Er zeigt dann auch den jetzigen Stand
+            self._answer(cq)
+            messages.edit(self.tg, pressed, *self.status_view())
+            return
         if original is None:
+            # Meist ein doppelter Druck: Der erste hat schon zurückgeklappt, die Nachricht bleibt, wie sie ist
+            log.info(tr("Details von Nachricht %s nicht zurückklappbar: Inhalt nicht gespeichert"), pressed["message_id"])
             self._answer(cq, tr("Nicht mehr verfügbar."))
-            messages.edit(self.tg, pressed, self.details_view()[0])
             return
         self._answer(cq)
         try:
@@ -1007,13 +1014,13 @@ class Bot:
         """Ergebnis einer Aktion zum Punkt `kind` zeigen; Rückgabe: die Nachricht dafür, None wenn nichts ankam.
 
         Sonst wird die gedrückte Nachricht umgewidmet (alte Themenzuordnung lösen, ggf. `topic` setzen).
-        Das Briefing zeigt aber mehrere Punkte: Dort bekommt die Aktion eine eigene Nachricht, und nur die
-        Schaltflächen dieses Punkts verschwinden, damit die übrigen bedienbar bleiben. Scheitert das Senden,
-        bleibt das Briefing ganz unverändert; die Rückmeldung zum Druck kam schon als Hinweis.
+        Briefing und Status zeigen aber mehrere Punkte: Dort bekommt die Aktion eine eigene Nachricht, und nur
+        die Schaltflächen dieses Punkts verschwinden, damit die übrigen bedienbar bleiben. Scheitert das Senden,
+        bleibt die Übersicht ganz unverändert; die Rückmeldung zum Druck kam schon als Hinweis.
         """
         with state.locked(self.cfg.state_dir) as st:
-            in_briefing = kind and messages.same(st.messages.get("briefing", {}), pressed)
-        if in_briefing:
+            shared = kind and any(messages.same(st.messages.get(topic, {}), pressed) for topic in ("briefing", "status"))
+        if shared:
             try:
                 shown = messages.ref(self.tg.send(text, chat_id=pressed["chat_id"], buttons=buttons))
             except TelegramError as e:

@@ -156,6 +156,15 @@ class BotTest(unittest.TestCase):
         self.press("back")
         self.assertEqual(self.tg.raw_edits, [(5, "Meldung")])
 
+    def test_double_back_leaves_restored_message(self):
+        self.press("details")
+        self.press("back")
+        edits = len(self.tg.edited)
+        self.press("back")  # zweiter Druck aus der alten Ansicht
+        self.assertEqual(len(self.tg.edited), edits)
+        self.assertEqual(self.tg.raw_edits, [(5, "Meldung")])
+        self.assertEqual(self.tg.answered[-1], "Nicht mehr verfügbar.")
+
     def set_plan(self, count=1):
         rows = [["to-upgrade", f"paket-{i:03}", "1.0-1", "1.0-2", "repo"] for i in range(count)]
         with state.locked(self.bot.cfg.state_dir) as st:
@@ -216,6 +225,60 @@ class BotTest(unittest.TestCase):
         self.bot.handle(message("/status"))
         self.assertIn(("🔄 Jetzt prüfen", "check"), self.tg.buttons[0][0])
         self.assertIn("Beobachtungsmodus", self.tg.sent[0])
+
+    def open_reboot(self):
+        with state.locked(self.bot.cfg.state_dir) as st:
+            st.open_issue("reboot", "Neustart nötig")
+
+    def status_data(self, buttons):
+        return [b[1] for row in buttons for b in row]
+
+    def test_status_offers_buttons_of_open_items(self):
+        self.open_reboot()
+        self.bot.handle(message("/status"))
+        data = self.status_data(self.tg.buttons[0])
+        self.assertIn("reboot", data)
+        self.assertNotIn("details", data)  # ohne Paketliste gibt es nichts zu zeigen
+        self.assertEqual(data.count("check"), 1)
+
+    def test_status_shows_details_only_with_packages(self):
+        with state.locked(self.bot.cfg.state_dir) as st:
+            st.last_plan = {"summary": "1 Paket", "rows": [["to-upgrade", "bash", "5.3.2-1.1", "5.3.3-1.1", "repo"]],
+                            "problems": []}
+        self.assertIn("details", self.status_data(self.bot.status_view()[1]))
+
+    def status_message(self):
+        self.bot.handle(message("/status"))
+        with state.locked(self.bot.cfg.state_dir) as st:
+            return st.messages["status"]["message_id"]
+
+    def press_on(self, message_id, data, buttons):
+        self.bot.handle_callback({"id": "cb1", "from": USER, "data": data,
+                                  "message": {"message_id": message_id, "chat": GROUP, "date": int(time.time()),
+                                              "text": "Status", "entities": [], "reply_markup": keyboard(buttons)}})
+
+    def test_reboot_from_status_keeps_other_items(self):
+        self.open_reboot()
+        self.open_manual()
+        status = self.status_message()
+        with mock.patch.object(Bot, "reboot", return_value=""):
+            self.press_on(status, "reboot", self.tg.buttons[0])
+        self.assertIn("startet in 1 Minute neu", self.tg.sent[-1])
+        (message_id, markup), = self.tg.markup_edits
+        self.assertEqual(message_id, status)
+        data = [b["callback_data"] for row in markup["inline_keyboard"] for b in row]
+        self.assertNotIn("reboot", data)
+        self.assertIn("approve:abc", data)
+
+    def test_back_on_status_rebuilds_status(self):
+        # Auch ohne gespeicherten Inhalt: Der Status wird neu aufgebaut, mit seinen Schaltflächen
+        self.open_reboot()
+        status = self.status_message()
+        self.press_on(status, "back", [[("◀️ Zurück", "back")]])
+        message_id, text, buttons = self.tg.edited[-1]
+        self.assertEqual(message_id, status)
+        self.assertIn("Neustart", text)
+        self.assertIn("reboot", self.status_data(buttons))
 
     def test_update_offer_and_go(self):
         pending = ota.Pending("a" * 40, "b" * 40, ["bbbbbbb Neue Funktion"])

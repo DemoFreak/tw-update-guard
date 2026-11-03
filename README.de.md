@@ -11,7 +11,8 @@ Ein Dienst für headless openSUSE-Tumbleweed-Server. Er spielt Routine-Updates (
 
    | Fall | Einstufung |
    |---|---|
-   | Normale Updates, Kernel, entfernte alte Bibliotheken | Routine: wird eingespielt |
+   | Normale Updates, Kernel im Zweig des laufenden (7.3.0 → 7.3.2), entfernte alte Bibliotheken | Routine: wird eingespielt |
+   | Kernel eines neueren Zweigs als der laufende (7.3 → 7.4, `kernel`); er wird Standard im Bootmenü | Freigabe nötig |
    | Pakete aus `block` (Bootloader, SSH, Netzwerk) | Freigabe nötig |
    | Versionssprung bei Paketen aus `watch` (z. B. systemd 258 → 259) | Freigabe nötig |
    | Paket aus `watch` ohne bekannte Ausgangsversion | Freigabe nötig |
@@ -86,7 +87,7 @@ Die Meldungen haben Schaltflächen für die wichtigsten Befehle (Freigeben, Deta
 3. Die laufende Version wird als `/usr/local/sbin/twguard.prev` gesichert, `install.sh` baut und installiert die neue und startet den Bot neu.
 4. Meldet sich der neue Bot innerhalb von 90 Sekunden, schreibt er „läuft jetzt mit …“. Sonst kommen die alte Version, die alten systemd-Units und der alte Git-Stand zurück, mit einer Meldung (auch, wenn dabei etwas schiefging).
 
-Protokoll: `journalctl -u twguard-update`.
+Protokoll: `journalctl -u twguard-update`. Änderungen je Version und Hinweise zum Aktualisieren: [CHANGELOG.md](CHANGELOG.md) (englisch).
 
 Rückmeldung: Bei Befehlen zeigt Telegram sofort „schreibt …“, bei Schaltflächen kurz „Läuft …“. `/check`, „Jetzt prüfen“ und Freigaben senden sofort eine Wartemeldung, die der Prüflauf später durch sein Ergebnis ersetzt (auch „keine Updates“).
 
@@ -94,6 +95,7 @@ Rückmeldung: Bei Befehlen zeigt Telegram sofort „schreibt …“, bei Schaltf
 - Befehle werden nach der Antwort gelöscht (Admin-Recht nötig). Hilfe, Version, Details und Bestätigungen löschen sich nach 2 bis 5 Minuten selbst.
 - `/status`, Briefing und Erinnerungen ersetzen ihren Vorgänger. Eine Erinnerung kommt also weiterhin neu (mit Ton), die vorige verschwindet.
 - Schaltflächen bearbeiten die Nachricht, an der sie hängen: „Freigeben“ macht daraus die Wartemeldung und dann das Ergebnis, „Details“ klappt die Paketliste auf (nach Name, umschaltbar auf „nach Version“ mit gruppierten Paketen, bei langen Listen mit Seiten; „📄 Als Datei“ schickt alle Pakete als HTML-Datei; „◀️ Zurück“ wieder zu), „1 Tag später“ vermerkt die Aufschiebung, „Neu starten“ zeigt den Neustart und nach dem Start „wieder da“.
+- Briefing und Status zeigen mehrere Punkte, mit den Schaltflächen jedes offenen Punkts. Eine Schaltfläche darin antwortet in einer eigenen Nachricht und entfernt nur die Schaltflächen ihres Punkts; die übrigen bleiben bedienbar.
 - Erledigte Punkte bleiben als „✅ … erledigt“ stehen, ohne Schaltflächen.
 - Stille Update-Berichte bleiben bis zum nächsten Briefing; das fasst sie zusammen und löscht sie.
 - Telegram erlaubt Löschen nur in den ersten 48 Stunden. Ältere Nachrichten kürzt der Bot stattdessen auf eine Zeile.
@@ -118,9 +120,20 @@ journalctl -u twguard-bot | grep 'Fehler in einer Stunde'   # mehr Abruf- und Se
 - Ein OTA-Update führt Code aus dem Git-Repo als root aus. Wer auf `main` des Repos pushen darf, aus dem die Server holen, steuert damit die Server. Grüne Tests schützen nicht vor absichtlich schädlichem Code. Wer dem Original-Repo nicht vertrauen will, lässt die Server aus einem eigenen Fork holen und übernimmt Änderungen nach Durchsicht.
 - Ist der Server ganz aus oder ohne Netz, schweigt auch der Bot. Dafür braucht es eine Überwachung von außen (z. B. Uptime Kuma).
 - Solver-Konflikte lassen sich nicht über Telegram lösen.
+- Schaltflächen gelten für den Plan, den sie zeigen. Ein getipptes `/approve` gibt den zuletzt gezeigten Plan frei, auch als Antwort auf eine ältere Meldung.
+- Paketvorgänge außerhalb von twguard (z. B. `zypper` per SSH) stimmt twguard nicht ab. Dienstneustarts sperrt es nur während des eigenen Prüflaufs; Änderungen zwischen Prüfung und Einspielen werden hinterher gemeldet, nicht verhindert.
+- Werte in der `config.toml` gehen immer vor, auch vor besseren Vorgaben einer späteren Version (siehe die Upgrade-Hinweise in [CHANGELOG.md](CHANGELOG.md) und `twguard config-diff`).
 - Dienste mit alten Bibliotheken startet twguard nie von selbst neu, auch nicht im Modus `auto`: nur auf Knopfdruck, und Dienste aus `[services] exclude` (D-Bus, `systemd-*`, Getty, Display-Manager, Netzwerk u. a.) werden gar nicht angeboten.
 
 ## Sicherheit
+
+twguard läuft als root, und sein Bot handelt auf Nachrichten aus Telegram: Er gibt Updates frei und spielt sie ein, startet den Server und Dienste neu und aktualisiert sich selbst. Daraus folgt:
+
+- Wer in `allowed_user_ids` steht, darf all das; Rollen gibt es nicht. Nur eintragen, wer den Server ohnehin verwaltet.
+- Wer eines dieser Telegram-Konten übernimmt, steuert den Server in diesem Rahmen. Bestätigung in zwei Schritten in Telegram einschalten und die angemeldeten Geräte schützen.
+- Eine kleine eigene Gruppe (oder den privaten Chat) nutzen und den Bot-Token geheim halten: `config.toml` ist nur für root lesbar. Mit einem fremden Token kann man mitlesen, was an den Bot geht, in seinem Namen senden und ihn stören, ihm aber keine Befehle geben.
+- Nichts aus Telegram wird als Shell-Befehl ausgeführt; Befehle und Schaltflächen lösen nur die genannten festen Aktionen aus.
+- Zum OTA-Update siehe den ersten Punkt unter [Grenzen](#grenzen).
 
 Schwachstellen bitte nicht öffentlich melden, sondern wie in [SECURITY.md](SECURITY.md) beschrieben.
 

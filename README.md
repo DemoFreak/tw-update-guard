@@ -13,7 +13,8 @@ Telegram messages, the `twguard` command line output, `--help` and the log lines
 
    | Case | Result |
    |---|---|
-   | Normal updates, kernel, removal of old libraries | routine: gets installed |
+   | Normal updates, kernel updates within the running branch (7.3.0 → 7.3.2), removal of old libraries | routine: gets installed |
+   | Kernel of a newer branch than the running one (7.3 → 7.4, `kernel`); it becomes the default boot entry | approval required |
    | Packages from `block` (boot loader, SSH, network) | approval required |
    | Version jump of a package from `watch` (e.g. systemd 258 → 259) | approval required |
    | Package from `watch` without a known previous version | approval required |
@@ -88,7 +89,7 @@ Messages have buttons for the most important commands (Approve, Details, 1 day l
 3. The running version is saved as `/usr/local/sbin/twguard.prev`, `install.sh` builds and installs the new one and restarts the bot.
 4. If the new bot reports within 90 seconds, it writes “now running …”. Otherwise the old version, the old systemd units and the old Git state are restored, with a message (also if something goes wrong while doing so).
 
-Log: `journalctl -u twguard-update`.
+Log: `journalctl -u twguard-update`. Changes per version and upgrade notes: [CHANGELOG.md](CHANGELOG.md).
 
 Feedback: for commands Telegram immediately shows “typing …”, for buttons briefly “Running …”. `/check`, “Check now” and approvals immediately send a waiting message that the check later replaces with its result (also “no updates”).
 
@@ -96,6 +97,7 @@ Feedback: for commands Telegram immediately shows “typing …”, for buttons 
 - Commands are deleted after the answer (admin right needed). Help, version, details and confirmations delete themselves after 2 to 5 minutes.
 - `/status`, briefing and reminders replace their predecessor. A reminder therefore still arrives as new (with sound), the previous one disappears.
 - Buttons edit the message they belong to: “Approve” turns it into the waiting message and then the result, “Details” expands the package list (by name, switchable to “by version” with grouped packages, paged if long; “📄 As a file” sends all packages as an HTML file; “◀️ Back” collapses it), “1 day later” notes the postponement, “Reboot” shows the reboot and “back” after the restart.
+- Briefing and status list several items, with the buttons of each open item. A button pressed there answers in a message of its own and only removes the buttons of its item; the other items stay usable.
 - Resolved issues remain as “✅ … resolved”, without buttons.
 - Silent update reports stay until the next briefing, which summarizes and deletes them.
 - Telegram only allows deleting within the first 48 hours. The bot shortens older messages to one line instead.
@@ -120,9 +122,20 @@ journalctl -u twguard-bot | grep 'errors in one hour'   # more fetch and send er
 - An OTA update runs code from the Git repository as root. Whoever can push to `main` of the repository your servers pull from controls your servers; passing tests do not protect against malicious code. If you do not want to trust this repository, let your servers pull from your own fork and review changes before merging.
 - If the server is off or offline, the bot is silent too. Use external monitoring for that (e.g. Uptime Kuma).
 - Solver conflicts cannot be resolved via Telegram.
+- Buttons are bound to the plan they show. A typed `/approve`, even as a reply to an older message, approves the plan shown last.
+- Package operations outside twguard (e.g. `zypper` via SSH) are not coordinated with it. twguard only blocks service restarts during its own check; changes between check and update are reported afterwards, not prevented.
+- Values in your `config.toml` always win over the defaults, also over better defaults of a later version (see the upgrade notes in [CHANGELOG.md](CHANGELOG.md) and `twguard config-diff`).
 - Services using outdated libraries are never restarted automatically, not even in `auto` mode: only when you press their button, and services in `[services] exclude` (D-Bus, `systemd-*`, getty, display manager, network and others) are not offered at all.
 
 ## Security
+
+twguard runs as root, and its bot acts on Telegram messages: it approves and installs updates, reboots the server, restarts services and updates itself. Keep this in mind:
+
+- Everyone listed in `allowed_user_ids` may do all of that; there are no roles. List only people who administer the server.
+- Whoever takes over one of these Telegram accounts controls the server within these limits. Enable two-step verification in Telegram and protect the devices logged in.
+- Use a small group of your own (or a private chat), and keep the bot token secret: `config.toml` is readable by root only. A leaked token lets others read what is sent to the bot, send in its name and disturb it, but not give it commands.
+- Nothing sent via Telegram is executed as a shell command; buttons and commands only trigger the fixed actions above.
+- See also the first item under [Limits](#limits) on OTA updates.
 
 Please do not report vulnerabilities publicly; see [SECURITY.md](SECURITY.md).
 

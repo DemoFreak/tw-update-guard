@@ -31,12 +31,42 @@ class ClassifyTest(unittest.TestCase):
         self.assertTrue(v.auto)
         self.assertEqual(v.reasons, [])
 
-    def test_kernel_is_routine_but_needs_reboot(self):
-        p = plan(to_install=[pkg("kernel-default", "6.18.2-1.1")],
-                 to_remove=[pkg("kernel-default", "6.17.9-1.1")])
-        v = classify(p, self.rules)
+    def kernel_plan(self, new, name="kernel-default"):
+        return plan(to_install=[pkg(name, new)], to_remove=[pkg(name, "7.3.0-1.1")])
+
+    def test_kernel_patch_is_routine_but_needs_reboot(self):
+        v = classify(self.kernel_plan("7.3.2-1.1"), self.rules, running_kernel="7.3.0-1-default")
         self.assertTrue(v.auto)
         self.assertTrue(v.reboot_expected)
+
+    def test_new_kernel_branch_needs_approval(self):
+        v = classify(self.kernel_plan("7.4.0-1.1"), self.rules, running_kernel="7.3.0-1-default")
+        self.assertFalse(v.auto)
+        self.assertEqual(v.reasons, ["neuer Kernel-Zweig: kernel-default 7.4.0-1.1 (läuft: 7.3.0-1-default)"])
+
+    def test_new_kernel_branch_compared_with_running_kernel(self):
+        # Ohne Neustart nach 7.4 läuft noch 7.3: auch der nächste 7.4-Kernel braucht Freigabe
+        v = classify(plan(to_install=[pkg("kernel-default", "7.4.1-1.1")]), self.rules,
+                     running_kernel="7.3.0-1-default")
+        self.assertFalse(v.auto)
+        v = classify(plan(to_install=[pkg("kernel-default", "7.4.1-1.1")]), self.rules,
+                     running_kernel="7.4.0-1-default")
+        self.assertTrue(v.auto)
+
+    def test_older_kernel_branch_is_routine(self):
+        # Ein longterm-Kernel neben dem laufenden neueren wird nicht Standard im Bootmenü
+        v = classify(self.kernel_plan("6.12.7-1.1", "kernel-longterm"), self.rules, running_kernel="7.3.0-1-default")
+        self.assertTrue(v.auto)
+
+    def test_kernel_upgrade_without_multiversion(self):
+        v = classify(plan(to_upgrade=[up("kernel-default", "7.3.0-1.1", "8.0.0-1.1")]), self.rules,
+                     running_kernel="7.3.0-1-default")
+        self.assertFalse(v.auto)
+
+    def test_kernel_rule_can_be_switched_off(self):
+        self.rules.kernel = []
+        v = classify(self.kernel_plan("7.4.0-1.1"), self.rules, running_kernel="7.3.0-1-default")
+        self.assertTrue(v.auto)
 
     def test_blocked_package(self):
         v = classify(plan(to_upgrade=[up("grub2-x86_64-efi", "2.12-59.1", "2.12-60.1")]), self.rules)

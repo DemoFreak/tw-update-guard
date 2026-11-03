@@ -47,6 +47,9 @@ watch = [
     "bareos-filedaemon", "samba:2", "docker", "containerd", "podman", "syncthing",
     "snapd", "fail2ban:2",
 ]
+# Approval for a kernel of a newer branch than the running one ("pattern:2": 7.3 → 7.4, not 7.3.1 → 7.3.2).
+# It becomes the default boot entry and starts with every reboot, also an unplanned one. [] = kernels are routine.
+kernel = ["kernel-default:2", "kernel-longterm:2"]
 # For information only: these require a reboot
 reboot = ["kernel-default", "kernel-longterm"]
 # Removals that are normal on Tumbleweed

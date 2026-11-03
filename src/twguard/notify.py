@@ -152,6 +152,21 @@ def issue_buttons(issue: Issue, later: bool = True, services: list[str] | None =
     return [[(tr("🔄 Neu prüfen"), "check"), ("📊 Status", "status")]]
 
 
+def status_buttons(st: State) -> Buttons:
+    """Schaltflächen der offenen Punkte, dazu Prüfen und Details, wenn es eine Paketliste gibt."""
+    rows = []
+    for issue in st.issues.values():
+        # Prüfen, Status und Details hat die Statusnachricht ohnehin in der letzten Reihe
+        for row in issue_buttons(issue, later=False, services=st.restart_services):
+            row = [b for b in row if b[1] not in ("check", "status", "details")]
+            if row:
+                rows.append(row)
+    general = [(tr("🔄 Jetzt prüfen"), "check")]
+    if st.last_plan.get("rows") or st.last_plan.get("problems"):
+        general.append(("📋 Details", "details"))
+    return [*rows, general]
+
+
 def button_kind(data: str) -> str:
     """Zu welchem offenen Punkt eine Schaltfläche aus `issue_buttons` gehört ("" für allgemeine)."""
     action, _, arg = data.partition(":")

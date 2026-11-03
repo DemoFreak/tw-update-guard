@@ -1,0 +1,41 @@
+# SPDX-License-Identifier: GPL-3.0-or-later
+name: test
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        # 3.11 ist die Mindestversion (tomllib), 3.x die neueste stabile
+        python: ["3.11", "3.x"]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
+      - name: Unit tests
+        run: PYTHONPATH=src python -m unittest discover -s tests
+      - name: Build zipapp and start it
+        run: |
+          mkdir -p build
+          python -m zipapp src -m 'twguard.cli:main' -p '/usr/bin/python3 -I' -o build/twguard.pyz
+          python -I build/twguard.pyz --version
+          TWGUARD_CONFIG=/nonexistent python -I build/twguard.pyz classify tests/fixtures/upgrade-real.xml
+
+  shell:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Check install.sh
+        run: |
+          bash -n install.sh
+          shellcheck install.sh
