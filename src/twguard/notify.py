@@ -152,6 +152,16 @@ def issue_buttons(issue: Issue, later: bool = True, services: list[str] | None =
     return [[(tr("🔄 Neu prüfen"), "check"), ("📊 Status", "status")]]
 
 
+def button_kind(data: str) -> str:
+    """Zu welchem offenen Punkt eine Schaltfläche aus `issue_buttons` gehört ("" für allgemeine)."""
+    action, _, arg = data.partition(":")
+    if action == "later":
+        return arg.partition(":")[2]
+    if action == "resolved":
+        return arg
+    return {"approve": "manual", "details": "manual", "reboot": "reboot", "restart": "services"}.get(action, "")
+
+
 def observed_buttons(fingerprint: str) -> Buttons:
     return [[(tr("▶️ Diesmal einspielen"), f"approve:{fingerprint}"), ("📋 Details", "details")]]
 
@@ -171,13 +181,18 @@ def format_issue(host: str, issue: Issue, now: float, esc: Escalation) -> str:
     return "\n".join(lines)
 
 
-def _issue_lines(st: State, now: float) -> list[str]:
+def _issue_lines(st: State, now: float, due: list[Issue] = ()) -> list[str]:
+    """Je offener Punkt eine Zeile; fällige Erinnerungen (`due`) mit 🔔 und ihrem Text."""
     lines = []
     for issue in st.issues.values():
-        line = "• " + tr("{title}, seit {age}", title=title(issue.kind), age=fmt_age(now - issue.since))
+        reminder = any(issue is d for d in due)
+        line = ("🔔 " if reminder else "• ") + tr("{title}, seit {age}", title=title(issue.kind),
+                                                 age=fmt_age(now - issue.since))
         if issue.snoozed_until > now:
             line += tr(" (aufgeschoben bis {when})", when=stamp(issue.snoozed_until))
         lines.append(line)
+        if reminder and issue.detail:
+            lines.append(escape(clip(issue.detail, 800)))
     return lines
 
 
@@ -196,11 +211,15 @@ def format_status(host: str, st: State, now: float) -> str:
     return "\n".join([f"<b>{escape(host)}</b>:", *_issue_lines(st, now), *([f"• {pending}"] if pending else [])])
 
 
-def format_briefing(host: str, st: State, now: float, observe: bool, kernel: str, uptime: float) -> str:
-    """Tägliche Zusammenfassung; kommt auch, wenn alles in Ordnung ist (Lebenszeichen)."""
+def format_briefing(host: str, st: State, now: float, observe: bool, kernel: str, uptime: float,
+                    due: list[Issue] = ()) -> str:
+    """Tägliche Zusammenfassung; kommt auch, wenn alles in Ordnung ist (Lebenszeichen).
+
+    Gleichzeitig fällige Erinnerungen (`due`) stehen darin, statt als eigene Nachricht zu folgen.
+    """
     if st.issues:
         count = trn("{n} offener Punkt", "{n} offene Punkte", len(st.issues))
-        lines = [f"☀️ <b>{escape(host)}</b>: {count}", *_issue_lines(st, now)]
+        lines = [f"☀️ <b>{escape(host)}</b>: {count}", *_issue_lines(st, now, due)]
     else:
         lines = [f"☀️ <b>{escape(host)}</b>: " + tr("alles in Ordnung")]
     last = _last_check(st, now)
@@ -281,6 +300,14 @@ def mark_resolved(cfg: Config, st: State, tg: Telegram, now: float | None = None
                           f"✅ <b>{escape(cfg.hostname)}</b>: " + tr("{title} – erledigt ({when})", title=title(kind), when=when))
 
 
+def note_reminded(st: State, issue: Issue, now: float) -> None:
+    """Eine Erinnerung ist angekommen (eigene Nachricht oder im Briefing)."""
+    issue.last_notified = now
+    issue.notify_count += 1
+    if issue.kind == "manual":
+        st.manual_shown = issue.fingerprint
+
+
 def send_due(cfg: Config, st: State, tg: Telegram, now: float | None = None) -> None:
     """Erledigte Meldungen abhaken und fällige Erinnerungen senden.
 
@@ -297,7 +324,4 @@ def send_due(cfg: Config, st: State, tg: Telegram, now: float | None = None) -> 
         except TelegramError as e:
             log.debug(tr("Erinnerung nicht gesendet: %s"), e)
             continue
-        issue.last_notified = now
-        issue.notify_count += 1
-        if issue.kind == "manual":
-            st.manual_shown = issue.fingerprint
+        note_reminded(st, issue, now)

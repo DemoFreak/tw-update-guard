@@ -218,6 +218,10 @@ class Telegram:
                          entities=entities, link_preview_options={"is_disabled": True},
                          reply_markup=reply_markup)
 
+    def edit_markup(self, chat_id: int, message_id: int, reply_markup: dict) -> dict:
+        """Nur die Schaltflächen einer Nachricht ändern, der Text bleibt."""
+        return self.call("editMessageReplyMarkup", chat_id=chat_id, message_id=message_id, reply_markup=reply_markup)
+
     def delete(self, chat_id: int, message_id: int) -> None:
         self.call("deleteMessage", chat_id=chat_id, message_id=message_id)
 

@@ -6,12 +6,12 @@ from pathlib import Path
 from unittest import mock
 
 import testlang  # noqa: F401
-from twguard import ota, restarts, state, zypper
+from twguard import bot as bot_module, check, ota, restarts, state, zypper
 from twguard.bot import Bot, parse_duration
 from twguard.config import Config
 from twguard.i18n import current, set_language
 from twguard.notify import send_due
-from twguard.telegram import TelegramError
+from twguard.telegram import TelegramError, keyboard
 
 from fakes import FakeTelegram
 
@@ -282,6 +282,186 @@ class BotTest(unittest.TestCase):
         self.bot.cfg.briefing.at = ""
         self.bot.maybe_briefing(self.at(8, 0))
         self.assertEqual(self.tg.sent, [])
+
+    def overdue_manual(self, now):
+        """Freigabe offen seit 30 h, letzte Erinnerung vor 25 h: Die nächste ist fällig."""
+        self.open_manual()
+        with state.locked(self.bot.cfg.state_dir) as st:
+            issue = st.issues["manual"]
+            issue.since, issue.last_notified, issue.notify_count = now - 30 * 3600, now - 25 * 3600, 1
+            st.messages["issue:manual"] = {"chat_id": -100, "message_id": 30, "at": now - 25 * 3600}
+
+    def test_briefing_takes_due_reminder(self):
+        now = self.at(8, 0)
+        self.overdue_manual(now)
+        self.bot.maybe_briefing(now)
+        with state.locked(self.bot.cfg.state_dir) as st:
+            send_due(self.bot.cfg, st, self.tg, now)
+            issue = st.issues["manual"]
+            self.assertEqual((issue.last_notified, issue.notify_count), (now, 2))
+            self.assertNotIn("issue:manual", st.messages)
+        self.assertEqual(len(self.tg.sent), 1)  # keine Erinnerung als zweite Nachricht
+        self.assertIn("🔔", self.tg.sent[0])
+        self.assertIn("kritisches Paket", self.tg.sent[0])
+        self.assertFalse(self.tg.silent[0])
+        callbacks = [b[1] for row in self.tg.buttons[0] for b in row]
+        self.assertIn("approve:abc", callbacks)
+        self.assertIn("status", callbacks)
+        self.assertIn(30, self.tg.deleted)  # die vorige Erinnerung wird ersetzt
+
+    def test_briefing_without_due_reminder_only_lists(self):
+        now = self.at(8, 0)
+        self.overdue_manual(now)
+        with state.locked(self.bot.cfg.state_dir) as st:
+            st.issues["manual"].last_notified = now - 3600
+        self.bot.maybe_briefing(now)
+        self.assertNotIn("🔔", self.tg.sent[0])
+        self.assertNotIn("approve:abc", [b[1] for row in self.tg.buttons[0] for b in row])
+        with state.locked(self.bot.cfg.state_dir) as st:
+            self.assertEqual(st.issues["manual"].notify_count, 1)
+            self.assertIn("issue:manual", st.messages)
+
+    def test_reminder_inside_quiet_hours_stays_separate(self):
+        # Briefing absichtlich in der Ruhezeit: Die Erinnerung kommt wie eingestellt danach
+        self.bot.cfg.briefing.at = "07:00"
+        now = self.at(7, 0)
+        self.overdue_manual(now)
+        self.bot.maybe_briefing(now)
+        self.assertNotIn("🔔", self.tg.sent[0])
+        with state.locked(self.bot.cfg.state_dir) as st:
+            self.assertEqual(st.issues["manual"].notify_count, 1)
+
+    def briefing_with(self, kind, now):
+        """Briefing mit zwei fälligen Punkten: Freigabe und `kind`."""
+        self.overdue_manual(now)
+        if kind == "services":
+            self.offer("postfix")
+        with state.locked(self.bot.cfg.state_dir) as st:
+            if kind != "services":
+                st.open_issue(kind, "Fehler beim Einspielen")
+            issue = st.issues[kind]
+            issue.since, issue.last_notified, issue.notify_count = now - 30 * 3600, now - 25 * 3600, 1
+        self.bot.maybe_briefing(now)
+        self.assertIn("approve:abc", self.briefing_data())
+        with state.locked(self.bot.cfg.state_dir) as st:
+            return st.messages["briefing"]["message_id"]
+
+    def briefing_data(self, markup=None):
+        rows = markup["inline_keyboard"] if markup else keyboard(self.tg.buttons[0])["inline_keyboard"]
+        return [b["callback_data"] for row in rows for b in row]
+
+    def press_briefing(self, briefing, data):
+        self.bot.handle_callback({"id": "cb1", "from": USER, "data": data,
+                                  "message": {"message_id": briefing, "chat": GROUP, "date": int(time.time()),
+                                              "text": "Briefing", "entities": [],
+                                              "reply_markup": keyboard(self.tg.buttons[0])}})
+
+    def assert_briefing_kept(self, briefing, gone, kept):
+        """Die Aktion kam in eine eigene Nachricht; im Briefing fehlen nur die Schaltflächen ihres Punkts."""
+        self.assertNotIn(briefing, [m for m, *_ in self.tg.edited])
+        (message_id, markup), = self.tg.markup_edits
+        self.assertEqual(message_id, briefing)
+        data = self.briefing_data(markup)
+        self.assertFalse([d for d in data if d.startswith(gone)])
+        for d in [*kept, "status", "check"]:
+            self.assertIn(d, data)
+        with state.locked(self.bot.cfg.state_dir) as st:
+            self.assertEqual(st.messages["briefing"]["message_id"], briefing)
+
+    def test_approve_in_briefing_keeps_restart_buttons(self):
+        briefing = self.briefing_with("services", self.at(8, 0))
+        self.press_briefing(briefing, "approve:abc")
+        self.start_check.assert_called_once()
+        self.assertIn("Freigegeben", self.tg.sent[-1])
+        self.assert_briefing_kept(briefing, "approve", ["restart:postfix"])
+        with state.locked(self.bot.cfg.state_dir) as st:
+            self.assertEqual(st.check_request["message_id"], self.tg.next_id)
+
+    def assert_briefing_untouched(self, briefing):
+        self.assertNotIn(briefing, [m for m, *_ in self.tg.edited])
+        self.assertEqual(self.tg.markup_edits, [])
+        with state.locked(self.bot.cfg.state_dir) as st:
+            self.assertEqual(st.messages["briefing"]["message_id"], briefing)
+
+    def test_approve_in_briefing_with_send_error_keeps_briefing(self):
+        briefing = self.briefing_with("services", self.at(8, 0))
+        self.tg.fail_send = True
+        self.press_briefing(briefing, "approve:abc")
+        self.start_check.assert_called_once()
+        self.assert_briefing_untouched(briefing)
+        with state.locked(self.bot.cfg.state_dir) as st:
+            self.assertNotIn("message_id", st.check_request)
+            self.assertIn("services", st.issues)
+        # Das Ergebnis des Prüflaufs kommt neu, sobald Telegram wieder annimmt
+        self.tg.fail_send = False
+        self.assertTrue(check.finish(self.bot.cfg, self.tg, "Ergebnis"))
+        self.assertEqual(self.tg.sent[-1], "Ergebnis")
+        self.assert_briefing_untouched(briefing)
+
+    def test_restart_in_briefing_with_send_error_reports_later(self):
+        briefing = self.briefing_with("services", self.at(8, 0))
+        self.tg.fail_send = True
+        with mock.patch.object(restarts, "start", return_value={}):
+            self.press_briefing(briefing, "restart:postfix")
+        self.assert_briefing_untouched(briefing)
+        self.tg.fail_send = False
+        self.found.return_value = []
+        with mock.patch.object(restarts, "pending", return_value=[]), \
+                mock.patch.object(restarts, "states", return_value={"postfix": "active"}):
+            self.bot.watch_restart()
+        self.assertIn("postfix", self.tg.sent[-1])
+        self.assert_briefing_untouched(briefing)
+        with state.locked(self.bot.cfg.state_dir) as st:
+            self.assertEqual(st.restart_reports, [])
+
+    def test_restart_in_briefing_keeps_approval(self):
+        briefing = self.briefing_with("services", self.at(8, 0))
+        with mock.patch.object(restarts, "start", return_value={}) as start:
+            self.press_briefing(briefing, "restart:postfix")
+        start.assert_called_once_with(["postfix"])
+        self.assertIn("starte neu: postfix", self.tg.sent[-1])
+        self.assert_briefing_kept(briefing, "restart", ["approve:abc", "later:24:manual"])
+        with state.locked(self.bot.cfg.state_dir) as st:
+            self.assertEqual(st.restart_request["message_id"], self.tg.next_id)
+
+    def test_later_in_briefing_moves_issue_to_own_message(self):
+        briefing = self.briefing_with("services", self.at(8, 0))
+        self.press_briefing(briefing, "later:24:services")
+        # Die Dienste bleiben in der eigenen Nachricht bedienbar, die Freigabe im Briefing
+        self.assertIn("Aufgeschoben bis", self.tg.sent[-1])
+        self.assertIn("restart:postfix", [b[1] for row in self.tg.buttons[-1] for b in row])
+        self.assert_briefing_kept(briefing, "later:24:services", ["approve:abc"])
+        self.assertNotIn("restart:postfix", self.briefing_data(self.tg.markup_edits[0][1]))
+        with state.locked(self.bot.cfg.state_dir) as st:
+            self.assertEqual(st.messages["issue:services"]["message_id"], self.tg.next_id)
+
+    def test_resolved_in_briefing_keeps_approval(self):
+        briefing = self.briefing_with("apply-failed", self.at(8, 0))
+        self.press_briefing(briefing, "resolved:apply-failed")
+        self.assertIn("erledigt", self.tg.sent[-1])
+        self.assert_briefing_kept(briefing, "resolved", ["approve:abc"])
+        with state.locked(self.bot.cfg.state_dir) as st:
+            self.assertNotIn("apply-failed", st.issues)
+
+    def test_reboot_in_briefing_keeps_approval(self):
+        briefing = self.briefing_with("reboot", self.at(8, 0))
+        with mock.patch.object(Bot, "reboot", return_value=""):
+            self.press_briefing(briefing, "reboot")
+        self.assertIn("startet in 1 Minute neu", self.tg.sent[-1])
+        self.assert_briefing_kept(briefing, "reboot", ["approve:abc"])
+        with state.locked(self.bot.cfg.state_dir) as st:
+            self.assertEqual(st.messages["reboot"]["message_id"], self.tg.next_id)
+
+    def test_tick_sends_briefing_before_reminders(self):
+        now = self.at(8, 0)
+        self.overdue_manual(now)
+        with mock.patch.object(bot_module.time, "time", return_value=now), \
+                mock.patch.object(self.bot, "_rpmdb_mtime", return_value=0.0), \
+                mock.patch.object(self.bot, "check_reboot"), mock.patch.object(self.bot, "deliver_restart_reports"):
+            self.bot.tick()
+        self.assertEqual(len(self.tg.sent), 1)
+        self.assertIn("☀️", self.tg.sent[0])
+        self.assertIn("🔔", self.tg.sent[0])
 
     def test_command_deleted_after_answer(self):
         self.bot.handle(message("/status"))

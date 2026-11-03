@@ -19,8 +19,8 @@ from pathlib import Path
 from . import COMMIT, __version__, details, messages, ota, restarts, state, zypper
 from .config import Config
 from .i18n import EN, LANGUAGES, current, set_language, tr
-from .notify import (adopt_migration, clip, fmt_age, format_briefing, format_issue, format_status, issue_buttons,
-                     mark_resolved, minutes_of_day, send_due, stamp, title)
+from .notify import (adopt_migration, button_kind, clip, fmt_age, format_briefing, format_issue, format_status,
+                     issue_buttons, is_due, mark_resolved, minutes_of_day, note_reminded, send_due, stamp, title)
 from .telegram import Buttons, Telegram, TelegramError
 
 log = logging.getLogger(__name__)
@@ -249,9 +249,11 @@ class Bot:
             elif not stale:
                 st.resolve("stale")
             self._report_update(st, now)
+        # Vor den Erinnerungen: Das Briefing nimmt die gleichzeitig fälligen auf
+        self.maybe_briefing(now)
+        with state.locked(self.cfg.state_dir) as st:
             send_due(self.cfg, st, self.tg, now)
             messages.cleanup(self.tg, st, now)
-        self.maybe_briefing(now)
 
     def maybe_briefing(self, now: float) -> None:
         if not self.cfg.briefing.at:
@@ -264,16 +266,25 @@ class Bot:
         with state.locked(self.cfg.state_dir) as st:
             if st.last_briefing_day == today:
                 return
+            # Eine jetzt fällige Erinnerung kommt im Briefing mit ihren Schaltflächen, nicht als zweite Nachricht
+            due = [issue for issue in st.issues.values() if is_due(issue, now, self.cfg.escalation)]
             text = format_briefing(self.cfg.hostname, st, now, self.cfg.observe,
-                                   os.uname().release, now - boot_time())
+                                   os.uname().release, now - boot_time(), due)
+            buttons = [row for issue in due for row in issue_buttons(issue, services=st.restart_services)]
             try:
                 messages.replace(self.tg, st, "briefing", text,
-                                 buttons=[[("📊 Status", "status"), (tr("🔄 Jetzt prüfen"), "check")]],
+                                 buttons=[*buttons, [("📊 Status", "status"), (tr("🔄 Jetzt prüfen"), "check")]],
                                  silent=self.cfg.briefing.silent and not st.issues)
             except TelegramError as e:
                 log.debug(tr("Briefing nicht gesendet: %s"), e)
                 return
             st.last_briefing_day = today
+            for issue in due:
+                # Wie eine neue Erinnerung ersetzt das Briefing die vorige Meldung zum Punkt
+                old = st.messages.pop(f"issue:{issue.kind}", None)
+                if old:
+                    messages.retire(self.tg, old)
+                note_reminded(st, issue, now)
             # Die Update-Berichte stehen jetzt im Briefing
             for report in st.reports:
                 if report.get("message_id"):
@@ -768,7 +779,7 @@ class Bot:
             self._answer(cq, plain(error), alert=True)
             return
         self._answer(cq, tr("Freigegeben"))
-        self._take_over(pressed, self.approved_text(), request=True)
+        self._take_over(cq, pressed, self.approved_text(), request=True, kind="manual")
         self.start_check()
 
     def press_details(self, cq: dict, pressed: dict, arg: str) -> None:
@@ -833,9 +844,11 @@ class Bot:
             text = format_issue(self.cfg.hostname, issue, time.time(), self.cfg.escalation)
             text += tr("\n\n⏰ Aufgeschoben bis {when}", when=stamp(issue.snoozed_until))
             buttons = issue_buttons(issue, later=False, services=st.restart_services)
-            # Die Nachricht zeigt danach den aktuellen Stand, auch wenn sie einen älteren zeigte
-            if messages.edit(self.tg, pressed, text, buttons) and kind == "manual":
-                st.manual_shown = issue.fingerprint
+            fingerprint = issue.fingerprint
+        # Die Nachricht zeigt danach den aktuellen Stand, auch wenn sie einen älteren zeigte
+        if self._own(cq, pressed, kind, text, buttons, topic=f"issue:{kind}") and kind == "manual":
+            with state.locked(self.cfg.state_dir) as st:
+                st.manual_shown = fingerprint
 
     def press_check(self, cq: dict, pressed: dict, arg: str) -> None:
         self._answer(cq, tr("Prüfung läuft …"))
@@ -843,7 +856,7 @@ class Bot:
             on_status = messages.same(st.messages.get("status", {}), pressed)
         if on_status:
             # Die Statusnachricht selbst wird zur Wartemeldung und dann zum Ergebnis
-            self._take_over(pressed, self.checking_text(), request=True, topic="status")
+            self._take_over(cq, pressed, self.checking_text(), request=True, topic="status")
             self.start_check()
         else:
             # Briefing und Meldungen bleiben stehen; das Ergebnis kommt in eine neue Statusnachricht
@@ -866,7 +879,7 @@ class Bot:
             return
         self._answer(cq, tr("Neustart in 1 Minute"))
         text, buttons = self.reboot_view()
-        self._take_over(pressed, text, buttons, topic="reboot")
+        self._take_over(cq, pressed, text, buttons, topic="reboot", kind="reboot")
 
     def press_cancel(self, cq: dict, pressed: dict, arg: str) -> None:
         text = self.cancel()
@@ -907,16 +920,17 @@ class Bot:
         if not names:
             self._offer_current(cq, pressed, found)
             return
-        # Erst alles festhalten und anzeigen: Ist der Bot selbst dabei, wird er gleich beendet
+        # Erst alles anzeigen und festhalten: Ist der Bot selbst dabei, wird er gleich beendet
+        self._answer(cq, tr("Neustart läuft …"))
+        shown = self._own(cq, pressed, "services",
+                          tr("⏳ <b>{host}</b>: starte neu: {services}. Das Ergebnis erscheint hier.",
+                             host=self.host, services=escape(", ".join(names)))) or {"chat_id": pressed["chat_id"]}
         with state.locked(self.cfg.state_dir) as st:
-            messages.release(st, pressed)
             st.resolve("services")
             st.restart_services = []
-            st.restart_request = {"chat_id": pressed["chat_id"], "message_id": pressed["message_id"],
+            # Ohne Nachricht (Sendefehler) kommt das Ergebnis später als neue
+            st.restart_request = {"chat_id": shown["chat_id"], "message_id": shown.get("message_id"),
                                   "at": time.time(), "services": names}
-        self._answer(cq, tr("Neustart läuft …"))
-        messages.edit(self.tg, pressed, tr("⏳ <b>{host}</b>: starte neu: {services}. Das Ergebnis erscheint hier.",
-                                           host=self.host, services=escape(", ".join(names))))
         # Abgewiesene merken, bevor sich der Bot selbst einreiht: Das kann ihn sofort beenden
         self._note_restart_errors(restarts.start([n for n in names if n != restarts.BOT_SERVICE]))
         if restarts.BOT_SERVICE in names:
@@ -933,18 +947,12 @@ class Bot:
         with state.locked(self.cfg.state_dir) as st:
             restarts.note(st, found, self.cfg.services.exclude)
             issue = st.issues.get("services")
-            messages.release(st, pressed)
             if issue is None:
                 text, buttons = f"✅ <b>{self.host}</b>: " + tr("Dieser Neustart ist nicht mehr nötig."), None
             else:
                 text = format_issue(self.cfg.hostname, issue, time.time(), self.cfg.escalation)
                 buttons = issue_buttons(issue, services=st.restart_services)
-                old = st.messages.get("issue:services")
-                messages.claim(st, "issue:services", {"chat_id": pressed["chat_id"], "message_id": pressed["message_id"],
-                                                      "at": pressed["at"]})
-                if old and not messages.same(old, pressed):
-                    messages.retire(self.tg, old)
-            messages.edit(self.tg, pressed, text, buttons)
+        self._own(cq, pressed, "services", text, buttons, topic="issue:services" if issue else "")
 
     def press_resolved(self, cq: dict, pressed: dict, kind: str) -> None:
         """Fehlgeschlagenes Einspielen als von Hand behoben quittieren."""
@@ -952,12 +960,11 @@ class Bot:
             self._answer(cq, tr("Unbekannte Schaltfläche."))
             return
         self._answer(cq)
+        self._own(cq, pressed, kind, f"✅ <b>{self.host}</b>: " +
+                  tr("{title} – erledigt ({when})", title=title(kind), when=stamp(time.time())))
         with state.locked(self.cfg.state_dir) as st:
-            messages.release(st, pressed)
             st.resolve(kind)
             mark_resolved(self.cfg, st, self.tg)
-        messages.edit(self.tg, pressed, f"✅ <b>{self.host}</b>: " +
-                      tr("{title} – erledigt ({when})", title=title(kind), when=stamp(time.time())))
 
     def press_dismiss(self, cq: dict, pressed: dict, arg: str) -> None:
         self._answer(cq)
@@ -986,19 +993,54 @@ class Bot:
             except TelegramError as e:
                 log.debug(tr("Nachricht nicht gesendet: %s"), e)
 
-    def _take_over(self, pressed: dict, text: str, buttons: Buttons | None = None,
-                   request: bool = False, topic: str = "") -> None:
-        """Gedrückte Nachricht umwidmen: neuer Inhalt, alte Themenzuordnung lösen, ggf. neue setzen."""
+    def _take_over(self, cq: dict, pressed: dict, text: str, buttons: Buttons | None = None,
+                   request: bool = False, topic: str = "", kind: str = "") -> None:
+        """Gedrückte Nachricht umwidmen (siehe `_own`), ggf. als Ziel für das Ergebnis des Prüflaufs."""
+        # Kam nichts an, schickt der Prüflauf sein Ergebnis als neue Nachricht
+        shown = self._own(cq, pressed, kind, text, buttons, topic) or {"chat_id": pressed["chat_id"]}
+        if request:
+            with state.locked(self.cfg.state_dir) as st:
+                st.check_request = {**shown, "at": time.time()}
+
+    def _own(self, cq: dict, pressed: dict, kind: str, text: str, buttons: Buttons | None = None,
+             topic: str = "") -> dict | None:
+        """Ergebnis einer Aktion zum Punkt `kind` zeigen; Rückgabe: die Nachricht dafür, None wenn nichts ankam.
+
+        Sonst wird die gedrückte Nachricht umgewidmet (alte Themenzuordnung lösen, ggf. `topic` setzen).
+        Das Briefing zeigt aber mehrere Punkte: Dort bekommt die Aktion eine eigene Nachricht, und nur die
+        Schaltflächen dieses Punkts verschwinden, damit die übrigen bedienbar bleiben. Scheitert das Senden,
+        bleibt das Briefing ganz unverändert; die Rückmeldung zum Druck kam schon als Hinweis.
+        """
         with state.locked(self.cfg.state_dir) as st:
-            old = st.messages.get(topic) if topic else None
-            messages.release(st, pressed)
+            in_briefing = kind and messages.same(st.messages.get("briefing", {}), pressed)
+        if in_briefing:
+            try:
+                shown = messages.ref(self.tg.send(text, chat_id=pressed["chat_id"], buttons=buttons))
+            except TelegramError as e:
+                log.info(tr("Nachricht nicht gesendet: %s"), e)
+                return None
+            self._drop_buttons(cq, pressed, kind)
+        elif messages.edit(self.tg, pressed, text, buttons):
+            shown = pressed
+        else:
+            return None
+        with state.locked(self.cfg.state_dir) as st:
+            messages.release(st, shown)
             if topic:
-                messages.claim(st, topic, pressed)
-                if old and not messages.same(old, pressed):
+                old = st.messages.get(topic)
+                messages.claim(st, topic, shown)
+                if old and not messages.same(old, shown):
                     messages.retire(self.tg, old)
-            if request:
-                st.check_request = {**pressed, "at": time.time()}
-        messages.edit(self.tg, pressed, text, buttons)
+        return shown
+
+    def _drop_buttons(self, cq: dict, pressed: dict, kind: str) -> None:
+        markup = (cq.get("message") or {}).get("reply_markup") or {}
+        rows = [row for row in markup.get("inline_keyboard", [])
+                if not any(button_kind(b.get("callback_data", "")) == kind for b in row)]
+        try:
+            self.tg.edit_markup(pressed["chat_id"], pressed["message_id"], {"inline_keyboard": rows})
+        except TelegramError as e:
+            log.info(tr("Schaltflächen im Briefing nicht angepasst: %s"), e)
 
     def _deliver(self, msg: dict, out: Out | None) -> None:
         if out is None:

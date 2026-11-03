@@ -32,7 +32,7 @@ Telegram messages, the `twguard` command line output, `--help` and the log lines
    | 5 days | every 3 hours |
    | 10 days | hourly |
 
-   Nights (22:00–07:00) are quiet. `/later` postpones twice, at most 72 hours each. Temporary errors (repository unreachable) are only reported after a day. If no check succeeds for three days, that is reported too.
+   Nights (22:00–08:00) are quiet; a reminder due when the daily briefing goes out is part of the briefing. `/later` postpones twice, at most 72 hours each. Temporary errors (repository unreachable) are only reported after a day. If no check succeeds for three days, that is reported too.
 
 **Observation mode** (`mode = "observe"` in `[general]`, the default after installation): the timer checks and reports as usual but installs nothing. Routine updates are reported silently as “would be installed” (once per state), with an “Install this time” button. Approvals also work in this mode. Only with `mode = "auto"` does twguard install routine updates by itself. Every non-empty zypper output is saved under `/var/lib/twguard/plans/` (the last 20).
 
@@ -120,7 +120,7 @@ journalctl -u twguard-bot | grep 'errors in one hour'   # more fetch and send er
 - An OTA update runs code from the Git repository as root. Whoever can push to `main` of the repository your servers pull from controls your servers; passing tests do not protect against malicious code. If you do not want to trust this repository, let your servers pull from your own fork and review changes before merging.
 - If the server is off or offline, the bot is silent too. Use external monitoring for that (e.g. Uptime Kuma).
 - Solver conflicts cannot be resolved via Telegram.
-- Services using outdated libraries are only reported, not restarted.
+- Services using outdated libraries are never restarted automatically, not even in `auto` mode: only when you press their button, and services in `[services] exclude` (D-Bus, `systemd-*`, getty, display manager, network and others) are not offered at all.
 
 ## Security
 

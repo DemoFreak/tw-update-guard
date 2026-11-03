@@ -56,8 +56,9 @@ max_removals = 20
 max_packages = 0
 
 [escalation]
-# No reminders during this period (local time); "" = always remind
-quiet_hours = "22:00-07:00"
+# No reminders during this period (local time); "" = always remind.
+# A reminder due when the briefing goes out is part of the briefing instead of a message of its own.
+quiet_hours = "22:00-08:00"
 # Steps [from age in hours, interval in hours]:
 # right away, then daily; after 2 days every 8 h; after 5 days every 3 h; after 10 days hourly
 ladder = [[0, 24], [48, 8], [120, 3], [240, 1]]

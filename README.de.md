@@ -30,7 +30,7 @@ Ein Dienst für headless openSUSE-Tumbleweed-Server. Er spielt Routine-Updates (
    | 5 Tagen | alle 3 Stunden |
    | 10 Tagen | stündlich |
 
-   Nachts (22–7 Uhr) ist Ruhe. Mit `/later` lässt sich zweimal aufschieben, jeweils höchstens 72 Stunden. Vorübergehende Fehler (Repo nicht erreichbar) werden erst nach einem Tag gemeldet. Läuft drei Tage lang keine Prüfung erfolgreich, kommt ebenfalls eine Meldung.
+   Nachts (22–8 Uhr) ist Ruhe; eine Erinnerung, die beim täglichen Briefing fällig ist, steht im Briefing. Mit `/later` lässt sich zweimal aufschieben, jeweils höchstens 72 Stunden. Vorübergehende Fehler (Repo nicht erreichbar) werden erst nach einem Tag gemeldet. Läuft drei Tage lang keine Prüfung erfolgreich, kommt ebenfalls eine Meldung.
 
 **Beobachtungsmodus** (`mode = "observe"` in `[general]`, Standard nach der Installation): Der Timer prüft und meldet wie sonst, spielt aber nichts ein. Routine-Updates kommen als stille Meldung „würde eingespielt“ (je Stand einmal), mit einer Schaltfläche „Diesmal einspielen“. Freigaben wirken auch in diesem Modus. Erst mit `mode = "auto"` spielt twguard Routine-Updates selbst ein. Jede nicht leere zypper-Ausgabe wird unter `/var/lib/twguard/plans/` gesichert (die letzten 20).
 
@@ -118,7 +118,7 @@ journalctl -u twguard-bot | grep 'Fehler in einer Stunde'   # mehr Abruf- und Se
 - Ein OTA-Update führt Code aus dem Git-Repo als root aus. Wer auf `main` des Repos pushen darf, aus dem die Server holen, steuert damit die Server. Grüne Tests schützen nicht vor absichtlich schädlichem Code. Wer dem Original-Repo nicht vertrauen will, lässt die Server aus einem eigenen Fork holen und übernimmt Änderungen nach Durchsicht.
 - Ist der Server ganz aus oder ohne Netz, schweigt auch der Bot. Dafür braucht es eine Überwachung von außen (z. B. Uptime Kuma).
 - Solver-Konflikte lassen sich nicht über Telegram lösen.
-- Dienste mit alten Bibliotheken werden nur gemeldet, nicht neu gestartet.
+- Dienste mit alten Bibliotheken startet twguard nie von selbst neu, auch nicht im Modus `auto`: nur auf Knopfdruck, und Dienste aus `[services] exclude` (D-Bus, `systemd-*`, Getty, Display-Manager, Netzwerk u. a.) werden gar nicht angeboten.
 
 ## Sicherheit
 

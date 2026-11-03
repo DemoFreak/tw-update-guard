@@ -12,16 +12,20 @@ class FakeTelegram:
         self.markups = []
         self.edited = []  # (message_id, text, buttons)
         self.raw_edits = []  # (message_id, text)
+        self.markup_edits = []  # (message_id, reply_markup)
         self.deleted = []
         self.answered = []
         self.typed = []
         self.commands = None
         self.fail_delete = False
+        self.fail_send = False
         self.next_id = 100
         self.chat_id = -100
         self.migration = None
 
     def send(self, text, chat_id=None, silent=False, reply_to=None, buttons=None, markup=None):
+        if self.fail_send:
+            raise TelegramError("sendMessage: Too Many Requests")
         self.sent.append(text)
         self.buttons.append(buttons)
         self.silent.append(silent)
@@ -40,6 +44,10 @@ class FakeTelegram:
 
     def edit_raw(self, chat_id, message_id, text, entities, reply_markup):
         self.raw_edits.append((message_id, text))
+        return {}
+
+    def edit_markup(self, chat_id, message_id, reply_markup):
+        self.markup_edits.append((message_id, reply_markup))
         return {}
 
     def delete(self, chat_id, message_id):

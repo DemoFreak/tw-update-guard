@@ -20,7 +20,7 @@ DEFAULT_STATE_DIR = Path("/var/lib/twguard")
 @dataclass
 class Escalation:
     # Keine Erinnerungen in diesem Zeitraum (Ortszeit); leer = immer
-    quiet_hours: str = "22:00-07:00"
+    quiet_hours: str = "22:00-08:00"
     # Stufen [ab Alter in Stunden, Abstand in Stunden]
     ladder: list[list[float]] = field(default_factory=lambda: [[0, 24], [48, 8], [120, 3], [240, 1]])
     # Für vorübergehende Fehler (Repo nicht erreichbar): erst nach einem Tag melden

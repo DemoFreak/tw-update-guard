@@ -51,7 +51,8 @@ def finish(cfg: Config, tg: Telegram, text: str, buttons: Buttons | None = None,
     if not request or time.time() - request.get("at", 0) > REQUEST_MAX_AGE:
         return False
     if loud:
-        messages.delete(tg, request)
+        if request.get("message_id"):
+            messages.delete(tg, request)
         request = {"chat_id": request.get("chat_id")}
     shown = messages.edit_or_send(tg, request, text, buttons)
     if shown and topic:
