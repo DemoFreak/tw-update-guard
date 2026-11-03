@@ -326,6 +326,8 @@ class BotTest(unittest.TestCase):
             self.press("update:" + "b" * 40)
             start.assert_called_once_with("b" * 40)
         self.assertIn("Update auf", self.tg.edited[-1][1])
+        # Die Frist bis zum Zurückrollen steht dabei, sonst wirkt der stumme Bot tot
+        self.assertIn(f"{ota.START_TIMEOUT} s", self.tg.edited[-1][1])
         with state.locked(self.bot.cfg.state_dir) as st:
             self.assertEqual(st.update_request["commit"], "b" * 40)
             self.assertEqual(st.update_request["message_id"], 5)

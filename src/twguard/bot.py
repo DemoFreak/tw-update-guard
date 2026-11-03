@@ -963,8 +963,12 @@ class Bot:
             messages.edit(self.tg, pressed, error)
             return
         self._answer(cq, tr("Update läuft …"))
-        messages.edit(self.tg, pressed, tr("⏳ <b>{host}</b>: Update auf {commit} läuft, der Bot startet gleich neu; "
-                                           "das Ergebnis erscheint hier.", host=self.host, commit=escape(commit[:12])))
+        # Ohne die Frist wirkt ein Bot, der nicht startet, bis zum Zurückrollen einfach tot
+        messages.edit(self.tg, pressed, tr("⏳ <b>{host}</b>: Update auf {commit} läuft, der Bot startet gleich neu und "
+                                           "antwortet so lange nicht. Schlägt die Installation des Updates fehl, wird "
+                                           "spätestens nach {seconds} s die ursprüngliche Version wiederhergestellt. "
+                                           "Das Ergebnis erscheint hier.",
+                                           host=self.host, commit=escape(commit[:12]), seconds=ota.START_TIMEOUT))
 
     def press_restart(self, cq: dict, pressed: dict, arg: str) -> None:
         """Einen Dienst oder (`*:<Kennung>`) genau die gezeigte Liste neu starten."""

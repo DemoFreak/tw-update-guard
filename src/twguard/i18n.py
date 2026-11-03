@@ -279,8 +279,8 @@ Messages also have buttons for this.""",
     "\n\n⏰ Aufgeschoben bis {when}": "\n\n⏰ Snoozed until {when}",
     "Prüfung läuft …": "Check running …",
     "Update läuft …": "Update running …",
-    "⏳ <b>{host}</b>: Update auf {commit} läuft, der Bot startet gleich neu; das Ergebnis erscheint hier.":
-        "⏳ <b>{host}</b>: updating to {commit}, the bot will restart shortly; the result will appear here.",
+    "⏳ <b>{host}</b>: Update auf {commit} läuft, der Bot startet gleich neu und antwortet so lange nicht. Schlägt die Installation des Updates fehl, wird spätestens nach {seconds} s die ursprüngliche Version wiederhergestellt. Das Ergebnis erscheint hier.":
+        "⏳ <b>{host}</b>: updating to {commit}, the bot will restart shortly and not answer meanwhile. If installing the update fails, the original version is restored after {seconds} s at the latest. The result will appear here.",
     "✖️ verworfen": "✖️ dismissed",
     "↓ ersetzt durch eine neuere Nachricht": "↓ replaced by a newer message",
     # Update über das Netz
