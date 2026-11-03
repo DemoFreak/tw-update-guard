@@ -38,6 +38,8 @@ class BotTest(unittest.TestCase):
         self.start_check = mock.patch.object(Bot, "start_check").start()
         mock.patch.object(Bot, "_check_running", return_value=False).start()
         self.found = mock.patch.object(zypper, "services_needing_restart", return_value=[]).start()
+        # Kein echtes zypper in den Tests (fehlt z. B. in der CI); einzelne Tests ersetzen den Wert
+        mock.patch.object(zypper, "needs_rebooting", return_value=False).start()
         self.addCleanup(mock.patch.stopall)
         self.addCleanup(self.tmp.cleanup)
 

@@ -4,6 +4,11 @@ Published versions of tw-update-guard. Versions in between were development step
 published version. **Upgrade** notes name what you may have to change by hand; `twguard config-diff` shows which
 values in your `config.toml` differ from the defaults.
 
+## 0.8.9 – 2026-11-03
+
+- Tests no longer call the real `zypper needs-rebooting` (failed in CI, where zypper is missing)
+- CI uses the current major versions of the checkout and setup-python actions
+
 ## 0.8.8 – 2026-11-03
 
 - A kernel of a newer branch than the running one (e.g. 7.3 → 7.4) needs approval; it becomes the default boot

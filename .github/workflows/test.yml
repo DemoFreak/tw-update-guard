@@ -18,8 +18,8 @@ jobs:
         # 3.11 ist die Mindestversion (tomllib), 3.x die neueste stabile
         python: ["3.11", "3.x"]
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v6
         with:
           python-version: ${{ matrix.python }}
       - name: Unit tests
@@ -34,7 +34,7 @@ jobs:
   shell:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - name: Check install.sh
         run: |
           bash -n install.sh
