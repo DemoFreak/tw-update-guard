@@ -300,12 +300,23 @@ class Bot:
     def check_reboot(self) -> None:
         self.last_reboot_check = time.time()
         self.check_services()
+        self.update_reboot()
+
+    def update_reboot(self, shown: bool = False) -> None:
+        """Offenen Punkt „Neustart“ nach `zypper needs-rebooting` öffnen oder schließen.
+
+        Mit `shown` zeigt die Statusnachricht einen neuen Punkt gleich samt Knopf; das zählt als
+        erste Benachrichtigung, damit nicht kurz danach dieselbe Meldung noch einmal kommt.
+        """
         needed = zypper.needs_rebooting()
         if needed is None:
             return
         with state.locked(self.cfg.state_dir) as st:
             if needed and "reboot" not in st.issues:
-                st.open_issue("reboot", tr("zypper needs-rebooting meldet einen ausstehenden Neustart."))
+                issue, _ = st.open_issue("reboot", tr("zypper needs-rebooting meldet einen ausstehenden Neustart."))
+                if shown:
+                    issue.last_notified = time.time()
+                    issue.notify_count = 1
             elif not needed and st.resolve("reboot"):
                 mark_resolved(self.cfg, st, self.tg)
 
@@ -432,6 +443,8 @@ class Bot:
         return p.stdout.strip() in ("active", "activating", "reloading", "deactivating")
 
     def start_check(self) -> None:
+        # Der Takt fragt nur alle 30 min; ein ausstehender Neustart soll schon im Ergebnis stehen
+        self.update_reboot()
         subprocess.run(["systemctl", "start", "--no-block", CHECK_UNIT], check=False)
 
     # --- Befehle ----------------------------------------------------------
@@ -491,6 +504,8 @@ class Bot:
         return Out(text, buttons, topic="status")
 
     def status_view(self) -> tuple[str, Buttons]:
+        # Nicht auf den Takt warten: Der Status soll einen ausstehenden Neustart gleich mit Knopf zeigen
+        self.update_reboot(shown=True)
         with state.locked(self.cfg.state_dir) as st:
             text, buttons = format_status(self.cfg.hostname, st, time.time()), status_buttons(st)
         if self.cfg.observe:

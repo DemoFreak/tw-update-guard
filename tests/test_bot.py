@@ -15,6 +15,8 @@ from twguard.telegram import TelegramError, keyboard
 
 from fakes import FakeTelegram
 
+# Vor dem Ersetzen in setUp gemerkt, für Tests des echten Starts
+REAL_START_CHECK = Bot.start_check
 ME = {"id": 1000, "username": "server1_bot", "is_bot": True}
 OTHER_BOT = {"id": 2000, "username": "server2_bot", "is_bot": True}
 USER = {"id": 42, "is_bot": False, "first_name": "Admin"}
@@ -38,8 +40,9 @@ class BotTest(unittest.TestCase):
         self.start_check = mock.patch.object(Bot, "start_check").start()
         mock.patch.object(Bot, "_check_running", return_value=False).start()
         self.found = mock.patch.object(zypper, "services_needing_restart", return_value=[]).start()
-        # Kein echtes zypper in den Tests (fehlt z. B. in der CI); einzelne Tests ersetzen den Wert
-        mock.patch.object(zypper, "needs_rebooting", return_value=False).start()
+        # Kein echtes zypper in den Tests (fehlt z. B. in der CI). None heißt „unbekannt“ und lässt einen
+        # von Hand geöffneten Neustart-Punkt stehen; einzelne Tests ersetzen den Wert
+        self.rebooting = mock.patch.object(zypper, "needs_rebooting", return_value=None).start()
         self.addCleanup(mock.patch.stopall)
         self.addCleanup(self.tmp.cleanup)
 
@@ -248,6 +251,37 @@ class BotTest(unittest.TestCase):
             st.last_plan = {"summary": "1 Paket", "rows": [["to-upgrade", "bash", "5.3.2-1.1", "5.3.3-1.1", "repo"]],
                             "problems": []}
         self.assertIn("details", self.status_data(self.bot.status_view()[1]))
+
+    def test_status_asks_zypper_for_pending_reboot(self):
+        # Nicht erst beim nächsten Takt (alle 30 min): Der Status zeigt den Neustart gleich mit Knopf
+        self.rebooting.return_value = True
+        self.bot.handle(message("/status"))
+        self.assertIn("reboot", self.status_data(self.tg.buttons[0]))
+        with state.locked(self.bot.cfg.state_dir) as st:
+            issue = st.issues["reboot"]
+            # Gilt als erste Benachrichtigung, der Takt schickt danach keine zweite Meldung
+            self.assertTrue(issue.last_notified)
+            self.assertEqual(issue.notify_count, 1)
+            send_due(self.bot.cfg, st, self.tg)
+        self.assertEqual(len(self.tg.sent), 1)
+
+    def test_status_closes_reboot_no_longer_needed(self):
+        self.open_reboot()
+        self.rebooting.return_value = False
+        self.bot.handle(message("/status"))
+        self.assertNotIn("reboot", self.status_data(self.tg.buttons[-1]))
+        with state.locked(self.bot.cfg.state_dir) as st:
+            self.assertNotIn("reboot", st.issues)
+
+    def test_start_check_asks_zypper_for_pending_reboot(self):
+        # Das Ergebnis eines Prüflaufs ohne Updates zeigt offene Punkte; der Neustart soll dabei sein
+        self.rebooting.return_value = True
+        with mock.patch.object(subprocess, "run") as run:
+            REAL_START_CHECK(self.bot)
+        run.assert_called_once()
+        with state.locked(self.bot.cfg.state_dir) as st:
+            self.assertIn("reboot", st.issues)
+            self.assertFalse(st.issues["reboot"].last_notified)
 
     def status_message(self):
         self.bot.handle(message("/status"))

@@ -4,6 +4,11 @@ Published versions of tw-update-guard. Versions in between were development step
 published version. **Upgrade** notes name what you may have to change by hand; `twguard config-diff` shows which
 values in your `config.toml` differ from the defaults.
 
+## 0.9.1 – 2026-11-03
+
+- Status and "Check now" ask `zypper needs-rebooting` first instead of waiting for the bot's check every 30 minutes,
+  so a pending reboot shows up at once with its button; shown in the status, it counts as the first notification
+
 ## 0.9.0 – 2026-11-03
 
 - `/mode auto` and `/mode observe` change the mode until the next restart of the bot, only when addressed (with
