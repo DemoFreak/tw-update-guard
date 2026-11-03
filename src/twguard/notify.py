@@ -8,7 +8,7 @@ import time
 from html import escape
 
 from . import messages, restarts
-from .config import Config, Escalation
+from .config import MODES, Config, Escalation
 from .i18n import LANGUAGES, set_language, tr, trn
 from .state import Issue, State
 from .state import load as load_state
@@ -38,6 +38,16 @@ def use_language(cfg: Config) -> None:
     except (OSError, ValueError):
         override = ""  # z. B. ohne root kein Zugriff auf den Zustand
     set_language(override if override in LANGUAGES else cfg.language)
+
+
+def use_mode(cfg: Config) -> None:
+    """Modus für den Prüflauf: der mit /mode gewählte, sonst der aus der Konfiguration."""
+    try:
+        override = load_state(cfg.state_dir / "state.json").mode_override
+    except (OSError, ValueError):
+        override = ""
+    if override in MODES:
+        cfg.mode = override
 
 
 def title(kind: str) -> str:

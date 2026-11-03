@@ -97,7 +97,8 @@ def connect(host: str, port: int, timeout: float, phases: dict, prefer: str = ""
             sock.connect(addr)
         except OSError as e:
             sock.close()
-            failed.append(f"{addr[0]} nach {time.monotonic() - t:.1f} s: {e}")
+            failed.append(tr("{address} nach {seconds} s: {error}", address=addr[0],
+                             seconds=f"{time.monotonic() - t:.1f}", error=e))
             continue
         phases["connect"] = time.monotonic() - start
         phases["addr"] = addr[0]
@@ -109,7 +110,9 @@ def connect(host: str, port: int, timeout: float, phases: dict, prefer: str = ""
 
 
 def format_phases(phases: dict) -> str:
-    parts = [f"{name} {phases[name]:.1f} s" for name in ("dns", "connect", "tls", "antwort") if name in phases]
+    # Die Phasen heißen intern wie im Protokoll älterer Versionen; nur „antwort“ ist ein Wort
+    labels = {"dns": "dns", "connect": "connect", "tls": "tls", "antwort": tr("antwort")}
+    parts = [f"{label} {phases[name]:.1f} s" for name, label in labels.items() if name in phases]
     if "addr" in phases:
         parts.append(tr("über {address}", address=phases["addr"]))
     return ", ".join(parts)

@@ -131,6 +131,17 @@ class CheckTest(unittest.TestCase):
         check.run(self.cfg("auto"))
         self.assertFalse([text for _, text, _ in self.tg.edited if "spielt das Update ein" in text])
 
+    def test_mode_from_bot_applies_to_check(self):
+        cfg = self.cfg("observe")
+        with state.locked(cfg.state_dir) as st:
+            st.mode_override = "auto"
+        check.run(cfg)
+        self.apply.assert_called_once()
+
+    def test_check_follows_config_without_override(self):
+        check.run(self.cfg("observe"))
+        self.apply.assert_not_called()
+
     def test_requested_check_reports_nothing_to_do(self):
         cfg = self.cfg("auto")
         self.dry_run.side_effect = lambda args: Plan(raw="<stream/>")

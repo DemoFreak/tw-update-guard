@@ -67,6 +67,7 @@ In der Gruppe gelten Befehle für einen bestimmten Server nur, wenn sie **als An
 | `/update` | neuen Stand von twguard holen und zur Bestätigung anzeigen; ohne `@botname` antworten alle Server |
 | `/version` | Version, Git-Stand und Modus |
 | `/language en`, `/language de` | Sprache zur Laufzeit ändern; ohne `@botname` alle Server. Gilt bis zum nächsten Neustart des Bots, die Konfiguration bleibt unverändert |
+| `/mode auto`, `/mode observe` | Modus zur Laufzeit ändern, nur mit `@botname` oder als Antwort (nie alle Server auf einmal). Gilt bis zum nächsten Neustart des Bots (auch durch `/update` oder einen Reboot), die Konfiguration bleibt unverändert |
 | `/help` | alle Befehle; ohne `@botname` antwortet nur der Bot mit `help_full`. Verschwindet nach 5 Minuten |
 | `/keyboard` | feste Tastatur einblenden: „📊 Status“, „🔄 Alle prüfen“, „⬆️ Update“, „🏷️ Version“, „❓ Hilfe“ (gelten für alle Server; ein Server versteht eine Taste erst ab der Version, die sie eingeführt hat). Die Tasten hängen an der Nachricht „⌨️ Tastatur …“; die bleibt deshalb stehen. `/keyboard off` löscht sie und blendet die Tasten damit aus |
 

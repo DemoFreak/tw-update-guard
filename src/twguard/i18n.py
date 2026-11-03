@@ -171,6 +171,7 @@ EN = {
 /update – neuen Stand von twguard holen (ohne @botname: alle Server)
 /version – Version und Modus
 /language en – Sprache bis zum nächsten Neustart des Bots ändern (ohne @botname: alle Server)
+/mode auto – Modus bis zum nächsten Neustart des Bots ändern (auto oder observe; nur gezielt)
 /help – diese Hilfe (ohne @botname antwortet nur ein Server, gezielt jeder)
 /keyboard – feste Tastatur einblenden (/keyboard off: ausblenden)
 
@@ -187,6 +188,7 @@ Meldungen haben dafür auch Schaltflächen.""":
 /update – fetch the new twguard version (without @botname: all servers)
 /version – version and mode
 /language de – change the language until the next restart of the bot (without @botname: all servers)
+/mode auto – change the mode until the next restart of the bot (auto or observe; only when addressed)
 /help – this help (without @botname only one server answers, when addressed each one does)
 /keyboard – show the permanent keyboard (/keyboard off: hide it)
 
@@ -211,6 +213,24 @@ Messages also have buttons for this.""",
     "Damit es dauerhaft gilt, in /etc/twguard/config.toml unter [general] <code>language = \"{language}\"</code> eintragen.":
         "🌐 <b>{host}</b>: language {language} until the next restart of the bot. The configuration says {configured}. "
         "To make it permanent, set <code>language = \"{language}\"</code> under [general] in /etc/twguard/config.toml.",
+    "Modus bis zum Neustart ändern": "Change the mode until restart",
+    "Modus {mode} bis zum nächsten Neustart des Bots, in der Konfiguration {configured}.":
+        "Mode {mode} until the next restart of the bot, in the configuration {configured}.",
+    "(bis zum Neustart)": "(until restart)",
+    "/mode gilt nur gezielt: mit @botname oder als Antwort auf eine Nachricht des Servers.":
+        "/mode only works when addressed: with @botname or as a reply to a message from the server.",
+    "⚙️ <b>{host}</b>: Modus {mode}, in der Konfiguration {configured}. Ändern: /mode auto oder /mode observe":
+        "⚙️ <b>{host}</b>: mode {mode}, in the configuration {configured}. To change: /mode auto or /mode observe",
+    "Format: /mode auto oder /mode observe": "Format: /mode auto or /mode observe",
+    "⚙️ <b>{host}</b>: Modus {mode}, wie in der Konfiguration.": "⚙️ <b>{host}</b>: mode {mode}, as in the configuration.",
+    "⚙️ <b>{host}</b>: Modus {mode} bis zum nächsten Neustart des Bots (auch durch /update oder einen Reboot). "
+    "Die Konfiguration enthält {configured}. Damit es dauerhaft gilt, in /etc/twguard/config.toml unter [general] "
+    "<code>mode = \"{mode}\"</code> eintragen.":
+        "⚙️ <b>{host}</b>: mode {mode} until the next restart of the bot (also through /update or a reboot). "
+        "The configuration says {configured}. To make it permanent, set <code>mode = \"{mode}\"</code> under "
+        "[general] in /etc/twguard/config.toml.",
+    "Routine-Updates spielt der nächste Prüflauf ein, sofort: /check":
+        "The next check installs routine updates; right now: /check",
     "🟢 <b>{host}</b> ist wieder da (Kernel {kernel}).": "🟢 <b>{host}</b> is back (kernel {kernel}).",
     "Feste Tastatur einblenden": "Show the permanent keyboard",
     "Seit {age} keine erfolgreiche Prüfung. Läuft twguard-check.timer?":
@@ -301,6 +321,8 @@ Messages also have buttons for this.""",
     "Details von Nachricht %s nicht zurückklappbar: Inhalt nicht gespeichert": "details of message %s cannot be collapsed: content not stored",
     "Antwort nicht gesendet: %s": "answer not sent: %s",
     "Nachricht nicht gesendet: %s": "message not sent: %s",
+    "{address} nach {seconds} s: {error}": "{address} after {seconds} s: {error}",
+    "antwort": "response",
     "Schaltflächen im Briefing nicht angepasst: %s": "briefing buttons not updated: %s",
     "Tippanzeige nicht gesendet: %s": "typing indicator not sent: %s",
     "Schaltfläche nicht bestätigt: %s": "button not acknowledged: %s",

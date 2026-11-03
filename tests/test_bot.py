@@ -1031,6 +1031,48 @@ class BotTest(unittest.TestCase):
         self.assertIn(old, self.tg.deleted)
         self.assertTrue(any("Keyboard for all servers" in text for text in self.tg.sent))
 
+    def test_mode_switches_at_runtime_and_hints_at_config(self):
+        self.bot.handle(message("/mode@server1_bot auto"))
+        self.assertEqual(self.bot.cfg.mode, "auto")
+        self.assertIn('mode = "auto"', self.tg.sent[-1])
+        self.assertIn("bis zum nächsten Neustart des Bots", self.tg.sent[-1])
+        self.assertIn("/check", self.tg.sent[-1])
+        with state.locked(self.bot.cfg.state_dir) as st:
+            self.assertEqual(st.mode_override, "auto")
+        self.assertIn("Modus auto bis zum nächsten Neustart", self.bot.status_view()[0])
+        self.assertIn("automatisch (bis zum Neustart)", self.bot.version_line())
+
+    def test_mode_only_when_addressed(self):
+        self.bot.handle(message("/mode auto"))
+        self.assertEqual(self.bot.cfg.mode, "observe")
+        self.assertEqual(self.tg.sent, [])  # nur der Bot mit help_full gibt den Hinweis
+        self.bot.cfg.help_full = True
+        self.bot.handle(message("/mode auto"))
+        self.assertEqual(self.bot.cfg.mode, "observe")
+        self.assertIn("nur gezielt", self.tg.sent[-1])
+        self.bot.handle(message("/mode auto", reply_to=ME))
+        self.assertEqual(self.bot.cfg.mode, "auto")
+
+    def test_mode_back_to_config_and_restart_clear_override(self):
+        self.bot.handle(message("/mode@server1_bot auto"))
+        self.bot.handle(message("/mode@server1_bot observe"))
+        self.assertIn("wie in der Konfiguration", self.tg.sent[-1])
+        with state.locked(self.bot.cfg.state_dir) as st:
+            self.assertEqual(st.mode_override, "")
+        self.bot.handle(message("/mode@server1_bot auto"))
+        restarted = Bot(Config(language="de", token="x", chat_id=-100, allowed_user_ids=[42], hostname="server1",
+                               state_dir=self.bot.cfg.state_dir), self.tg, self.bot.me)
+        restarted.startup()
+        self.assertEqual(restarted.cfg.mode, "observe")
+        with state.locked(self.bot.cfg.state_dir) as st:
+            self.assertEqual(st.mode_override, "")
+
+    def test_mode_rejects_unknown_and_shows_current(self):
+        self.bot.handle(message("/mode@server1_bot fast"))
+        self.assertIn("Format: /mode", self.tg.sent[-1])
+        self.bot.handle(message("/mode@server1_bot"))
+        self.assertIn("Modus observe, in der Konfiguration observe", self.tg.sent[-1])
+
     def test_status_shows_pending_instead_of_nothing_open(self):
         with state.locked(self.bot.cfg.state_dir) as st:
             st.pending_text = "24 Pakete, Download 12 MB"

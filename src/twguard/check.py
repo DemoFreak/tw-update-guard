@@ -12,7 +12,7 @@ from . import details, messages, restarts, state, zypper
 from .config import Config
 from .i18n import tr
 from .notify import (adopt_migration, format_issue, format_observed, format_reasons, format_report, format_status,
-                     issue_buttons, observed_buttons, send_due, status_buttons, use_language)
+                     issue_buttons, observed_buttons, send_due, status_buttons, use_language, use_mode)
 from .rules import classify, describe, plan_summary
 from .telegram import Buttons, Telegram, TelegramError
 
@@ -85,6 +85,7 @@ def _fail(cfg: Config, tg: Telegram, kind: str, detail: str) -> int:
 def run(cfg: Config, dry_run: bool = False) -> int:
     tg = Telegram(cfg.token, cfg.chat_id)
     use_language(cfg)
+    use_mode(cfg)
     try:
         return _run(cfg, tg, dry_run)
     finally:

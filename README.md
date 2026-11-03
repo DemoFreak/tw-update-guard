@@ -69,6 +69,7 @@ In a group, commands for a specific server only apply as a **reply to a message 
 | `/update` | fetch a new twguard version and offer it for confirmation; without `@botname` all servers answer |
 | `/version` | version, Git commit and mode |
 | `/language en`, `/language de` | change the language at runtime; without `@botname` all servers. Lasts until the next restart of the bot; the configuration is not changed |
+| `/mode auto`, `/mode observe` | change the mode at runtime, only with `@botname` or as a reply (never all servers at once). Lasts until the next restart of the bot (also through `/update` or a reboot); the configuration is not changed |
 | `/help` | all commands; without `@botname` only the bot with `help_full` answers. Disappears after 5 minutes |
 | `/keyboard` | show a permanent keyboard: “📊 Status”, “🔄 Check all”, “⬆️ Update”, “🏷️ Version”, “❓ Help” (they apply to all servers; a server understands a key only from the version that introduced it). The keys belong to the message “⌨️ Keyboard …”, so that message stays. `/keyboard off` deletes it and thereby hides the keys |
 

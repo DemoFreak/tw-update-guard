@@ -17,7 +17,7 @@ from html import escape
 from pathlib import Path
 
 from . import COMMIT, __version__, details, messages, ota, restarts, state, zypper
-from .config import Config
+from .config import MODES, Config
 from .i18n import EN, LANGUAGES, current, set_language, tr
 from .notify import (adopt_migration, button_kind, clip, fmt_age, format_briefing, format_issue, format_status,
                      issue_buttons, is_due, status_buttons, mark_resolved, minutes_of_day, note_reminded, send_due, stamp, title)
@@ -52,6 +52,7 @@ HELP = """Befehle. In der Gruppe als Antwort auf eine Nachricht dieses Bots oder
 /update – neuen Stand von twguard holen (ohne @botname: alle Server)
 /version – Version und Modus
 /language en – Sprache bis zum nächsten Neustart des Bots ändern (ohne @botname: alle Server)
+/mode auto – Modus bis zum nächsten Neustart des Bots ändern (auto oder observe; nur gezielt)
 /help – diese Hilfe (ohne @botname antwortet nur ein Server, gezielt jeder)
 /keyboard – feste Tastatur einblenden (/keyboard off: ausblenden)
 
@@ -70,6 +71,7 @@ MENU = [
     ("update", "Neuen Stand von twguard holen"),
     ("version", "Version und Modus"),
     ("language", "Sprache bis zum Neustart ändern"),
+    ("mode", "Modus bis zum Neustart ändern"),
     ("help", "Hilfe"),
     ("keyboard", "Feste Tastatur einblenden"),
 ]
@@ -123,6 +125,8 @@ class Bot:
     def __init__(self, cfg: Config, tg: Telegram | None = None, me: dict | None = None):
         set_language(cfg.language)
         self.cfg = cfg
+        # /mode ändert cfg.mode nur im laufenden Bot; das hier steht in der Konfiguration
+        self.configured_mode = cfg.mode
         self.tg = tg or Telegram(cfg.token, cfg.chat_id, cfg.max_errors_per_hour)
         self.me = me
         self.offset = 0
@@ -137,6 +141,7 @@ class Bot:
             "update": (self.cmd_update, False),
             "version": (self.cmd_version, False),
             "language": (self.cmd_language, False),
+            "mode": (self.cmd_mode, False),
             "details": (self.cmd_details, True),
             "approve": (self.cmd_approve, True),
             "check": (self.cmd_check, True),
@@ -182,8 +187,9 @@ class Bot:
     def startup(self) -> None:
         self._set_menu()
         with state.locked(self.cfg.state_dir) as st:
-            # Eine mit /language gewählte Sprache gilt nur bis zum Neustart
+            # Eine mit /language gewählte Sprache und ein mit /mode gewählter Modus gelten nur bis zum Neustart
             st.language_override = ""
+            st.mode_override = ""
             self.offset = st.tg_offset
             st.first_seen = st.first_seen or time.time()
             if st.reboot_requested_at and boot_time() > st.reboot_requested_at:
@@ -489,6 +495,9 @@ class Bot:
             text, buttons = format_status(self.cfg.hostname, st, time.time()), status_buttons(st)
         if self.cfg.observe:
             text += f"\n<i>{tr('Beobachtungsmodus: Updates werden nur gemeldet.')}</i>"
+        if self.cfg.mode != self.configured_mode:
+            text += "\n<i>" + tr("Modus {mode} bis zum nächsten Neustart des Bots, in der Konfiguration {configured}.",
+                                 mode=self.cfg.mode, configured=self.configured_mode) + "</i>"
         return text, buttons
 
     def details_view(self, arg: str = "", back: bool = False) -> tuple[str, Buttons]:
@@ -687,6 +696,8 @@ class Bot:
 
     def version_line(self) -> str:
         mode = tr("Beobachtung") if self.cfg.observe else tr("automatisch")
+        if self.cfg.mode != self.configured_mode:
+            mode += " " + tr("(bis zum Neustart)")
         return (f"🖥 <b>{self.host}</b> (@{escape(self.me['username'])}) · twguard {escape(__version__)} "
                 f"({escape(COMMIT)}) · {mode}")
 
@@ -712,6 +723,36 @@ class Bot:
                       "enthält {configured}. Damit es dauerhaft gilt, in /etc/twguard/config.toml unter [general] "
                       "<code>language = \"{language}\"</code> eintragen.",
                       host=self.host, language=language, configured=configured), topic="language")
+
+    def cmd_mode(self, args: list[str], addressed: bool = False) -> Out | None:
+        """Modus zur Laufzeit ändern, nur gezielt; die Konfiguration bleibt unberührt, ein Neustart gilt wieder sie."""
+        configured = self.configured_mode
+        if not addressed:
+            # Nicht versehentlich alle Server umschalten; den Hinweis gibt nur einer, wie bei /help
+            if not self.cfg.help_full:
+                return None
+            return Out(tr("/mode gilt nur gezielt: mit @botname oder als Antwort auf eine Nachricht des Servers."),
+                       ttl=SHORT)
+        if not args:
+            return Out(tr("⚙️ <b>{host}</b>: Modus {mode}, in der Konfiguration {configured}. "
+                          "Ändern: /mode auto oder /mode observe", host=self.host, mode=self.cfg.mode,
+                          configured=configured), ttl=LONG)
+        mode = args[0].lower()
+        if mode not in MODES:
+            return Out(tr("Format: /mode auto oder /mode observe"), ttl=SHORT)
+        self.cfg.mode = mode
+        with state.locked(self.cfg.state_dir) as st:
+            st.mode_override = "" if mode == configured else mode
+        if mode == configured:
+            return Out(tr("⚙️ <b>{host}</b>: Modus {mode}, wie in der Konfiguration.", host=self.host, mode=mode),
+                       topic="mode")
+        text = tr("⚙️ <b>{host}</b>: Modus {mode} bis zum nächsten Neustart des Bots (auch durch /update oder "
+                  "einen Reboot). Die Konfiguration enthält {configured}. Damit es dauerhaft gilt, in "
+                  "/etc/twguard/config.toml unter [general] <code>mode = \"{mode}\"</code> eintragen.",
+                  host=self.host, mode=mode, configured=configured)
+        if mode == "auto":
+            text += "\n" + tr("Routine-Updates spielt der nächste Prüflauf ein, sofort: /check")
+        return Out(text, topic="mode")
 
     def cmd_help(self, args: list[str], addressed: bool = False) -> Out | None:
         # An alle antwortet nur der Bot mit help_full, sonst stünde die Liste mehrfach da;

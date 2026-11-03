@@ -4,6 +4,7 @@ from unittest import mock
 
 import testlang  # noqa: F401
 from twguard import telegram
+from twguard.i18n import set_language
 from twguard.telegram import ErrorMeter, Telegram, TelegramError, connect, format_phases, multipart
 
 
@@ -60,6 +61,12 @@ class ConnectTest(unittest.TestCase):
     def test_format_phases(self):
         text = format_phases({"dns": 0.01, "connect": 7.2, "tls": 0.1, "antwort": 20.3, "addr": "149.154.167.220"})
         self.assertEqual(text, "dns 0.0 s, connect 7.2 s, tls 0.1 s, antwort 20.3 s, über 149.154.167.220")
+
+    def test_phases_in_english(self):
+        self.addCleanup(set_language, "de")
+        set_language("en")
+        text = format_phases({"dns": 0.01, "antwort": 20.3, "addr": "149.154.167.220"})
+        self.assertEqual(text, "dns 0.0 s, response 20.3 s, via 149.154.167.220")
 
 
 class CallTest(unittest.TestCase):

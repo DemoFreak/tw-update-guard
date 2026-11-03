@@ -4,6 +4,12 @@ Published versions of tw-update-guard. Versions in between were development step
 published version. **Upgrade** notes name what you may have to change by hand; `twguard config-diff` shows which
 values in your `config.toml` differ from the defaults.
 
+## 0.9.0 – 2026-11-03
+
+- `/mode auto` and `/mode observe` change the mode until the next restart of the bot, only when addressed (with
+  `@botname` or as a reply); status and `/version` show a mode that differs from the configuration
+- Log lines about slow or failed Telegram connections are fully translated ("response", "after")
+
 ## 0.8.9 – 2026-11-03
 
 - Tests no longer call the real `zypper needs-rebooting` (failed in CI, where zypper is missing)
