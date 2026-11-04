@@ -33,8 +33,11 @@ UPDATE = "update"      # OTA-Update von twguard läuft
 # Welche Vorgänge eine Aktion abweisen. Auf eine belegte Paketverwaltung warten Prüfen und Einspielen
 # selbst (zypper meldet sie mit Exit-Code 7), das Einspielen außerdem auf einen Dienst-Neustart.
 # Prüfen und Freigeben ändern nichts am System; nur ein geplanter Neustart brächte ihr Ergebnis um.
+# "check" fragt der Prüflauf selbst, "start-check" der Bot vor dem Anstoßen: Ein zweites Anstoßen
+# während eines Prüflaufs bewirkt nichts (systemctl start startet ihn nicht noch einmal).
 BLOCKERS = {
     "check": (SHUTDOWN,),
+    "start-check": (SHUTDOWN, CHECK),
     "approve": (SHUTDOWN,),
     "apply": (SHUTDOWN, UNKNOWN, APPLY, UPDATE, RESTART),
     "reboot": (SHUTDOWN, UNKNOWN, ZYPP, APPLY, RESTART, UPDATE),
@@ -44,10 +47,13 @@ BLOCKERS = {
 
 # Welche Aktion eine Schaltfläche auslöst, nach dem Anfang ihrer Callback-Daten; die übrigen (Details,
 # Aufschub, Abbrechen …) ändern nichts am System und bleiben immer
-BUTTON_ACTIONS = {"check": "check", "approve": "approve", "reboot": "reboot", "restart": "restart",
+BUTTON_ACTIONS = {"check": "start-check", "approve": "approve", "reboot": "reboot", "restart": "restart",
                   "update": "update"}
 
 CHECK_UNIT = "twguard-check.service"
+# Vorgänge, bei denen eine Aktion still nichts tut statt abgewiesen zu werden: Ein zweites Anstoßen während
+# eines Prüflaufs ist überflüssig, und die Zustandsnachricht zeigt den laufenden schon
+NOOP = {"start-check": (CHECK,)}
 # So lange gilt ein OTA-Auftrag als laufend; danach meldet der Bot ihn als hängen geblieben
 UPDATE_MAX_AGE = 900
 QUERY_TIMEOUT = 5
@@ -146,6 +152,8 @@ def blockers(action: str, st: State, seen: bool = False) -> list[tuple[str, str]
                 found.append((SHUTDOWN if sd.state == "planned" else UNKNOWN, planned_text(sd)))
     if ZYPP in kinds:
         holder = st.zypp_holder if seen else zypper.lock_holder()
+        if seen and own_holder(holder) and not st.activity.get("check"):
+            holder = ""  # beobachtet, bevor der eigene Prüflauf endete; seine Sperre ist mit ihm vorbei
         if holder:
             found.append((ZYPP, tr("Paketverwaltung belegt durch {holder}", holder=holder)))
     if APPLY in kinds and state.alive(st.applying):
@@ -159,6 +167,23 @@ def blockers(action: str, st: State, seen: bool = False) -> list[tuple[str, str]
     return found
 
 
+def own_holder(holder: str) -> bool:
+    """Hält der eigene Prüflauf die Paketverwaltung? (Text aus `zypper.lock_holder`)"""
+    return holder.startswith(f"{CHECK_UNIT} (")
+
+
+def decide(action: str, st: State) -> tuple[str, str]:
+    """("allow", ""), ("noop", "") oder ("deny", Ablehnung ohne HTML); eine Abfrage für alle drei.
+
+    Abgewiesen wird mit dem ersten Grund, der nicht in NOOP steht; bleiben nur solche, tut die Aktion still nichts.
+    """
+    found = blockers(action, st)
+    deny = [reason for kind, reason in found if kind not in NOOP.get(action, ())]
+    if deny:
+        return "deny", tr("Gerade nicht möglich: {reason}. Bitte danach erneut.", reason=deny[0])
+    return ("noop", "") if found else ("allow", "")
+
+
 def allowed(data: str, st: State) -> bool:
     """Darf die Schaltfläche mit diesen Callback-Daten gerade angeboten werden? Nach dem beobachteten Stand.
 
@@ -170,6 +195,5 @@ def allowed(data: str, st: State) -> bool:
 
 
 def refusal(action: str, st: State) -> str:
-    """Ablehnung mit dem ersten Grund (ohne HTML), leer heißt frei."""
-    found = blockers(action, st)
-    return tr("Gerade nicht möglich: {reason}. Bitte danach erneut.", reason=found[0][1]) if found else ""
+    """Ablehnung mit dem ersten Grund (ohne HTML), leer heißt frei oder still nichts tun (siehe `decide`)."""
+    return decide(action, st)[1]

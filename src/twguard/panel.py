@@ -136,7 +136,8 @@ def _running_lines(st: State) -> list[str]:
                         seconds=request.get("wait", 90)))
     if st.shutdown:
         lines.append(("🔁 " if shutdown_planned(st) else "❔ ") + busy.planned_text(st.shutdown))
-    if st.zypp_holder and (check or {}).get("phase") != "wait-zypp":
+    # Der eigene Prüflauf steht schon mit seiner Phase da; als „belegt“ wirkte er, als warte er auf sich selbst
+    if st.zypp_holder and not busy.own_holder(st.zypp_holder) and (check or {}).get("phase") != "wait-zypp":
         lines.append(tr("🔒 Paketverwaltung belegt: {holder}. Prüfen und Einspielen warten darauf.",
                         holder=escape(st.zypp_holder)))
     return lines

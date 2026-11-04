@@ -4,6 +4,19 @@ Published versions of tw-update-guard. Versions in between were development step
 published version. **Upgrade** notes name what you may have to change by hand; `twguard config-diff` shows which
 values in your `config.toml` differ from the defaults.
 
+## 0.10.2 – 2026-11-04
+
+- While twguard's own check refreshed the repositories, the state message also said "Package management locked:
+  twguard-check.service … Checks and installs wait for it", as if the check waited for itself, and the line stayed
+  up to a minute after the check had finished. Only other programs holding the lock are shown now
+- Updating from 0.9.x to 0.10 left the old "updating to … The result will appear here" message standing next to
+  the result. It is removed like the other old messages once the state message stands
+- "Check now" is hidden while a check runs. `/check`, "Check all" and a button pressed just before do nothing
+  then: a second check cannot be queued, and the state message already shows the running one
+
+**Upgrade:** none. If a server came from 0.9.x to 0.10.0 or 0.10.1, an old "updating to …" message may still
+stand; delete it by hand.
+
 ## 0.10.1 – 2026-11-04
 
 - A service whose program fails right after starting (e.g. its executable is missing, systemd `203/EXEC`) was

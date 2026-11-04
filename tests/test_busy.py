@@ -86,6 +86,7 @@ class BlockersTest(unittest.TestCase):
         self.checking.return_value = True
         self.sd.return_value = busy.Shutdown("planned", "reboot", time.time() + 60)
         self.assertEqual(self.kinds("check", st), [busy.SHUTDOWN])
+        self.assertEqual(self.kinds("start-check", st), [busy.SHUTDOWN, busy.CHECK])
         self.assertEqual(self.kinds("approve", st), [busy.SHUTDOWN])
         self.assertEqual(self.kinds("apply", st), [busy.SHUTDOWN, busy.APPLY, busy.RESTART, busy.UPDATE])
         self.assertEqual(self.kinds("reboot", st), [busy.SHUTDOWN, busy.ZYPP, busy.APPLY, busy.RESTART, busy.UPDATE])
@@ -153,7 +154,34 @@ class SeenTest(unittest.TestCase):
         self.assertTrue(busy.allowed("approve:abc", st))  # Freigeben ändert nichts, das Einspielen wartet
         self.assertTrue(busy.allowed("check", st))
         self.assertTrue(busy.allowed("later:24", st))
+        # Während eines Prüflaufs kein zweites „Jetzt prüfen“, Freigeben bleibt
+        st.activity = {"check": {"phase": "refresh", "at": time.time()}}
+        self.assertFalse(busy.allowed("check", st))
+        self.assertTrue(busy.allowed("approve:abc", st))
         self.assertTrue(busy.allowed("cancel", st))
+
+    def test_decide(self):
+        st = state.State()
+        st.activity = {"check": {"phase": "refresh", "at": time.time()}}
+        with mock.patch.object(busy, "check_running", return_value=True), \
+                mock.patch.object(busy, "shutdown", return_value=busy.Shutdown("none")):
+            self.assertEqual(busy.decide("start-check", st), ("noop", ""))
+            self.assertEqual(busy.refusal("start-check", st), "")
+            self.assertEqual(busy.decide("check", st), ("allow", ""))
+        # Ein geplanter Neustart weist ab, auch wenn zugleich geprüft wird
+        with mock.patch.object(busy, "check_running", return_value=True), \
+                mock.patch.object(busy, "shutdown", return_value=busy.Shutdown("planned", "reboot", 5.0)):
+            verdict, text = busy.decide("start-check", st)
+        self.assertEqual(verdict, "deny")
+        self.assertIn("Neustart geplant", text)
+
+    def test_own_lock_only_counts_while_own_check_runs(self):
+        st = state.State(zypp_holder="twguard-check.service (Zypp-main, PID 7)")
+        self.assertTrue(busy.allowed("reboot", st))
+        st.activity = {"check": {"phase": "refresh", "at": time.time()}}
+        self.assertFalse(busy.allowed("reboot", st))
+        st = state.State(zypp_holder="purge-kernels.service (zypper, PID 707)")
+        self.assertFalse(busy.allowed("reboot", st))
 
     def test_every_button_action_is_in_the_table(self):
         for action in busy.BUTTON_ACTIONS.values():

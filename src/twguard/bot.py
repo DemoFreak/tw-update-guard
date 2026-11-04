@@ -250,6 +250,7 @@ class Bot:
             if booted:
                 self.after_boot(st)
             st.bot_commit = COMMIT
+            self.park_legacy_waiting(st)
             ota.startup_report(self.cfg, st)
         self.observe_system()
         self.check_reboot()
@@ -543,17 +544,27 @@ class Bot:
         with state.locked(self.cfg.state_dir) as st:
             if panel.TOPIC not in st.messages:
                 return
-            legacy = [t for t in st.messages if t in LEGACY_TOPICS or t.startswith("issue:")]
+            legacy = [t for t in st.messages if t in LEGACY_TOPICS or t.startswith(("issue:", "wait:"))]
             old = [st.messages.pop(t) for t in legacy]
-            for request in (st.check_request, st.restart_request, st.update_request):
-                if request.get("message_id"):
-                    old.append({"chat_id": request.get("chat_id"), "message_id": request["message_id"],
-                                "at": request.get("at", 0)})
-                request.pop("message_id", None)
-                request.pop("chat_id", None)
             st.stale_messages += old
         if old:
             self.retry_stale()
+
+    @staticmethod
+    def park_legacy_waiting(st: state.State) -> None:
+        """Wartemeldungen laufender Aufträge aus 0.9 als Themen `wait:*` merken, bevor jemand den Auftrag beendet.
+
+        Das Ergebnis eines Updates trägt `ota.startup_report` gleich beim Start ein und leert dabei den Auftrag;
+        ohne diesen Schritt bliebe dessen „Das Ergebnis erscheint hier“ stehen. Abgeräumt wird wie die übrigen
+        alten Themen erst, wenn die Zustandsnachricht steht.
+        """
+        for name, request in (("check", st.check_request), ("restart", st.restart_request),
+                              ("update", st.update_request)):
+            if request.get("message_id"):
+                st.messages[f"wait:{name}"] = {"chat_id": request.get("chat_id"), "message_id": request["message_id"],
+                                               "at": request.get("at", 0)}
+            request.pop("message_id", None)
+            request.pop("chat_id", None)
 
     # --- Abfragen ---------------------------------------------------------
 
@@ -806,18 +817,24 @@ class Bot:
         return ""
 
     def cmd_check(self, args: list[str], addressed: bool = False) -> Out | None:
-        refused = self.refused("check")
-        if refused:
+        verdict, refused = self.decide("start-check")
+        if verdict == "deny":
             return Out(refused, ttl=SHORT)
+        if verdict == "noop":
+            return None  # Prüft schon; das steht in der Zustandsnachricht, ein Hinweis wäre nur Rauschen
         self.start_check(requested=True)
         self.pump(resend=True)
         return None
 
     def refused(self, action: str) -> str:
         """Ablehnung nach `busy` mit Servername, leer heißt frei. Nur Vorabprüfung, reserviert nichts."""
+        return self.decide(action)[1]
+
+    def decide(self, action: str) -> tuple[str, str]:
+        """`busy.decide` mit Servername in der Ablehnung: ("allow"|"noop"|"deny", Text)."""
         with state.locked(self.cfg.state_dir) as st:
-            text = busy.refusal(action, st)
-        return f"⏸️ <b>{self.host}</b>: {escape(text)}" if text else ""
+            verdict, text = busy.decide(action, st)
+        return verdict, f"⏸️ <b>{self.host}</b>: {escape(text)}" if text else ""
 
     def cmd_later(self, args: list[str], addressed: bool = False) -> Out:
         hours = parse_duration(args[0]) if args else 24
@@ -1145,9 +1162,12 @@ class Bot:
         self.pump()
 
     def press_check(self, cq: dict, pressed: dict, arg: str) -> None:
-        refused = self.refused("check")
-        if refused:
+        verdict, refused = self.decide("start-check")
+        if verdict == "deny":
             self._answer(cq, plain(refused), alert=True)
+            return
+        if verdict == "noop":
+            self._answer(cq)  # Prüft schon (Knopf von kurz vorher): nichts tun, wie bei /check
             return
         self._answer(cq, tr("Prüfung läuft …"))
         self.start_check(requested=True)

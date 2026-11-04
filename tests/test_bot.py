@@ -543,6 +543,51 @@ class BotTest(unittest.TestCase):
         self.bot.handle(message("/status"))
         self.assertIn("🔒 Paketverwaltung belegt: purge-kernels.service (zypper, PID 707)", self.shown()[0])
 
+    def test_no_check_button_while_check_runs(self):
+        with state.locked(self.bot.cfg.state_dir) as st:
+            st.activity["check"] = {**state.holder(), "phase": "refresh"}
+        self.bot.pump()
+        self.assertNotIn("check", [b[1] for row in self.shown()[1] for b in row])
+        # Ein Druck auf einen noch sichtbaren Knopf stößt nichts an; der Bot fragt selbst nach
+        # Ein Knopf von kurz vorher, /check und „Alle prüfen“ bewirken nichts und melden nichts
+        self.checking.return_value = True
+        sent = len(self.tg.sent)
+        with mock.patch.object(self.bot, "start_check") as start:
+            self.press("check")
+            self.bot.handle(message("/check"))
+            self.bot.handle(message("🔄 Alle prüfen"))
+        start.assert_not_called()
+        self.assertEqual(self.tg.answered[-1], "")
+        self.assertEqual(len(self.tg.sent), sent)
+        with state.locked(self.bot.cfg.state_dir) as st:
+            st.activity = {}
+        self.checking.return_value = False
+        self.bot.pump()
+        self.assertIn("check", [b[1] for row in self.shown()[1] for b in row])
+
+    def test_own_check_is_not_shown_as_lock_holder(self):
+        # Der eigene Prüflauf hält die Sperre beim Auffrischen; das ist seine Phase, keine fremde Belegung
+        # Ihre Sperre gilt trotzdem: Den Neustart weist der Bot dann ab, also bietet er ihn auch nicht an (F26)
+        self.holder.return_value = "twguard-check.service (Zypp-main, PID 75494)"
+        with state.locked(self.bot.cfg.state_dir) as st:
+            st.activity["check"] = {**state.holder(), "phase": "refresh"}
+            st.open_issue("reboot", "zypper needs-rebooting meldet einen ausstehenden Neustart.")
+        self.bot.observe_system()
+        self.bot.pump()
+        text, buttons = self.shown()
+        self.assertIn("Prüfung läuft: Repos auffrischen", text)
+        self.assertNotIn("🔒", text)
+        self.assertNotIn("reboot", [b[1] for row in buttons for b in row])
+        self.assertIn("Paketverwaltung belegt", self.bot.refused("reboot"))
+        # Nach dem Ende des Prüflaufs: kein Hinweis, und der Knopf ist sofort wieder da, auch wenn die Sperre
+        # erst bei der nächsten Abfrage als frei beobachtet wird
+        with state.locked(self.bot.cfg.state_dir) as st:
+            st.activity = {}
+        self.bot.pump()
+        text, buttons = self.shown()
+        self.assertNotIn("🔒", text)
+        self.assertIn("reboot", [b[1] for row in buttons for b in row])
+
     def test_status_shows_pending_instead_of_nothing_open(self):
         with state.locked(self.bot.cfg.state_dir) as st:
             st.pending_text = "24 Pakete, Download 12 MB"
@@ -1820,22 +1865,27 @@ class BotTest(unittest.TestCase):
                            "issue:reboot": {"chat_id": -100, "message_id": 42, "at": now - 50 * 3600},
                            "keyboard": {"chat_id": -100, "message_id": 43, "at": now}}
             st.restart_request = {"chat_id": -100, "message_id": 44, "at": now, "services": ["postfix"]}
+            st.update_request = {"commit": "abc1234" + "0" * 33, "chat_id": -100, "message_id": 45, "at": now}
         self.tg.fail_send = True
-        with mock.patch.object(self.bot, "_set_menu"):
+        with mock.patch.object(self.bot, "_set_menu"), mock.patch.object(ota, "COMMIT", "abc1234"):
             self.bot.startup()
+        st_after_start = self.st()
         self.assertEqual(self.tg.deleted, [])  # erst die neue Nachricht, dann abräumen
         self.assertIn("status", self.st().messages)
         self.tg.fail_send = False
         self.bot.pump()
         self.bot.migrate_legacy()
-        self.assertEqual(sorted(self.tg.deleted), [40, 41, 44])
+        self.assertEqual(sorted(self.tg.deleted), [40, 41, 44, 45])
         self.assertIn("veraltet", self.tg.current[42][0])  # zu alt zum Löschen
+        # Das Update ist beim Start abgeschlossen; seine Wartemeldung geht trotzdem, das Ergebnis kommt als Ereignis
+        self.assertEqual(st_after_start.update_request, {})
+        self.assertIn("twguard läuft jetzt mit", st_after_start.outbox[0]["text"])
         st = self.st()
         self.assertEqual(sorted(st.messages), ["keyboard", panel.TOPIC])
         # Der laufende Auftrag bleibt, nur seine Wartemeldung ging
         self.assertEqual(st.restart_request, {"at": now, "services": ["postfix"]})
         self.bot.migrate_legacy()
-        self.assertEqual(sorted(self.tg.deleted), [40, 41, 44])
+        self.assertEqual(sorted(self.tg.deleted), [40, 41, 44, 45])
 
     def test_old_state_fields_are_dropped(self):
         path = self.bot.cfg.state_dir / "state.json"
