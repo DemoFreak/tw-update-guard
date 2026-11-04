@@ -83,7 +83,6 @@ EN = {
     "✅ Behoben": "✅ Fixed",
     "läuft, aber zypper ps gab keine Auskunft über alte Dateien: {services}": "running, but zypper ps gave no information about old files: {services}",
     "Neustart abgewiesen: {services}": "restart rejected: {services}",
-    "Gerade läuft ein Prüflauf, nichts neu gestartet. Bitte danach erneut.": "A check is running, nothing restarted. Please try again afterwards.",
     "zypper ps gab keine Auskunft, nichts neu gestartet.": "zypper ps gave no information, nothing restarted.",
     "Die Liste hat sich geändert, nichts neu gestartet.": "The list has changed, nothing restarted.",
     "Diese Dienste nutzen noch alte Dateien:\n{services}": "These services still use old files:\n{services}",
@@ -99,7 +98,6 @@ EN = {
     "Das Ergebnis folgt.":
         "restart not finished after {minutes} minutes, systemd is still working on it: {services}. "
         "The result will follow.",
-    "Ein Neustart läuft bereits.": "A restart is already running.",
     "Dieser Neustart ist nicht mehr nötig.": "This restart is no longer needed.",
     "Neustart läuft …": "Restarting …",
     "⏳ <b>{host}</b>: starte neu: {services}. Das Ergebnis erscheint hier.": "⏳ <b>{host}</b>: restarting {services}. The result will appear here.",
@@ -127,10 +125,50 @@ EN = {
     "⏳ <b>{host}</b>: Dienste werden gerade neu gestartet, das Update wartet darauf.":
         "⏳ <b>{host}</b>: services are being restarted, the update is waiting for them.",
     "Neustart von Diensten läuft noch, nichts eingespielt": "service restart still running, nothing installed",
-    "Ein anderer Prüflauf spielt gerade ein, nichts eingespielt": "another check is installing, nothing installed",
-    "Ein anderer Prüflauf spielt gerade ein, dieser spielt nichts ein. Das Ergebnis meldet der "
-    "andere Lauf.":
-        "Another check is installing right now, this one installs nothing. The other run reports the result.",
+    "Paketverwaltung belegt durch %s, warte": "package management locked by %s, waiting",
+    "Gerade nicht möglich: {reason}. Bitte danach erneut.": "Not possible right now: {reason}. Please try again afterwards.",
+    "Nichts eingespielt: {reason}. Der nächste Prüflauf versucht es erneut.":
+        "Nothing installed: {reason}. The next check will try again.",
+    "nichts eingespielt: %s": "nothing installed: %s",
+    "Neustart wird gerade geplant": "a reboot is being scheduled",
+    "Neustart geplant um {when}": "reboot scheduled for {when}",
+    "Neustart läuft": "reboot in progress",
+    "Herunterfahren geplant um {when}": "shutdown scheduled for {when}",
+    "Herunterfahren läuft": "shutdown in progress",
+    "logind gibt keine Auskunft, ob ein Neustart geplant ist": "logind does not say whether a reboot is scheduled",
+    "logind nicht erreichbar: %s": "logind not reachable: %s",
+    "logind: unerwartete Antwort: %s": "logind: unexpected answer: %s",
+    "Paketverwaltung belegt durch {holder}": "package management locked by {holder}",
+    "twguard spielt gerade ein": "twguard is installing",
+    "Dienste werden gerade neu gestartet": "services are being restarted",
+    "ein Update von twguard läuft": "a twguard update is running",
+    "ein Prüflauf läuft": "a check is running",
+    "✖️ Herunterfahren abbrechen": "✖️ Cancel shutdown",
+    "Seit dem Boot noch nicht abgefragt: {what} (zypper gibt noch keine Auskunft)":
+        "Not yet queried since boot: {what} (zypper does not answer yet)",
+    "Neustartbedarf": "pending reboot",
+    "Dienste mit alten Dateien": "services using old files",
+    "Der Neustart von {services} wurde durch den Neustart des Servers unterbrochen; das Ergebnis ist unbekannt.":
+        "Restarting {services} was interrupted by the server reboot; the result is unknown.",
+    "⏳ <b>{host}</b>: Die Paketverwaltung ist belegt durch {holder}, twguard wartet darauf.":
+        "⏳ <b>{host}</b>: package management is locked by {holder}, twguard is waiting for it.",
+    "Paketverwaltung seit %d min belegt durch %s, nichts eingespielt":
+        "package management locked for %d min by %s, nothing installed",
+    "Die Paketverwaltung ist seit {minutes} min belegt durch {holder}, nichts eingespielt. Der nächste "
+    "Prüflauf versucht es erneut (sofort: /check).":
+        "Package management has been locked by {holder} for {minutes} min, nothing installed. The next check "
+        "will try again (now: /check).",
+    "Paketverwaltung belegt: {holder}": "Package management locked: {holder}",
+    "zypper needs-rebooting: Paketverwaltung belegt durch %s": "zypper needs-rebooting: package management locked by %s",
+    "zypper ps: Paketverwaltung belegt durch %s": "zypper ps: package management locked by %s",
+    "ein anderes Programm": "another program",
+    "🔒 Paketverwaltung noch belegt: {holder}. Prüfen und Einspielen warten darauf.":
+        "🔒 Package management still locked: {holder}. Checks and installs wait for it.",
+    "🔒 Paketverwaltung seit über {hours} h belegt, siehe /status.":
+        "🔒 Package management locked for more than {hours} h, see /status.",
+    "✅ Paketverwaltung wieder frei ({when}).": "✅ Package management free again ({when}).",
+    "🔒 Paketverwaltung belegt: {holder}. Prüfen und Einspielen warten darauf.":
+        "🔒 Package management locked: {holder}. Checks and installs wait for it.",
     "Der Neustart von Diensten läuft noch, das Update wurde nicht eingespielt. Der nächste Prüflauf "
     "versucht es erneut (sofort: /check).":
         "The service restart is still running, the update was not installed. The next check will try "
@@ -272,7 +310,6 @@ Messages also have buttons for this.""",
         "🔁 <b>{host}</b> reboots in 1 minute; the result will appear here afterwards.",
     "Abbrechen fehlgeschlagen: {error}": "Cancelling failed: {error}",
     "✖️ <b>{host}</b>: Neustart abgebrochen.": "✖️ <b>{host}</b>: reboot cancelled.",
-    "<b>{host}</b>: Ein Update läuft bereits.": "<b>{host}</b>: an update is already running.",
     "<b>{host}</b>: twguard ist aktuell ({commit}).": "<b>{host}</b>: twguard is up to date ({commit}).",
     "⬆️ <b>{host}</b>: twguard {target} mit {n} neuen Commits (läuft mit {commit}):\n<pre>{commits}</pre>":
         "⬆️ <b>{host}</b>: twguard {target} with {n} new commits (running {commit}):\n<pre>{commits}</pre>",

@@ -124,7 +124,7 @@ journalctl -u twguard-bot | grep 'errors in one hour'   # more fetch and send er
 - If the server is off or offline, the bot is silent too. Use external monitoring for that (e.g. Uptime Kuma).
 - Solver conflicts cannot be resolved via Telegram.
 - Buttons are bound to the plan they show. A typed `/approve`, even as a reply to an older message, approves the plan shown last.
-- Package operations outside twguard (e.g. `zypper` via SSH) are not coordinated with it. Its own installs and service restarts exclude each other (an install waits for a running restart, the restart button is refused during a check); changes between check and update are reported afterwards, not prevented.
+- Package operations outside twguard (e.g. `zypper` via SSH, `purge-kernels` after boot) cannot be excluded, only detected: while they hold the package lock, checks and installs wait and a reboot or service restart from the bot is refused. A foreign operation that starts *after* the reboot button was pressed, during the one-minute delay, is not stopped. twguard's own installs, service restarts, self-updates and reboots exclude each other; whether a reboot is scheduled comes from systemd-logind (also one scheduled or cancelled on the console). Changes between check and update are reported afterwards, not prevented.
 - Values in your `config.toml` always win over the defaults, also over better defaults of a later version (see the upgrade notes in [CHANGELOG.md](CHANGELOG.md) and `twguard config-diff`).
 - Services using outdated libraries are never restarted automatically, not even in `auto` mode: only when you press their button, and services in `[services] exclude` (D-Bus, `systemd-*`, getty, display manager, network and others) are not offered at all.
 

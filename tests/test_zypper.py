@@ -1,4 +1,6 @@
+import os
 import subprocess
+import tempfile
 import unittest
 from unittest import mock
 from pathlib import Path
@@ -85,6 +87,39 @@ class ParsePlanTest(unittest.TestCase):
         c = parse_plan(fixture("rm-real.xml"))
         self.assertEqual(a.fingerprint(), b.fingerprint())
         self.assertNotEqual(a.fingerprint(), c.fingerprint())
+
+    def test_lock_holder(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            lock = Path(tmp) / "zypp.pid"
+            with mock.patch.object(zypper, "LOCK_FILE", lock):
+                self.assertEqual(zypper.lock_holder(), "")  # keine Datei
+                lock.write_text("")
+                self.assertEqual(zypper.lock_holder(), "")  # frei
+                lock.write_text(f"{os.getpid()}\n")
+                holder = zypper.lock_holder()
+                self.assertIn(f"PID {os.getpid()}", holder)
+                self.assertIn(Path(f"/proc/{os.getpid()}/comm").read_text().strip(), holder)
+                gone = subprocess.Popen(["true"])
+                gone.wait()
+                lock.write_text(str(gone.pid))
+                self.assertEqual(zypper.lock_holder(), "")  # Besitzer beendet
+
+    def test_locked_raises_and_queries_are_unknown(self):
+        locked = subprocess.CompletedProcess([], zypper.EXIT_ZYPP_LOCKED, "", "System management is locked by "
+                                             "the application with pid 707 (/usr/bin/zypper).\nClose this application.")
+        with mock.patch.object(zypper.subprocess, "run", return_value=locked), \
+                mock.patch.object(zypper, "lock_holder", return_value=""):
+            for call in (zypper.refresh, lambda: zypper.dry_run([]), lambda: zypper.apply([])):
+                with self.assertRaises(zypper.Locked) as caught:
+                    call()
+                self.assertEqual(caught.exception.holder, "ein anderes Programm")
+            self.assertIsNone(zypper.needs_rebooting())
+            self.assertIsNone(zypper.services_needing_restart())
+        with mock.patch.object(zypper.subprocess, "run", return_value=locked), \
+                mock.patch.object(zypper, "lock_holder", return_value="purge-kernels.service (zypper, PID 707)"):
+            with self.assertRaises(zypper.Locked) as caught:
+                zypper.refresh()
+        self.assertEqual(caught.exception.holder, "purge-kernels.service (zypper, PID 707)")
 
     def test_timeouts(self):
         hang = subprocess.TimeoutExpired("zypper", 1)

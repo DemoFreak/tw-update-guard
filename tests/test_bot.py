@@ -7,7 +7,7 @@ from pathlib import Path
 from unittest import mock
 
 import testlang  # noqa: F401
-from twguard import bot as bot_module, check, ota, restarts, state, zypper
+from twguard import bot as bot_module, busy, check, ota, restarts, state, zypper
 from twguard.bot import Bot, parse_duration
 from twguard.config import Config
 from twguard.i18n import current, set_language
@@ -41,11 +41,14 @@ class BotTest(unittest.TestCase):
         self.tg = FakeTelegram()
         self.bot = Bot(cfg, tg=self.tg, me=ME)
         self.start_check = mock.patch.object(Bot, "start_check").start()
-        mock.patch.object(Bot, "_check_running", return_value=False).start()
+        self.checking = mock.patch.object(busy, "check_running", return_value=False).start()
+        # Kein echtes logind in den Tests; einzelne Tests planen einen Neustart über self.logind
+        self.logind = mock.patch.object(busy, "shutdown", return_value=busy.Shutdown("none")).start()
         self.found = mock.patch.object(zypper, "services_needing_restart", return_value=[]).start()
         # Kein echtes zypper in den Tests (fehlt z. B. in der CI). None heißt „unbekannt“ und lässt einen
         # von Hand geöffneten Neustart-Punkt stehen; einzelne Tests ersetzen den Wert
         self.rebooting = mock.patch.object(zypper, "needs_rebooting", return_value=None).start()
+        self.holder = mock.patch.object(zypper, "lock_holder", return_value="").start()
         self.addCleanup(mock.patch.stopall)
         self.addCleanup(self.tmp.cleanup)
 
@@ -523,7 +526,7 @@ class BotTest(unittest.TestCase):
         self.assertIn("postfix", self.tg.sent[-1])
         self.assert_briefing_untouched(briefing)
         with state.locked(self.bot.cfg.state_dir) as st:
-            self.assertEqual(st.restart_reports, [])
+            self.assertEqual(st.outbox, [])
 
     def test_restart_in_briefing_keeps_approval(self):
         briefing = self.briefing_with("services", self.at(8, 0))
@@ -568,7 +571,7 @@ class BotTest(unittest.TestCase):
         self.overdue_manual(now)
         with mock.patch.object(bot_module.time, "time", return_value=now), \
                 mock.patch.object(self.bot, "_rpmdb_mtime", return_value=0.0), \
-                mock.patch.object(self.bot, "check_reboot"), mock.patch.object(self.bot, "deliver_restart_reports"):
+                mock.patch.object(self.bot, "check_reboot"), mock.patch.object(self.bot, "deliver_outbox"):
             self.bot.tick()
         self.assertEqual(len(self.tg.sent), 1)
         self.assertIn("☀️", self.tg.sent[0])
@@ -664,7 +667,7 @@ class BotTest(unittest.TestCase):
         self.assertIn("later:24:services", data)
 
     def test_no_scan_while_check_runs(self):
-        self.bot._check_running.return_value = True
+        self.checking.return_value = True
         self.bot.check_services()
         self.found.assert_not_called()
 
@@ -686,7 +689,7 @@ class BotTest(unittest.TestCase):
         with mock.patch.object(restarts, "start") as start:
             self.press("restart:postfix")
         start.assert_not_called()
-        self.assertIn("Prüflauf", self.tg.answered[-1])
+        self.assertIn("twguard spielt gerade ein", self.tg.answered[-1])
         with state.locked(self.bot.cfg.state_dir) as st:
             self.assertEqual(st.restart_request, {})
 
@@ -790,12 +793,12 @@ class BotTest(unittest.TestCase):
 
     def test_no_restart_during_check_or_update(self):
         self.offer("sshd")
-        self.bot._check_running.return_value = True
+        self.checking.return_value = True
         with mock.patch.object(restarts, "start") as start:
             self.press("restart:sshd")
-            self.bot._check_running.return_value = False
+            self.checking.return_value = False
             with state.locked(self.bot.cfg.state_dir) as st:
-                st.update_request = {"commit": "x"}
+                st.update_request = {"commit": "x", "at": time.time()}
             self.press("restart:sshd")
         start.assert_not_called()
 
@@ -924,15 +927,15 @@ class BotTest(unittest.TestCase):
                 mock.patch.object(restarts, "states", return_value={"sshd": "failed"}):
             self.bot.watch_restart()
             with state.locked(self.bot.cfg.state_dir) as st:
-                self.assertIn("sshd (failed)", st.restart_reports[0]["text"])
+                self.assertIn("sshd (failed)", st.outbox[0]["text"])
             self.assertEqual(self.tg.deleted, [])  # die Wartemeldung bleibt, solange nichts gemeldet ist
-            self.bot.deliver_restart_reports()
+            self.bot.deliver_outbox()
             self.tg.send, self.tg.edit = send, edit
-            self.bot.deliver_restart_reports()
+            self.bot.deliver_outbox()
         self.assertIn("sshd (failed)", self.tg.sent[0])
         self.assertIn(55, self.tg.deleted)
         with state.locked(self.bot.cfg.state_dir) as st:
-            self.assertEqual(st.restart_reports, [])
+            self.assertEqual(st.outbox, [])
 
     def test_second_result_during_outage_keeps_first(self):
         self.found.return_value = []
@@ -946,23 +949,23 @@ class BotTest(unittest.TestCase):
             with mock.patch.object(restarts, "states", return_value={"postfix": "active"}):
                 self.bot.watch_restart()
         with state.locked(self.bot.cfg.state_dir) as st:
-            self.assertEqual(len(st.restart_reports), 2)
+            self.assertEqual(len(st.outbox), 2)
         self.tg.send, self.tg.edit = send, edit
-        self.bot.deliver_restart_reports()
+        self.bot.deliver_outbox()
         self.assertIn("sshd (failed)", self.tg.sent[0])
         self.assertIn("neu gestartet: postfix", self.tg.edited[-1][1])
         with state.locked(self.bot.cfg.state_dir) as st:
-            self.assertEqual(st.restart_reports, [])
+            self.assertEqual(st.outbox, [])
 
     def test_one_undeliverable_result_does_not_hold_back_others(self):
         with state.locked(self.bot.cfg.state_dir) as st:
-            st.restart_reports = [{"chat_id": -100, "at": time.time(), "text": t, "loud": True} for t in ("a", "b")]
+            st.outbox = [{"chat_id": -100, "at": time.time(), "text": t, "loud": True} for t in ("a", "b")]
         send = self.tg.send
         self.tg.send = mock.Mock(side_effect=[TelegramError("x"), {"message_id": 9, "chat": {"id": -100}}])
-        self.bot.deliver_restart_reports()
+        self.bot.deliver_outbox()
         self.tg.send = send
         with state.locked(self.bot.cfg.state_dir) as st:
-            self.assertEqual([r["text"] for r in st.restart_reports], ["a"])
+            self.assertEqual([r["text"] for r in st.outbox], ["a"])
 
     def overdue(self):
         with state.locked(self.bot.cfg.state_dir) as st:
@@ -1008,14 +1011,6 @@ class BotTest(unittest.TestCase):
         with mock.patch.object(restarts, "pending", return_value=None):
             self.bot.watch_restart()
         self.assertEqual(self.tg.sent + self.tg.edited, [])
-
-    def test_check_running_understands_oneshot(self):
-        mock.patch.stopall()
-        results = {"activating": True, "active": True, "inactive": False, "failed": False}
-        for output, expected in results.items():
-            done = subprocess.CompletedProcess([], 3, output + "\n", "")
-            with mock.patch("twguard.bot.subprocess.run", return_value=done):
-                self.assertEqual(Bot._check_running(self.bot), expected, output)
 
     def test_approve_refuses_plan_not_shown_and_shows_it(self):
         self.open_manual()
@@ -1114,6 +1109,288 @@ class BotTest(unittest.TestCase):
         self.assertIn("abgebrochen", text)
         self.assertIn("reboot", self.status_data(buttons))
         self.assertIn("later:24:reboot", self.status_data(buttons))
+
+    def test_reboot_refused_while_package_management_locked(self):
+        # purge-kernels nach dem Boot oder ein zypper per SSH: Ein Neustart würde es mittendrin abbrechen
+        self.open_reboot()
+        self.holder.return_value = "purge-kernels.service (zypper, PID 707)"
+        with mock.patch("subprocess.run") as run:
+            self.press("reboot")
+        run.assert_not_called()
+        self.assertIn("purge-kernels.service", self.tg.answered[-1])
+        with state.locked(self.bot.cfg.state_dir) as st:
+            self.assertFalse(st.reboot_requested_at)
+
+    def test_reboot_refused_while_twguard_applies(self):
+        with state.locked(self.bot.cfg.state_dir) as st:
+            st.applying = state.holder()  # dieser Prozess lebt
+        with mock.patch("subprocess.run") as run:
+            self.bot.handle(message("/reboot@server1_bot"))
+        run.assert_not_called()
+        self.assertIn("twguard spielt gerade ein", self.tg.sent[-1])
+
+    # --- Nach dem Boot -----------------------------------------------------
+
+    def boot(self, **fields):
+        """Bot startet nach einem Boot: eine andere Boot-ID als beim letzten Start."""
+        with state.locked(self.bot.cfg.state_dir) as st:
+            st.boot_id = "vorher"
+            for name, value in fields.items():
+                setattr(st, name, value)
+        with mock.patch.object(self.bot, "_set_menu"):
+            self.bot.startup()
+
+    def test_boot_closes_reboot_and_services_while_zypper_locked(self):
+        # Nach dem Boot sperrte purge-kernels zypper minutenlang; der Status zeigte weiter „Neustart nötig“
+        self.offer("postfix")
+        with state.locked(self.bot.cfg.state_dir) as st:
+            st.open_issue("reboot", "Neustart nötig")
+            st.messages["issue:reboot"] = {"chat_id": -100, "message_id": 77, "at": time.time()}
+        self.rebooting.return_value = self.found.return_value = None
+        self.boot()
+        with state.locked(self.bot.cfg.state_dir) as st:
+            self.assertEqual(st.issues, {})
+            self.assertEqual(st.restart_services, [])
+            self.assertEqual(st.unverified, ["reboot", "services"])
+            self.assertEqual(st.boot_id, state.boot_id())
+        self.assertIn((77, "✅ <b>server1</b>: Neustart ausstehend – erledigt"),
+                      [(m, t.rpartition(" (")[0]) for m, t, _ in self.tg.edited])
+        # Ohne Auskunft von zypper keine Entwarnung
+        self.bot.handle(message("/status"))
+        self.assertTrue(self.tg.sent[-1].startswith("❔"))
+        self.assertIn("noch nicht abgefragt: Neustartbedarf, Dienste mit alten Dateien", self.tg.sent[-1])
+        self.assertNotIn("reboot", self.status_data(self.tg.buttons[-1]))
+
+    def test_unverified_clears_once_zypper_answers(self):
+        self.rebooting.return_value = self.found.return_value = None
+        self.boot()
+        self.rebooting.return_value, self.found.return_value = False, []
+        self.bot.check_reboot()
+        self.bot.handle(message("/status"))
+        self.assertTrue(self.tg.sent[-1].startswith("✅"), self.tg.sent[-1])
+        with state.locked(self.bot.cfg.state_dir) as st:
+            self.assertEqual(st.unverified, [])
+
+    def test_bot_restart_without_boot_keeps_items(self):
+        with state.locked(self.bot.cfg.state_dir) as st:
+            st.boot_id = state.boot_id()
+            st.open_issue("reboot", "Neustart nötig")
+        with mock.patch.object(self.bot, "_set_menu"):
+            self.bot.startup()
+        with state.locked(self.bot.cfg.state_dir) as st:
+            self.assertIn("reboot", st.issues)
+            self.assertEqual(st.unverified, [])
+
+    def test_first_start_after_upgrade_is_no_boot(self):
+        # Bis 0.9.4 stand keine Boot-ID im Zustand; ein Update ist kein Neustart des Servers
+        self.open_reboot()
+        with mock.patch.object(self.bot, "_set_menu"):
+            self.bot.startup()
+        with state.locked(self.bot.cfg.state_dir) as st:
+            self.assertIn("reboot", st.issues)
+            self.assertEqual(st.boot_id, state.boot_id())
+
+    def test_service_restart_interrupted_by_boot_is_reported(self):
+        request = {"chat_id": -100, "message_id": 9, "at": time.time() - 60, "services": ["postfix"]}
+        self.boot(restart_request=request)
+        self.assertIn("durch den Neustart des Servers unterbrochen", self.tg.sent[-1])
+        self.assertIn("postfix", self.tg.sent[-1])
+        with state.locked(self.bot.cfg.state_dir) as st:
+            self.assertEqual(st.restart_request, {})
+            self.assertEqual(st.outbox, [])
+
+    def test_back_after_boot_names_lock_and_completes_when_free(self):
+        self.holder.return_value = "purge-kernels.service (zypper, PID 707)"
+        self.boot(reboot_requested_at=time.time() - 300,
+                  messages={"reboot": {"chat_id": -100, "message_id": 66, "at": time.time() - 300}})
+        message_id, text, _ = self.tg.edited[-1]
+        self.assertEqual(message_id, 66)
+        self.assertIn("ist wieder da", text)
+        self.assertIn("noch belegt: purge-kernels.service", text)
+        # Solange gesperrt, bleibt die Meldung
+        edits = len(self.tg.edited)
+        with mock.patch.object(self.bot, "check_reboot") as check_reboot:
+            self.bot.watch_maintenance(time.time())
+            self.assertEqual(len(self.tg.edited), edits)
+            self.holder.return_value = ""
+            self.bot.watch_maintenance(time.time())
+        check_reboot.assert_called_once()
+        message_id, text, _ = self.tg.edited[-1]
+        self.assertEqual(message_id, 66)
+        self.assertIn("ist wieder da", text)
+        self.assertIn("wieder frei", text)
+        self.assertNotIn("noch belegt", text)
+        with state.locked(self.bot.cfg.state_dir) as st:
+            self.assertEqual(st.maintenance, {})
+            self.assertFalse(st.reboot_requested_at)
+
+    def test_back_after_boot_without_lock_has_no_note(self):
+        self.boot(reboot_requested_at=time.time() - 300)
+        self.assertIn("ist wieder da", self.tg.sent[-1])
+        self.assertNotIn("belegt", self.tg.sent[-1])
+        with state.locked(self.bot.cfg.state_dir) as st:
+            self.assertEqual(st.maintenance, {})
+
+    def test_back_after_boot_survives_telegram_outage(self):
+        self.tg.fail_send = True
+        self.boot(reboot_requested_at=time.time() - 300)
+        with state.locked(self.bot.cfg.state_dir) as st:
+            self.assertEqual(len(st.outbox), 1)
+            self.assertFalse(st.reboot_requested_at)
+        self.tg.fail_send = False
+        self.bot.deliver_outbox()
+        self.assertIn("ist wieder da", self.tg.sent[-1])
+        with state.locked(self.bot.cfg.state_dir) as st:
+            self.assertEqual(st.outbox, [])
+
+    # --- Geplanter Neustart (logind) ----------------------------------------
+
+    def plan_reboot(self):
+        # So meldet logind einen mit shutdown -r +1 geplanten Neustart
+        self.logind.return_value = busy.Shutdown("planned", "reboot", time.time() + 50)
+        with state.locked(self.bot.cfg.state_dir) as st:
+            busy.note_shutdown(st, self.logind.return_value)
+
+    def test_status_shows_planned_reboot_with_cancel_instead_of_reboot(self):
+        self.open_reboot()
+        self.plan_reboot()
+        self.bot.handle(message("/status"))
+        self.assertIn("Neustart geplant um", self.tg.sent[-1])
+        # Bestätigt ist er nicht mehr „ausstehend“
+        self.assertNotIn("Neustart ausstehend", self.tg.sent[-1])
+        data = self.status_data(self.tg.buttons[-1])
+        self.assertNotIn("reboot", data)
+        self.assertIn("cancel", data)
+
+    def test_nothing_new_starts_while_reboot_planned(self):
+        # Prüflauf, Freigabe, Update und Dienst-Neustart brächen mit dem Neustart ab, ihr Ergebnis käme nie an
+        self.open_manual()
+        self.offer("postfix")
+        self.plan_reboot()
+        self.bot.handle(message("/check@server1_bot"))
+        self.assertIn("Neustart geplant um", self.tg.sent[-1])
+        self.press("check")
+        self.press("approve:abc")
+        self.bot.handle(message("/update@server1_bot"))
+        with mock.patch.object(restarts, "start") as start:
+            self.press("restart:postfix")
+        start.assert_not_called()
+        self.start_check.assert_not_called()
+        self.assertEqual(sum("Neustart geplant um" in a for a in self.tg.answered), 3)
+        self.assertIn("Neustart geplant um", self.tg.sent[-1])
+        with state.locked(self.bot.cfg.state_dir) as st:
+            self.assertEqual(st.approved_fingerprint, "")
+            self.assertEqual(st.update_request, {})
+
+    def test_reboot_planned_on_console_is_recognised(self):
+        # Nicht nur selbst ausgelöste: logind kennt auch shutdown -r +5 auf der Konsole
+        self.logind.return_value = busy.Shutdown("planned", "reboot", time.time() + 300)
+        self.bot.handle(message("/check@server1_bot"))
+        self.start_check.assert_not_called()
+        self.assertIn("Neustart geplant um", self.tg.sent[-1])
+
+    def test_reboot_cancelled_on_console_frees_actions_and_reminders(self):
+        with state.locked(self.bot.cfg.state_dir) as st:
+            st.open_issue("reboot", "Neustart nötig", now=time.time() - 3 * 86400)
+        self.plan_reboot()
+        with state.locked(self.bot.cfg.state_dir) as st:
+            send_due(self.bot.cfg, st, self.tg)
+        self.assertEqual(self.tg.sent, [])
+        # sudo shutdown -c: logind hat nichts mehr geplant; der Takt gleicht ab und erinnert wieder
+        self.logind.return_value = busy.Shutdown("none")
+        with mock.patch.object(self.bot, "_rpmdb_mtime", return_value=0.0), \
+                mock.patch.object(self.bot, "check_reboot"), mock.patch.object(self.bot, "maybe_briefing"):
+            self.bot.tick()
+        self.assertEqual(len(self.tg.sent), 1)
+        self.assertIn("Neustart", self.tg.sent[0])
+        self.bot.handle(message("/check@server1_bot"))
+        self.start_check.assert_called_once()
+
+    def test_second_reboot_does_not_postpone_the_first(self):
+        self.plan_reboot()
+        with mock.patch("subprocess.run") as run:
+            self.bot.handle(message("/reboot@server1_bot"))
+        run.assert_not_called()
+        self.assertIn("Neustart geplant um", self.tg.sent[-1])
+
+    def test_reboot_planning_excludes_apply_in_between(self):
+        # F17: Zwischen Prüfung und shutdown darf kein Prüflauf reservieren
+        seen = []
+
+        def shutdown(cmd, **kwargs):
+            cfg = Config(language="de", token="x", chat_id=-100, hostname="server1", mode="auto",
+                         state_dir=self.bot.cfg.state_dir)
+            seen.append(check._reserve(cfg, self.tg, "auto", approved=False))
+            return mock.Mock(returncode=0, stderr="")
+        with mock.patch("subprocess.run", side_effect=shutdown):
+            self.assertEqual(self.bot.reboot(), "")
+        self.assertEqual(seen, [("busy", {})])
+        with state.locked(self.bot.cfg.state_dir) as st:
+            self.assertEqual(st.applying, {})
+            self.assertEqual(st.reboot_planning, {})
+            self.assertTrue(st.reboot_requested_at)
+
+    def test_failed_reboot_releases_only_its_planning(self):
+        with mock.patch("subprocess.run", return_value=mock.Mock(returncode=1, stderr="kaputt")):
+            self.assertIn("Neustart fehlgeschlagen: kaputt", self.bot.reboot())
+        with state.locked(self.bot.cfg.state_dir) as st:
+            self.assertEqual(st.reboot_planning, {})
+            self.assertFalse(st.reboot_requested_at)
+
+    def test_cancel_from_status_updates_reboot_message_and_keeps_other_items(self):
+        self.open_reboot()
+        self.open_manual()
+        with mock.patch("subprocess.run", return_value=mock.Mock(returncode=0, stderr="")):
+            self.bot.handle(message("/reboot@server1_bot"))
+        with state.locked(self.bot.cfg.state_dir) as st:
+            reboot_message = st.messages["reboot"]["message_id"]
+        self.plan_reboot()
+        status = self.status_message()
+        self.logind.return_value = busy.Shutdown("none")
+        with mock.patch("subprocess.run", return_value=mock.Mock(returncode=0, stderr="")) as run:
+            self.press_on(status, "cancel", self.tg.buttons[-1])
+        self.assertEqual(run.call_args.args[0], ["shutdown", "-c"])
+        self.assertIn("Neustart abgebrochen", self.tg.sent[-1])
+        # Die alte Meldung „startet in 1 Minute“ verschwindet, die übrigen Punkte im Status bleiben
+        self.assertIn(reboot_message, self.tg.deleted)
+        (message_id, markup), = self.tg.markup_edits
+        self.assertEqual(message_id, status)
+        data = [b["callback_data"] for row in markup["inline_keyboard"] for b in row]
+        self.assertNotIn("cancel", data)
+        self.assertIn("approve:abc", data)
+        with state.locked(self.bot.cfg.state_dir) as st:
+            self.assertFalse(st.reboot_requested_at)
+            self.assertEqual(st.shutdown, {})
+
+    def test_cancel_that_did_not_work_says_so(self):
+        with mock.patch("subprocess.run", return_value=mock.Mock(returncode=0, stderr="")):
+            self.press("reboot")
+        self.plan_reboot()
+        with mock.patch("subprocess.run", return_value=mock.Mock(returncode=0, stderr="")):
+            self.press("cancel")
+        self.assertIn("Abbrechen fehlgeschlagen", self.tg.edited[-1][1])
+        self.assertIn("cancel", self.status_data(self.tg.edited[-1][2]))
+        with state.locked(self.bot.cfg.state_dir) as st:
+            self.assertTrue(st.reboot_requested_at)
+
+    def test_unknown_logind_refuses_consequential_actions_only(self):
+        self.offer("postfix")
+        self.logind.return_value = busy.Shutdown("unknown")
+        with mock.patch.object(restarts, "start") as start:
+            self.press("restart:postfix")
+        start.assert_not_called()
+        self.assertIn("logind gibt keine Auskunft", self.tg.answered[-1])
+        with mock.patch("subprocess.run") as run:
+            self.bot.handle(message("/reboot@server1_bot"))
+        run.assert_not_called()
+        # Prüfen ändert nichts am System; das Einspielen fragt logind selbst noch einmal
+        self.bot.handle(message("/check@server1_bot"))
+        self.start_check.assert_called_once()
+
+    def test_status_names_lock_holder(self):
+        self.holder.return_value = "purge-kernels.service (zypper, PID 707)"
+        self.bot.handle(message("/status"))
+        self.assertIn("🔒 Paketverwaltung belegt: purge-kernels.service (zypper, PID 707)", self.tg.sent[-1])
 
     def test_cancel_without_open_reboot_has_no_buttons(self):
         with mock.patch("subprocess.run", return_value=mock.Mock(returncode=0, stderr="")):

@@ -39,7 +39,16 @@ class State:
     last_plan: dict = field(default_factory=dict)
     first_seen: float = 0.0
     tg_offset: int = 0
+    # twguard hat den Neustart ausgelöst; nach dem Boot meldet der Bot „wieder da“
     reboot_requested_at: float = 0.0
+    # Bot plant gerade einen Neustart {"pid", "boot", "at"} (busy): schließt Einspielen dazwischen aus
+    reboot_planning: dict = field(default_factory=dict)
+    # Zuletzt gesehener geplanter Neustart laut logind (busy.Shutdown), nur für die Anzeige
+    shutdown: dict = field(default_factory=dict)
+    # Boot, in dem der Bot zuletzt gestartet ist; ein Wechsel heißt: der Server hat neu gestartet
+    boot_id: str = ""
+    # Seit dem Boot noch nicht abgefragt, weil zypper keine Auskunft gab: "reboot", "services"
+    unverified: list = field(default_factory=list)
     rpmdb_mtime: float = 0.0
     # Beobachtungsmodus: zuletzt gemeldeter Routine-Plan (nicht täglich wiederholen)
     observed_fingerprint: str = ""
@@ -73,8 +82,12 @@ class State:
     restart_services: list = field(default_factory=list)
     # Laufender Neustart {"chat_id", "message_id", "at", "services", "errors", "overdue"}; überlebt den Neustart des Bots
     restart_request: dict = field(default_factory=dict)
-    # Ergebnisse, die noch zugestellt werden müssen, je {"chat_id", "message_id", "at", "text", "loud"}
-    restart_reports: list = field(default_factory=list)
+    # Rückmeldungen, die noch zugestellt werden müssen (Dienst-Neustart, Rückkehr nach dem Boot),
+    # je {"chat_id", "message_id", "at", "text", "loud"}; der Bot versucht es bei jedem Takt erneut
+    outbox: list = field(default_factory=list)
+    # Meldung „wieder da“, solange nach dem Boot die Paketverwaltung belegt ist (purge-kernels)
+    # {"chat_id", "message_id", "at", "text"}; der Bot ergänzt sie, sobald die Sperre frei ist
+    maintenance: dict = field(default_factory=dict)
     # Prüflauf spielt gerade ein {"pid", "boot", "at"}; schließt Dienst-Neustarts aus (holder/alive)
     applying: dict = field(default_factory=dict)
     # Fingerabdruck des zuletzt tatsächlich gezeigten Plans; /approve gilt nur für ihn.
@@ -96,7 +109,7 @@ class State:
         return self.issues.pop(kind, None)
 
 
-def _boot_id() -> str:
+def boot_id() -> str:
     try:
         return Path("/proc/sys/kernel/random/boot_id").read_text().strip()
     except OSError:
@@ -105,12 +118,12 @@ def _boot_id() -> str:
 
 def holder() -> dict:
     """Kennung dieses Prozesses für eine Reservierung im Zustand."""
-    return {"pid": os.getpid(), "boot": _boot_id(), "at": time.time()}
+    return {"pid": os.getpid(), "boot": boot_id(), "at": time.time()}
 
 
 def alive(entry: dict) -> bool:
     """Lebt der Prozess einer Reservierung noch? Nach Absturz oder Reboot gilt sie nicht mehr."""
-    if not entry or entry.get("boot") != _boot_id():
+    if not entry or entry.get("boot") != boot_id():
         return False
     try:
         os.kill(int(entry["pid"]), 0)
@@ -129,6 +142,9 @@ def load(path: Path) -> State:
     except FileNotFoundError:
         return State()
     issues = {k: Issue(**v) for k, v in data.pop("issues", {}).items()}
+    # Bis 0.9.4 hieß die Warteschlange restart_reports
+    if "restart_reports" in data:
+        data.setdefault("outbox", data.pop("restart_reports"))
     known = {f.name for f in fields(State)}
     return State(issues=issues, **{k: v for k, v in data.items() if k in known})
 

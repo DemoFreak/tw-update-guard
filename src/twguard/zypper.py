@@ -10,6 +10,7 @@ import re
 import subprocess
 import xml.etree.ElementTree as ET
 from dataclasses import dataclass, field
+from pathlib import Path
 
 from .i18n import tr
 
@@ -32,6 +33,10 @@ EXIT_RESTART_NEEDED = 103
 OK_CODES = {0, EXIT_REBOOT_NEEDED, EXIT_RESTART_NEEDED}
 # Eigener Code für „abgebrochen, weil keine Antwort“ (zypper selbst nutzt nur positive)
 EXIT_TIMEOUT = -1
+# „System management is locked“: ein anderes Programm hält die Sperre von libzypp
+EXIT_ZYPP_LOCKED = 7
+# Sperrdatei von libzypp mit der PID des Besitzers, leer, wenn frei
+LOCK_FILE = Path("/run/zypp.pid")
 SERVICE_NAME = re.compile(r"[A-Za-z0-9][A-Za-z0-9:_.@\\-]*")
 # Laufen nur kurz und enden von selbst; twguard-check meldet sich sonst nach jedem Update selbst
 OWN_UNITS = {"twguard-check", "twguard-update"}
@@ -162,9 +167,43 @@ def _run(args: list[str], xml: bool = True, timeout: float | None = None) -> sub
         return subprocess.CompletedProcess(cmd, EXIT_TIMEOUT, "", tr("keine Antwort nach {n} s, abgebrochen", n=f"{timeout:.0f}"))
 
 
+class Locked(Exception):
+    """Die Paketverwaltung ist belegt, z. B. von purge-kernels kurz nach dem Boot."""
+
+    def __init__(self, holder: str):
+        super().__init__(holder)
+        self.holder = holder
+
+
+def lock_holder() -> str:
+    """Wer die Paketverwaltung gerade sperrt, z. B. "purge-kernels.service (zypper, PID 707)"; leer, wenn frei."""
+    try:
+        pid = int(LOCK_FILE.read_text().strip())
+        name = Path(f"/proc/{pid}/comm").read_text().strip()
+    except (OSError, ValueError):
+        # Leer, unlesbar oder Prozess beendet (eine verwaiste Sperre übernimmt libzypp selbst)
+        return ""
+    unit = ""
+    try:
+        for line in Path(f"/proc/{pid}/cgroup").read_text().splitlines():
+            last = line.rpartition("/")[2]
+            if last.endswith(".service"):
+                unit = last
+    except OSError:
+        pass
+    return f"{unit} ({name}, PID {pid})" if unit else f"{name} (PID {pid})"
+
+
+def _check_lock(p: subprocess.CompletedProcess) -> None:
+    if p.returncode == EXIT_ZYPP_LOCKED:
+        log.info("%s", p.stderr.strip())
+        raise Locked(lock_holder() or tr("ein anderes Programm"))
+
+
 def refresh() -> list[str]:
-    """Repos auffrischen. Gibt Fehlermeldungen zurück, leer heißt erfolgreich."""
+    """Repos auffrischen. Gibt Fehlermeldungen zurück, leer heißt erfolgreich; `Locked` bei belegter Paketverwaltung."""
     p = _run(["refresh"], timeout=CHECK_TIMEOUT)
+    _check_lock(p)
     if p.returncode == 0:
         return []
     if p.returncode == EXIT_TIMEOUT:
@@ -175,6 +214,7 @@ def refresh() -> list[str]:
 
 def dry_run(dup_args: list[str]) -> Plan:
     p = _run(["--no-refresh", "dup", "--dry-run", "--details", *dup_args], timeout=CHECK_TIMEOUT)
+    _check_lock(p)
     if p.returncode == EXIT_TIMEOUT:
         return Plan(exit_code=EXIT_TIMEOUT, errors=[f"zypper dup --dry-run: {p.stderr}"])
     plan = parse_plan(p.stdout, p.returncode)
@@ -189,10 +229,12 @@ def apply(dup_args: list[str]) -> tuple[int, str, Plan]:
 
     zypper kann keinen vorher geprüften Plan ausführen, sondern rechnet neu. Ändert sich zwischen
     Probelauf und Einspielen etwas (fremder Refresh, Paketoperation), weicht der Plan ab; das
-    lässt sich nicht verhindern, aber hinterher am ausgegebenen Plan erkennen.
+    lässt sich nicht verhindern, aber hinterher am ausgegebenen Plan erkennen. Bei belegter
+    Paketverwaltung `Locked`, dann ist nichts eingespielt.
     """
     # --no-refresh: derselbe Repo-Stand wie im Probelauf, sonst passt der Fingerabdruck nicht
     p = _run(["--no-refresh", "dup", "--details", "--auto-agree-with-licenses", *dup_args])
+    _check_lock(p)
     return p.returncode, message_text(p.stdout) + p.stderr, parse_plan(p.stdout, p.returncode)
 
 
@@ -223,6 +265,9 @@ def needs_rebooting() -> bool | None:
         return True
     if rc == 0:
         return False
+    if rc == EXIT_ZYPP_LOCKED:
+        log.info(tr("zypper needs-rebooting: Paketverwaltung belegt durch %s"), lock_holder() or tr("ein anderes Programm"))
+        return None
     log.warning(tr("zypper needs-rebooting: Exit-Code %s"), rc)
     return None
 
@@ -233,6 +278,9 @@ def services_needing_restart() -> list[str] | None:
     `-sss` statt der Tabelle von `-s`: nur die Namen, unabhängig von der Sprache.
     """
     p = _run(["ps", "-sss"], xml=False, timeout=QUERY_TIMEOUT)
+    if p.returncode == EXIT_ZYPP_LOCKED:
+        log.info(tr("zypper ps: Paketverwaltung belegt durch %s"), lock_holder() or tr("ein anderes Programm"))
+        return None
     if p.returncode not in OK_CODES:
         log.warning(tr("zypper ps: %s"), p.stderr)
         return None

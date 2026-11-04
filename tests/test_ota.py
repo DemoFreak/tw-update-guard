@@ -3,12 +3,13 @@ import io
 import os
 import subprocess
 import tempfile
+import time
 import unittest
 from pathlib import Path
 from unittest import mock
 
 import testlang  # noqa: F401
-from twguard import ota, state
+from twguard import busy, ota, state
 from twguard.config import Config, Update
 
 
@@ -119,6 +120,21 @@ class SelfUpdateTest(CheckRemoteTest):
         self.assertEqual(self.installed.read_text(), "neu")
         self.assertEqual(self.previous.read_text(), "alt")
 
+    def test_failure_releases_only_own_request(self):
+        own = state.holder()
+        for runner, kept in ((own, False), ({"pid": 1, "boot": "x", "at": 1.0}, True)):
+            with state.locked(self.cfg.state_dir) as st:
+                st.update_request = {"commit": self.target, "at": time.time(), "runner": own}
+            self.run_cmd.side_effect = None
+            def other_takes_over(cmd, *args, runner=runner, **kw):
+                with state.locked(self.cfg.state_dir) as st:
+                    st.update_request["runner"] = runner
+                raise ota.UpdateError("1 Test fehlgeschlagen")
+            self.run_cmd.side_effect = other_takes_over
+            self.assertEqual(ota.self_update(self.cfg, self.target), 1)
+            with state.locked(self.cfg.state_dir) as st:
+                self.assertEqual(bool(st.update_request), kept)
+
     def test_failing_tests_keep_old_version(self):
         self.run_cmd.side_effect = ota.UpdateError("1 Test fehlgeschlagen")
         self.assertEqual(ota.self_update(self.cfg, self.target), 1)
@@ -188,6 +204,9 @@ class CommandTest(unittest.TestCase):
             self.addCleanup(patcher.stop)
         self.check.return_value = self.pending
         self.update.return_value = 0
+        patcher = mock.patch.object(busy, "shutdown", return_value=busy.Shutdown("none"))
+        patcher.start()
+        self.addCleanup(patcher.stop)
 
     def run_command(self, commit=""):
         out, err = io.StringIO(), io.StringIO()
@@ -220,20 +239,105 @@ class CommandTest(unittest.TestCase):
             self.run_command("ccc")
         self.update.assert_called_once_with(self.cfg, "c" * 40)
 
-    def test_unit_started_by_bot_goes_straight_to_update(self):
+    def bot_request(self, **extra):
         with state.locked(self.cfg.state_dir) as st:
-            st.update_request = {"commit": "d" * 40}
+            st.update_request = {"commit": "d" * 40, "chat_id": -100, "message_id": 7, "at": time.time(), **extra}
+
+    def test_unit_started_by_bot_goes_straight_to_update(self):
+        self.bot_request()
+        def seen(cfg, commit):
+            with state.locked(cfg.state_dir) as st:
+                self.assertEqual(st.update_request["runner"]["pid"], os.getpid())
+                self.assertEqual(st.update_request["message_id"], 7)
+            return 0
+        self.update.side_effect = seen
         self.assertEqual(self.run_command("d" * 40)[0], 0)
         self.update.assert_called_once_with(self.cfg, "d" * 40)
         self.check.assert_not_called()
 
+    def test_second_runner_of_bot_update_refused(self):
+        # F20: Ein zweiter Aufruf während des ersten darf weder einspielen noch dessen Auftrag lösen
+        self.bot_request()
+        inner = []
+        def first(cfg, commit):
+            for again in ("d" * 40, "e" * 40, ""):
+                with mock.patch.object(ota, "_git", return_value=again or "f" * 40):
+                    inner.append(self.run_command(again))
+            with state.locked(cfg.state_dir) as st:
+                self.assertEqual(st.update_request["runner"]["pid"], os.getpid())
+                self.assertEqual(st.update_request["message_id"], 7)
+            return 0
+        self.update.side_effect = first
+        self.assertEqual(self.run_command("d" * 40)[0], 0)
+        self.update.assert_called_once()
+        self.assertEqual([rc for rc, _, _ in inner], [1, 1, 1])
+        self.assertTrue(all("läuft bereits" in err or "Update von twguard läuft" in err for _, _, err in inner))
+
+    def test_bot_update_claimed_only_once(self):
+        # Nach einem Absturz des Ausführers übernimmt niemand den Auftrag des Bots; derselbe Commit von Hand
+        # ist ein eigenes Update mit eigener Reservierung
+        self.bot_request(runner={"pid": 999999999, "boot": state.boot_id(), "at": 1.0})
+        def seen(cfg, commit):
+            with state.locked(cfg.state_dir) as st:
+                self.assertTrue(st.update_request["console"])
+                self.assertNotIn("message_id", st.update_request)
+            return 0
+        self.update.side_effect = seen
+        with mock.patch.object(ota, "_git", return_value="d" * 40):
+            self.assertEqual(self.run_command("d" * 40)[0], 0)
+        self.update.assert_called_once()
+
+    def test_console_update_after_crashed_bot_update(self):
+        self.bot_request(runner={"pid": 999999999, "boot": state.boot_id(), "at": 1.0})
+        self.assertEqual(self.run_command()[0], 0)
+        self.update.assert_called_once_with(self.cfg, "b" * 40)
+
+    def test_second_console_runner_refused(self):
+        inner = []
+        def first(cfg, commit):
+            inner.append(self.run_command())
+            return 0
+        self.update.side_effect = first
+        self.assertEqual(self.run_command()[0], 0)
+        self.update.assert_called_once()
+        self.assertEqual(inner[0][0], 1)
+        self.assertIn("Update von twguard läuft", inner[0][2])
+
     def test_without_commit_while_update_runs(self):
-        with state.locked(self.cfg.state_dir) as st:
-            st.update_request = {"commit": "d" * 40}
+        self.bot_request()
         rc, _, err = self.run_command()
         self.assertEqual(rc, 1)
         self.update.assert_not_called()
         self.assertIn("läuft bereits", err)
+
+    def test_console_update_reserves_like_the_bot(self):
+        # Sonst liefe ein Update von Hand mitten in ein Einspielen oder einen Dienst-Neustart
+        def seen(cfg, commit):
+            with state.locked(cfg.state_dir) as st:
+                self.assertEqual(st.update_request["commit"], commit)
+                self.assertTrue(st.update_request["console"])
+            return 0
+        self.update.side_effect = seen
+        self.assertEqual(self.run_command()[0], 0)
+        self.update.assert_called_once()
+
+    def test_console_update_refused_while_twguard_applies(self):
+        with state.locked(self.cfg.state_dir) as st:
+            st.applying = state.holder()
+        rc, _, err = self.run_command()
+        self.assertEqual(rc, 1)
+        self.update.assert_not_called()
+        self.assertIn("twguard spielt gerade ein", err)
+        with state.locked(self.cfg.state_dir) as st:
+            self.assertEqual(st.update_request, {})
+
+    def test_second_console_update_refused(self):
+        with state.locked(self.cfg.state_dir) as st:
+            st.update_request = {"commit": "d" * 40, "at": time.time(), "console": True, "runner": state.holder()}
+        rc, _, err = self.run_command()
+        self.assertEqual(rc, 1)
+        self.update.assert_not_called()
+        self.assertIn("Update von twguard läuft", err)
 
     def test_failed_update_is_reported(self):
         self.update.return_value = 1
@@ -258,6 +362,12 @@ class StartupReportTest(unittest.TestCase):
         st = state.State(update_request={"commit": "abcdef1234567890", "at": 100.0})
         text, _ = ota.startup_report(self.cfg, st, now=200.0)
         self.assertIn("läuft jetzt mit v0.9.3 (abcdef12)", text)
+        self.assertEqual(st.update_request, {})
+
+    @mock.patch.object(ota, "COMMIT", "abcdef123456")
+    def test_console_success_stays_on_console(self):
+        st = state.State(update_request={"commit": "abcdef1234567890", "at": 100.0, "console": True})
+        self.assertIsNone(ota.startup_report(self.cfg, st, now=200.0))
         self.assertEqual(st.update_request, {})
 
     def test_waits_while_update_runs(self):

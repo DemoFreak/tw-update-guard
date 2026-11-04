@@ -21,7 +21,7 @@ from dataclasses import dataclass
 from html import escape
 from pathlib import Path
 
-from . import COMMIT, __version__, messages, state
+from . import COMMIT, __version__, busy, messages, state
 from .i18n import tr
 from .config import Config, Update
 from .notify import clip, use_language
@@ -41,7 +41,7 @@ VERSION_LINE = re.compile(r'^__version__ = "([^"]+)"', re.M)
 # So lange darf der neue Bot zum Starten brauchen, bevor die alte Version zurückkommt
 START_TIMEOUT = 90
 # Ein Update, das so lange keine Rückmeldung gibt, gilt als hängengeblieben
-STUCK_AFTER = 900
+STUCK_AFTER = busy.UPDATE_MAX_AGE
 
 
 class UpdateError(Exception):
@@ -157,10 +157,20 @@ def command(cfg: Config, commit: str = "") -> int:
 
     Von Hand: ohne Commit der neueste Stand, ein ungültiger wird abgewiesen, bevor etwas geschieht.
     """
-    if state.load(cfg.state_dir / "state.json").update_request:
-        # Der Bot hat das Update gestartet; das Ergebnis geht in seine Nachricht
-        if commit:
-            return self_update(cfg, commit)
+    with state.locked(cfg.state_dir) as st:
+        request = st.update_request
+        bot = bool(request) and not request.get("console")
+        # Den Auftrag des Bots übernimmt genau ein Aufruf mit seinem Commit (die Unit aus ota.start), auch
+        # nach einem Absturz kein zweiter: Dann meldet der Bot das Update als hängen geblieben
+        claimed = bot and commit == request.get("commit") and "runner" not in request
+        if claimed:
+            request["runner"] = state.holder()
+        # Ein abgestürzter oder nie gestarteter Auftrag hält eine Aktualisierung von Hand nicht auf
+        busy_bot = bot and not claimed and busy.update_running(st)
+    if claimed:
+        # Das Ergebnis geht in die Nachricht des Bots
+        return self_update(cfg, commit)
+    if busy_bot:
         print(tr("Ein Update läuft bereits."), file=sys.stderr)
         return 1
     try:
@@ -172,6 +182,14 @@ def command(cfg: Config, commit: str = "") -> int:
     if not commit and not pending.commits:
         print(tr("twguard ist aktuell ({commit}).", commit=running()))
         return 0
+    # Wie /update reservieren: Einspielen, Dienst-Neustart und Server-Neustart warten (busy)
+    with state.locked(cfg.state_dir) as st:
+        refused = busy.refusal("update", st)
+        if not refused:
+            st.update_request = {"commit": target, "at": time.time(), "console": True, "runner": state.holder()}
+    if refused:
+        print(refused, file=sys.stderr)
+        return 1
     shown = label(target, version_of(cfg.update.repo, target))
     print(tr("Aktualisiere auf {commit} …", commit=shown))
     rc = self_update(cfg, target)
@@ -197,7 +215,8 @@ def self_update(cfg: Config, commit: str) -> int:
 
     def report(text: str) -> None:
         with state.locked(cfg.state_dir) as st:
-            st.update_request = {}
+            if st.update_request.get("runner") == request.get("runner"):
+                st.update_request = {}
         # Die Bestätigungsnachricht („Update läuft“) wird zum Ergebnis
         messages.edit_or_send(tg, request, text)
 
@@ -296,6 +315,8 @@ def startup_report(cfg: Config, st: state.State, now: float | None = None) -> tu
     host = escape(cfg.hostname)
     if started_with(request.get("commit", ""), COMMIT):
         st.update_request = {}
+        if request.get("console"):
+            return None  # Erfolg von Hand steht auf der Konsole, nicht in Telegram
         return tr("✅ <b>{host}</b>: twguard läuft jetzt mit {commit}.", host=host, commit=escape(running())), request
     if (now or time.time()) - request.get("at", 0) > STUCK_AFTER:
         st.update_request = {}

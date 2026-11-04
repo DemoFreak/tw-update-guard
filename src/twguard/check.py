@@ -8,7 +8,7 @@ import time
 from html import escape
 from pathlib import Path
 
-from . import details, messages, restarts, state, zypper
+from . import busy, details, messages, restarts, state, zypper
 from .config import MODES, Config
 from .i18n import tr
 from .notify import (adopt_migration, format_issue, format_observed, format_reasons, format_report, format_status,
@@ -24,6 +24,10 @@ REQUEST_MAX_AGE = 3600
 # So lange wartet das Einspielen auf einen laufenden Dienst-Neustart (dessen Grenze sind 15 min)
 RESTART_WAIT = 20 * 60
 RESTART_POLL = 10
+# So lange wartet der Prüflauf auf eine belegte Paketverwaltung (purge-kernels nach dem Boot braucht Minuten).
+# Danach beginnt er von vorn: Der fremde Vorgang kann Repos, Pakete und damit den Plan geändert haben
+LOCK_WAIT = 30 * 60
+LOCK_POLL = 15
 
 
 def save_plan(state_dir: Path, plan: zypper.Plan, fingerprint: str, keep: int = KEEP_PLANS) -> Path | None:
@@ -85,13 +89,41 @@ def _fail(cfg: Config, tg: Telegram, kind: str, detail: str) -> int:
     return 1
 
 
+def _locked(cfg: Config, tg: Telegram, holder: str) -> int:
+    """Sperre nach LOCK_WAIT noch belegt: kein Fehler, der nächste Prüflauf versucht es wieder."""
+    log.warning(tr("Paketverwaltung seit %d min belegt durch %s, nichts eingespielt"), LOCK_WAIT // 60, holder)
+    finish(cfg, tg, f"⏸️ <b>{escape(cfg.hostname)}</b>: " + tr(
+        "Die Paketverwaltung ist seit {minutes} min belegt durch {holder}, nichts eingespielt. Der nächste "
+        "Prüflauf versucht es erneut (sofort: /check).", minutes=LOCK_WAIT // 60, holder=escape(holder)), loud=True)
+    return 0
+
+
 def run(cfg: Config, dry_run: bool = False) -> int:
     tg = Telegram(cfg.token, cfg.chat_id)
     use_language(cfg)
     configured = cfg.mode
     use_mode(cfg)
+    deadline = time.monotonic() + LOCK_WAIT
+    shown = ""
     try:
-        return _run(cfg, tg, dry_run, configured)
+        while True:
+            try:
+                return _run(cfg, tg, dry_run, configured)
+            except zypper.Locked as e:
+                # Nichts eingespielt (zypper bricht bei der Sperre vor jeder Änderung ab)
+                if time.monotonic() >= deadline:
+                    if dry_run:
+                        print(tr("Paketverwaltung belegt: {holder}", holder=e.holder))
+                        return 1
+                    return _locked(cfg, tg, e.holder)
+                if e.holder != shown:
+                    shown = e.holder
+                    log.info(tr("Paketverwaltung belegt durch %s, warte"), e.holder)
+                    if not dry_run:
+                        progress(cfg, tg, tr("⏳ <b>{host}</b>: Die Paketverwaltung ist belegt durch {holder}, "
+                                             "twguard wartet darauf.", host=escape(cfg.hostname),
+                                             holder=escape(e.holder)))
+                time.sleep(LOCK_POLL)
     finally:
         if tg.migration and not dry_run:
             with state.locked(cfg.state_dir) as st:
@@ -112,16 +144,24 @@ def _reserve(cfg: Config, tg: Telegram, configured: str, approved: bool) -> tupl
             cfg.mode = st.mode_override if st.mode_override in MODES else configured
             if cfg.observe and not approved:
                 return "observe", {}
-            other = state.alive(st.applying)
-            if not (other or st.restart_request):
+            found = busy.blockers("apply", st)
+            if not found:
                 st.applying = state.holder()
                 return "apply", dict(st.applying)
-        if other:
-            # Er spielt denselben oder einen neueren Stand ein; danach erneut zu warten brächte nichts
-            log.warning(tr("Ein anderer Prüflauf spielt gerade ein, nichts eingespielt"))
-            finish(cfg, tg, f"⏸️ <b>{escape(cfg.hostname)}</b>: " + tr(
-                "Ein anderer Prüflauf spielt gerade ein, dieser spielt nichts ein. Das Ergebnis meldet der "
-                "andere Lauf."), loud=True)
+        # Auf einen Dienst-Neustart lohnt das Warten, er endet in Minuten; alles andere weist ab
+        kinds = {kind for kind, _ in found}
+        if kinds != {busy.RESTART}:
+            kind, reason = next((k, text) for k, text in found if k != busy.RESTART)
+            log.warning(tr("nichts eingespielt: %s"), reason)
+            text = f"⏸️ <b>{escape(cfg.hostname)}</b>: " + tr(
+                "Nichts eingespielt: {reason}. Der nächste Prüflauf versucht es erneut.", reason=escape(reason))
+            # Auch ohne Anfrage (Timer) melden, sonst bliebe z. B. ein stummes logind unbemerkt; nur der
+            # andere Prüflauf meldet sein Ergebnis selbst
+            if not finish(cfg, tg, text, loud=True) and kind != busy.APPLY:
+                try:
+                    tg.send(text)
+                except TelegramError as e:
+                    log.warning(tr("Meldung nicht gesendet: %s"), e)
             return "busy", {}
         if time.monotonic() >= deadline:
             break
@@ -146,6 +186,16 @@ def _release(cfg: Config, mine: dict) -> None:
 
 
 def _run(cfg: Config, tg: Telegram, dry_run: bool, configured: str | None = None) -> int:
+    # Steht ein Neustart bevor, bräche er die Prüfung ab und ihr Ergebnis käme nie an
+    with state.locked(cfg.state_dir) as st:
+        refused = busy.refusal("check", st)
+    if refused:
+        log.info("%s", refused)
+        if dry_run:
+            print(refused)
+            return 1
+        finish(cfg, tg, f"⏸️ <b>{escape(cfg.hostname)}</b>: " + escape(refused))
+        return 0
 
     errors = zypper.refresh()
     if errors:

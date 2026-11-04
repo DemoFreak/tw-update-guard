@@ -35,6 +35,7 @@ class CheckTest(unittest.TestCase):
         ):
             setattr(self, target, mock.patch.object(check.zypper, target, **kwargs).start())
         mock.patch.object(check, "Telegram", return_value=self.tg).start()
+        self.logind = mock.patch.object(check.busy, "shutdown", return_value=check.busy.Shutdown("none")).start()
         self.addCleanup(mock.patch.stopall)
 
     def cfg(self, mode):
@@ -240,6 +241,166 @@ class CheckTest(unittest.TestCase):
             self.assertEqual(st.approved_fingerprint, fingerprint)  # die Freigabe gilt beim nächsten Lauf
             self.assertEqual(st.applying, {})
 
+    def locked_then(self, times, result):
+        """Wie zypper bei belegter Paketverwaltung: `times`-mal Locked, dann `result`."""
+        calls = []
+
+        def call(*args):
+            calls.append(args)
+            if len(calls) <= times:
+                raise check.zypper.Locked("purge-kernels.service (zypper, PID 707)")
+            return result(*args) if callable(result) else result
+        return call
+
+    def test_waits_for_locked_package_management(self):
+        # Nach dem Boot sperrt purge-kernels zypper minutenlang; das ist kein Fehler
+        cfg = self.cfg("auto")
+        self.request(cfg)
+        self.refresh.side_effect = self.locked_then(2, [])
+        with mock.patch.object(check.time, "sleep") as sleep:
+            self.assertEqual(check.run(cfg), 0)
+        self.assertEqual(sleep.call_count, 2)
+        self.apply.assert_called_once()
+        # Ein Hinweis, solange derselbe Besitzer sperrt
+        waits = [t for _, t, _ in self.tg.edited if "Paketverwaltung ist belegt" in t]
+        self.assertEqual(len(waits), 1)
+        self.assertIn("purge-kernels.service", waits[0])
+        with state.locked(cfg.state_dir) as st:
+            self.assertNotIn("error", st.issues)
+
+    def test_lock_beyond_wait_is_no_error(self):
+        cfg = self.cfg("auto")
+        self.request(cfg)
+        fingerprint = routine_plan().fingerprint()
+        with state.locked(cfg.state_dir) as st:
+            st.approved_fingerprint = fingerprint
+        self.dry_run.side_effect = self.locked_then(99, None)
+        with mock.patch.object(check, "LOCK_WAIT", 0), mock.patch.object(check.time, "sleep"):
+            self.assertEqual(check.run(cfg), 0)
+        self.apply.assert_not_called()
+        self.assertIn("seit 0 min belegt durch purge-kernels.service", self.tg.sent[-1])
+        with state.locked(cfg.state_dir) as st:
+            self.assertEqual(st.issues, {})
+            self.assertEqual(st.approved_fingerprint, fingerprint)
+            self.assertEqual(st.check_request, {})
+
+    def test_apply_waits_for_lock_and_shows_progress_again(self):
+        cfg = self.cfg("auto")
+        self.request(cfg)
+        self.apply.side_effect = self.locked_then(1, lambda args: (0, "", routine_plan()))
+        with mock.patch.object(check.time, "sleep"):
+            check.run(cfg)
+        self.assertEqual(self.apply.call_count, 2)
+        texts = [t for _, t, _ in self.tg.edited]
+        wait = next(i for i, t in enumerate(texts) if "Paketverwaltung ist belegt" in t)
+        self.assertTrue(any("spielt das Update ein" in t for t in texts[wait + 1:]))
+        with state.locked(cfg.state_dir) as st:
+            self.assertEqual(st.applying, {})
+            self.assertNotIn("apply-failed", st.issues)
+
+    def test_lock_after_wait_releases_reservation(self):
+        cfg = self.cfg("auto")
+        self.apply.side_effect = self.locked_then(99, None)
+        with mock.patch.object(check, "LOCK_WAIT", 0), mock.patch.object(check.time, "sleep"):
+            self.assertEqual(check.run(cfg), 0)
+        with state.locked(cfg.state_dir) as st:
+            self.assertEqual(st.applying, {})
+            self.assertNotIn("apply-failed", st.issues)
+
+    def test_no_check_while_reboot_is_planned(self):
+        # Der Neustart bräche die Prüfung ab; ihr Ergebnis käme nie an
+        cfg = self.cfg("auto")
+        self.request(cfg)
+        self.logind.return_value = check.busy.Shutdown("planned", "reboot", time.time() + 50)
+        self.assertEqual(check.run(cfg), 0)
+        self.refresh.assert_not_called()
+        self.apply.assert_not_called()
+        self.assertIn("Neustart geplant um", self.tg.edited[-1][1])
+
+    def test_no_apply_when_reboot_gets_planned_during_check(self):
+        cfg = self.cfg("auto")
+        self.request(cfg)
+
+        def dry_run(args):
+            self.logind.return_value = check.busy.Shutdown("planned", "reboot", time.time() + 50)
+            return routine_plan()
+        self.dry_run.side_effect = dry_run
+        self.assertEqual(check.run(cfg), 0)
+        self.apply.assert_not_called()
+        self.assertIn("Nichts eingespielt: Neustart geplant um", self.tg.sent[-1])
+        with state.locked(cfg.state_dir) as st:
+            self.assertEqual(st.applying, {})
+
+    def test_reboot_cancelled_on_console_does_not_block(self):
+        # Nur logind zählt: Ein selbst ausgelöster, dann per shutdown -c abgebrochener Neustart sperrt nicht
+        cfg = self.cfg("auto")
+        with state.locked(cfg.state_dir) as st:
+            st.reboot_requested_at = time.time() - 30
+        check.run(cfg)
+        self.apply.assert_called_once()
+
+    def test_unknown_logind_checks_but_does_not_apply(self):
+        cfg = self.cfg("auto")
+        self.logind.return_value = check.busy.Shutdown("unknown")
+        self.assertEqual(check.run(cfg), 0)
+        self.refresh.assert_called_once()
+        self.apply.assert_not_called()
+        self.assertIn("logind gibt keine Auskunft", self.tg.sent[-1])
+
+    def test_mode_switch_during_lock_wait_is_respected(self):
+        # F18: Nach dem Warten wird neu entschieden, nicht nur zypper wiederholt
+        cfg = self.cfg("auto")
+        self.apply.side_effect = self.locked_then(1, lambda args: (0, "", routine_plan()))
+
+        def switch(seconds):
+            with state.locked(cfg.state_dir) as st:
+                st.mode_override = "observe"
+        with mock.patch.object(check.time, "sleep", side_effect=switch):
+            check.run(cfg)
+        self.assertEqual(self.apply.call_count, 1)  # nur der gesperrte Versuch
+        self.assertEqual(self.refresh.call_count, 2)
+        self.assertIn("Beobachtungsmodus", self.tg.sent[-1])
+
+    def test_plan_changed_during_lock_wait_drops_approval(self):
+        # F18: Eine fremde Paketoperation während des Wartens kann den Plan ändern; die Freigabe galt dem alten
+        cfg = self.cfg("observe")
+        cfg.escalation.quiet_hours = ""
+        old = routine_plan()
+        new = routine_plan()
+        new.sections["to-upgrade"] = [Solvable("bash", "5.3.9-1.1", "x86_64", edition_old="5.3.2-1.1")]
+        with state.locked(cfg.state_dir) as st:
+            st.approved_fingerprint = old.fingerprint()
+        plans = iter([old, new])
+        self.dry_run.side_effect = lambda args: next(plans)
+        self.apply.side_effect = self.locked_then(1, lambda args: (0, "", new))
+        with mock.patch.object(check.time, "sleep"):
+            check.run(cfg)
+        self.assertEqual(self.apply.call_count, 1)  # der neue Plan wird nicht ungefragt eingespielt
+        with state.locked(cfg.state_dir) as st:
+            self.assertEqual(st.approved_fingerprint, "")
+            self.assertEqual(st.applying, {})
+
+    def test_reboot_planned_during_lock_wait_stops(self):
+        cfg = self.cfg("auto")
+        self.refresh.side_effect = self.locked_then(1, [])
+
+        def plan(seconds):
+            self.logind.return_value = check.busy.Shutdown("planned", "reboot", time.time() + 50)
+        with mock.patch.object(check.time, "sleep", side_effect=plan):
+            self.assertEqual(check.run(cfg), 0)
+        self.assertEqual(self.refresh.call_count, 1)
+        self.apply.assert_not_called()
+
+    def test_dry_run_waits_on_console_only(self):
+        # F19: --dry-run sendet nichts, auch nicht die Wartemeldung einer offenen Anfrage
+        cfg = self.cfg("auto")
+        self.request(cfg)
+        self.refresh.side_effect = self.locked_then(1, [])
+        with mock.patch.object(check.time, "sleep"), mock.patch("builtins.print"):
+            self.assertEqual(check.run(cfg, dry_run=True), 0)
+        self.assertEqual((self.tg.sent, self.tg.edited, self.tg.deleted), ([], [], []))
+        self.apply.assert_not_called()
+
     def test_reservation_held_during_apply_and_released(self):
         cfg = self.cfg("auto")
         seen = []
@@ -292,7 +453,7 @@ class CheckTest(unittest.TestCase):
         self.request(cfg)
         self.assertEqual(check.run(cfg), 0)
         self.apply.assert_not_called()
-        self.assertIn("anderer Prüflauf", self.tg.sent[-1])
+        self.assertIn("twguard spielt gerade ein", self.tg.sent[-1])
         with state.locked(cfg.state_dir) as st:
             self.assertEqual(st.applying, held)  # weder übernommen noch gelöst
             self.assertTrue(state.alive(st.applying))

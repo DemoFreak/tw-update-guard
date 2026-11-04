@@ -7,7 +7,7 @@ import logging
 import time
 from html import escape
 
-from . import messages, restarts
+from . import busy, messages, restarts
 from .config import MODES, Config, Escalation
 from .i18n import LANGUAGES, set_language, tr, trn
 from .state import Issue, State
@@ -162,10 +162,29 @@ def issue_buttons(issue: Issue, later: bool = True, services: list[str] | None =
     return [[(tr("🔄 Neu prüfen"), "check"), ("📊 Status", "status")]]
 
 
+def shutdown_planned(st: State) -> bool:
+    """Zuletzt gesehener Stand von logind (`busy.note_shutdown`); nur für die Anzeige."""
+    return st.shutdown.get("state") == "planned"
+
+
+def cancel_button(st: State) -> tuple[str, str]:
+    return (tr("✖️ Neustart abbrechen") if busy.Shutdown(**st.shutdown).reboot
+            else tr("✖️ Herunterfahren abbrechen"), "cancel")
+
+
+def due_issues(st: State, now: float, esc: Escalation) -> list[Issue]:
+    """Fällige Erinnerungen; ein schon geplanter Neustart erinnert nicht mehr an sich selbst."""
+    return [issue for issue in st.issues.values() if is_due(issue, now, esc)
+            and not (issue.kind == "reboot" and shutdown_planned(st))]
+
+
 def status_buttons(st: State) -> Buttons:
     """Schaltflächen der offenen Punkte, dazu Prüfen und Details, wenn es eine Paketliste gibt."""
-    rows = []
+    # Während der Wartezeit brächte „Neu starten“ nichts, Abbrechen dagegen schon
+    rows = [[cancel_button(st)]] if shutdown_planned(st) else []
     for issue in st.issues.values():
+        if issue.kind == "reboot" and shutdown_planned(st):
+            continue
         # Prüfen, Status und Details hat die Statusnachricht ohnehin in der letzten Reihe
         for row in issue_buttons(issue, later=False, services=st.restart_services):
             row = [b for b in row if b[1] not in ("check", "status", "details")]
@@ -184,7 +203,8 @@ def button_kind(data: str) -> str:
         return arg.partition(":")[2]
     if action == "resolved":
         return arg
-    return {"approve": "manual", "details": "manual", "reboot": "reboot", "restart": "services"}.get(action, "")
+    return {"approve": "manual", "details": "manual", "reboot": "reboot", "cancel": "reboot",
+            "restart": "services"}.get(action, "")
 
 
 def observed_buttons(fingerprint: str) -> Buttons:
@@ -210,6 +230,8 @@ def _issue_lines(st: State, now: float, due: list[Issue] = ()) -> list[str]:
     """Je offener Punkt eine Zeile; fällige Erinnerungen (`due`) mit 🔔 und ihrem Text."""
     lines = []
     for issue in st.issues.values():
+        if issue.kind == "reboot" and shutdown_planned(st):
+            continue  # steht als „geplant“ in `_system_lines`
         reminder = any(issue is d for d in due)
         line = ("🔔 " if reminder else "• ") + tr("{title}, seit {age}", title=title(issue.kind),
                                                  age=fmt_age(now - issue.since))
@@ -221,6 +243,20 @@ def _issue_lines(st: State, now: float, due: list[Issue] = ()) -> list[str]:
     return lines
 
 
+def _system_lines(st: State) -> list[str]:
+    """Geplanter Neustart und was seit dem Boot noch nicht abgefragt ist."""
+    lines = []
+    if st.shutdown:
+        lines.append(("🔁 " if shutdown_planned(st) else "❔ ") + busy.planned_text(st.shutdown))
+    if st.unverified:
+        lines.append("❔ " + tr("Seit dem Boot noch nicht abgefragt: {what} (zypper gibt noch keine Auskunft)",
+                               what=", ".join(UNVERIFIED[k]() for k in st.unverified if k in UNVERIFIED)))
+    return lines
+
+
+UNVERIFIED = {"reboot": lambda: tr("Neustartbedarf"), "services": lambda: tr("Dienste mit alten Dateien")}
+
+
 def _last_check(st: State, now: float) -> str:
     if st.last_check_ok:
         return tr("letzte Prüfung vor {age}", age=fmt_age(now - st.last_check_ok))
@@ -229,11 +265,16 @@ def _last_check(st: State, now: float) -> str:
 
 def format_status(host: str, st: State, now: float) -> str:
     pending = tr("ausstehend: {plan}", plan=escape(st.pending_text)) if st.pending_text else ""
-    if not st.issues:
-        if pending:
-            return f"👀 <b>{escape(host)}</b>: {pending} ({_last_check(st, now)})"
-        return f"✅ <b>{escape(host)}</b>: " + tr("nichts offen ({last})", last=_last_check(st, now))
-    return "\n".join([f"<b>{escape(host)}</b>:", *_issue_lines(st, now), *([f"• {pending}"] if pending else [])])
+    lines, system = _issue_lines(st, now), _system_lines(st)
+    if not lines and pending:
+        head = f"👀 <b>{escape(host)}</b>: {pending} ({_last_check(st, now)})"
+    elif not lines:
+        # Ohne Auskunft von zypper ist „nichts offen“ keine Entwarnung
+        head = ("❔" if st.unverified else "✅") + f" <b>{escape(host)}</b>: " + tr("nichts offen ({last})",
+                                                                                  last=_last_check(st, now))
+    else:
+        return "\n".join([f"<b>{escape(host)}</b>:", *lines, *([f"• {pending}"] if pending else []), *system])
+    return "\n".join([head, *system])
 
 
 def format_briefing(host: str, st: State, now: float, observe: bool, kernel: str, uptime: float,
@@ -247,6 +288,7 @@ def format_briefing(host: str, st: State, now: float, observe: bool, kernel: str
         lines = [f"☀️ <b>{escape(host)}</b>: {count}", *_issue_lines(st, now, due)]
     else:
         lines = [f"☀️ <b>{escape(host)}</b>: " + tr("alles in Ordnung")]
+    lines += _system_lines(st)
     last = _last_check(st, now)
     info = [last[0].upper() + last[1:]]
     if observe and st.pending_text:
@@ -340,9 +382,7 @@ def send_due(cfg: Config, st: State, tg: Telegram, now: float | None = None) -> 
     """
     now = now or time.time()
     mark_resolved(cfg, st, tg, now)
-    for issue in list(st.issues.values()):
-        if not is_due(issue, now, cfg.escalation):
-            continue
+    for issue in due_issues(st, now, cfg.escalation):
         try:
             messages.replace(tg, st, f"issue:{issue.kind}", format_issue(cfg.hostname, issue, now, cfg.escalation),
                              buttons=issue_buttons(issue, services=st.restart_services))

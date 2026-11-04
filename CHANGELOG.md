@@ -4,6 +4,29 @@ Published versions of tw-update-guard. Versions in between were development step
 published version. **Upgrade** notes name what you may have to change by hand; `twguard config-diff` shows which
 values in your `config.toml` differ from the defaults.
 
+## 0.9.5 – 2026-11-04
+
+- A locked package management (zypper exit code 7, e.g. `purge-kernels` right after boot) is no longer an
+  error: a check waits up to 30 minutes and names who holds the lock (e.g. `purge-kernels.service`). Once it is
+  free, the check starts over (fresh plan, mode and approval check), since the other operation may have changed
+  the packages; if the lock is still held after 30 minutes, nothing is installed and the next check tries again
+- Whether a reboot or shutdown is scheduled now comes from systemd-logind, so one scheduled or cancelled on the
+  console (`shutdown -r +5`, `shutdown -c`) counts too. While one is scheduled, the status, the briefing and check
+  results show "Reboot scheduled for …" with a "Cancel reboot" button instead of "Reboot pending", there is no
+  reboot reminder, and checks, approvals, installs, `/update`, service restarts and a second reboot are refused.
+  If logind does not answer, actions that change the system are refused, viewing keeps working
+- Reboots, installs, service restarts and self-updates (also `twguard self-update` on the console) exclude each
+  other through one rule table; a reboot is refused while the package management is locked. A self-update
+  started by the bot is carried out by exactly one process; a second `twguard self-update` meanwhile is refused
+- After a boot (detected by the boot ID, not by a bot restart), pending reboot and service items from before are
+  closed; until zypper answers again, the status says "not yet queried" instead of "nothing open". A service
+  restart cut off by the boot is reported as interrupted. The "is back" message names who still holds the
+  package lock and is completed once it is free; it is kept and retried if Telegram is unreachable at start
+- The status shows who currently holds the package lock
+- `twguard check --dry-run` no longer edits a Telegram message while waiting for the package lock
+
+**Upgrade:** none. The first bot start after the update records the boot ID and closes nothing.
+
 ## 0.9.4 – 2026-11-04
 
 - Removing a package from `watch` now always needs approval, even if it also matches `routine_removals`

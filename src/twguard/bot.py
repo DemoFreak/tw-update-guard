@@ -16,21 +16,24 @@ from dataclasses import dataclass
 from html import escape
 from pathlib import Path
 
-from . import COMMIT, details, messages, ota, restarts, state, zypper
+from . import COMMIT, busy, details, messages, ota, restarts, state, zypper
 from .config import MODES, Config
 from .i18n import EN, LANGUAGES, current, set_language, tr
 from .notify import (adopt_migration, button_kind, clip, fmt_age, format_briefing, format_issue, format_status,
-                     issue_buttons, is_due, status_buttons, mark_resolved, minutes_of_day, note_reminded, send_due, stamp, title)
+                     due_issues, issue_buttons, status_buttons, mark_resolved, minutes_of_day, note_reminded,
+                     send_due, stamp, title)
 from .telegram import Buttons, Telegram, TelegramError
 
 log = logging.getLogger(__name__)
 
-CHECK_UNIT = "twguard-check.service"
+CHECK_UNIT = busy.CHECK_UNIT
 RPMDB_PATHS = (Path("/usr/lib/sysimage/rpm/rpmdb.sqlite"), Path("/var/lib/rpm/rpmdb.sqlite"))
 # Ältere Befehle (z. B. nach Ausfall oder Neustart) werden nicht nachgeholt
 MAX_COMMAND_AGE = 600
 TICK_SECONDS = 60
 REBOOT_CHECK_SECONDS = 1800
+# So lange ergänzt der Bot die Meldung „wieder da“, sobald die Paketverwaltung nach dem Boot frei ist
+MAINTENANCE_MAX = 2 * 3600
 # So lange wird höchstens auf das Ende eingereihter Dienst-Neustarts gewartet
 RESTART_TIMEOUT = 900
 # Nach einem Fehler bei getUpdates: erst kurz, dann länger warten
@@ -192,17 +195,49 @@ class Bot:
             st.mode_override = ""
             self.offset = st.tg_offset
             st.first_seen = st.first_seen or time.time()
-            if st.reboot_requested_at and boot_time() > st.reboot_requested_at:
-                st.reboot_requested_at = 0.0
-                text = tr("🟢 <b>{host}</b> ist wieder da (Kernel {kernel}).", host=self.host, kernel=escape(os.uname().release))
-                previous = st.messages.pop("reboot", None)
-                if previous:
-                    messages.edit_or_send(self.tg, previous, text)
-                else:
-                    self._send(text)
+            current = state.boot_id()
+            # Bis 0.9.4 gab es keine Boot-ID im Zustand; dann zählt nur ein selbst ausgelöster Neustart
+            booted = (st.boot_id != current if st.boot_id
+                      else bool(st.reboot_requested_at) and boot_time() > st.reboot_requested_at)
+            st.boot_id = current
+            if booted:
+                self.after_boot(st)
             st.bot_commit = COMMIT
             self._report_update(st)
+        self.deliver_outbox()
         self.check_reboot()
+
+    def after_boot(self, st: state.State) -> None:
+        """Einmal nach jedem Boot (nicht bei einem bloßen Neustart des Bots).
+
+        Neustart und Dienste von vorher sind damit erledigt; ob wieder etwas ansteht, sagt erst zypper, und
+        das kann nach einem Kernel-Wechsel minutenlang gesperrt sein (purge-kernels). Bis dahin zeigt der
+        Status „noch nicht abgefragt“ statt Entwarnung. Rückmeldungen gehen über die Warteschlange, damit
+        ein Telegram-Fehler beim Start nichts verliert.
+        """
+        for kind in ("reboot", "services"):
+            st.resolve(kind)
+        st.restart_services = []
+        st.unverified = ["reboot", "services"]
+        st.reboot_planning = {}
+        busy.note_shutdown(st, busy.Shutdown("none"))
+        mark_resolved(self.cfg, st, self.tg)
+        now = time.time()
+        if st.restart_request:
+            request, st.restart_request = st.restart_request, {}
+            st.outbox.append({"chat_id": request.get("chat_id"), "message_id": request.get("message_id"), "at": now,
+                              "loud": True, "text": f"⚠️ <b>{self.host}</b>: " + tr(
+                                  "Der Neustart von {services} wurde durch den Neustart des Servers unterbrochen; "
+                                  "das Ergebnis ist unbekannt.", services=escape(", ".join(request.get("services", []))))})
+        if st.reboot_requested_at:
+            st.reboot_requested_at = 0.0
+            text = tr("🟢 <b>{host}</b> ist wieder da (Kernel {kernel}).", host=self.host, kernel=escape(os.uname().release))
+            # Nach einem Kernel-Wechsel räumt purge-kernels minutenlang auf und sperrt zypper
+            holder = zypper.lock_holder()
+            note = "\n" + tr("🔒 Paketverwaltung noch belegt: {holder}. Prüfen und Einspielen warten darauf.",
+                             holder=escape(holder)) if holder else ""
+            st.outbox.append({**st.messages.pop("reboot", {}), "at": now, "loud": False, "text": text + note,
+                              **({"maintenance": text} if holder else {})})
 
     def process(self, update: dict) -> None:
         # Offset vor der Ausführung sichern, damit z. B. /reboot nach dem Neustart nicht erneut greift
@@ -232,7 +267,9 @@ class Bot:
     def tick(self) -> None:
         now = self.last_tick = time.time()
         mtime = self._rpmdb_mtime()
+        shutdown = busy.shutdown()
         with state.locked(self.cfg.state_dir) as st:
+            busy.note_shutdown(st, shutdown)
             rpmdb_changed = bool(st.rpmdb_mtime) and mtime != st.rpmdb_mtime
             st.rpmdb_mtime = mtime
             pending = bool(st.pending_text) or any(k in st.issues for k in ("manual", "apply-failed"))
@@ -245,7 +282,8 @@ class Bot:
             self.check_reboot()
 
         self.sync_migration()
-        self.deliver_restart_reports()
+        self.deliver_outbox()
+        self.watch_maintenance(now)
         with state.locked(self.cfg.state_dir) as st:
             base = st.last_check_ok or st.first_seen
             stale = base and now - base > self.cfg.escalation.stale_after_hours * 3600
@@ -273,7 +311,7 @@ class Bot:
             if st.last_briefing_day == today:
                 return
             # Eine jetzt fällige Erinnerung kommt im Briefing mit ihren Schaltflächen, nicht als zweite Nachricht
-            due = [issue for issue in st.issues.values() if is_due(issue, now, self.cfg.escalation)]
+            due = due_issues(st, now, self.cfg.escalation)
             text = format_briefing(self.cfg.hostname, st, now, self.cfg.observe,
                                    os.uname().release, now - boot_time(), due)
             buttons = [row for issue in due for row in issue_buttons(issue, services=st.restart_services)]
@@ -297,6 +335,26 @@ class Bot:
                     messages.retire(self.tg, report, tr("✅ eingespielt, siehe Briefing"))
             st.reports = []
 
+    def watch_maintenance(self, now: float) -> None:
+        """Ist die Paketverwaltung nach dem Boot wieder frei, die Meldung „wieder da“ ergänzen und nachfragen."""
+        with state.locked(self.cfg.state_dir) as st:
+            entry = dict(st.maintenance)
+        if not entry:
+            return
+        if zypper.lock_holder():
+            if now - entry.get("at", 0) < MAINTENANCE_MAX:
+                return
+            # Hängt etwas länger, sagt es der Status; die Meldung soll nicht ewig „belegt“ behaupten
+            text = entry["text"] + "\n" + tr("🔒 Paketverwaltung seit über {hours} h belegt, siehe /status.",
+                                             hours=MAINTENANCE_MAX // 3600)
+        else:
+            text = entry["text"] + "\n" + tr("✅ Paketverwaltung wieder frei ({when}).", when=stamp(now))
+        messages.edit(self.tg, entry, text)
+        with state.locked(self.cfg.state_dir) as st:
+            st.maintenance = {}
+        # Jetzt antwortet zypper wieder: Neustart und Dienste nicht erst in 30 min abgleichen
+        self.check_reboot()
+
     def check_reboot(self) -> None:
         self.last_reboot_check = time.time()
         self.check_services()
@@ -312,6 +370,8 @@ class Bot:
         if needed is None:
             return
         with state.locked(self.cfg.state_dir) as st:
+            if "reboot" in st.unverified:
+                st.unverified.remove("reboot")
             if needed and "reboot" not in st.issues:
                 issue, _ = st.open_issue("reboot", tr("zypper needs-rebooting meldet einen ausstehenden Neustart."))
                 if shown:
@@ -322,12 +382,14 @@ class Bot:
 
     def check_services(self) -> None:
         # Während twguard selbst einspielt, ändert sich die Liste noch; der Prüflauf gleicht sie am Ende ab
-        if self._check_running():
+        if busy.check_running():
             return
         found = zypper.services_needing_restart()
         if found is None:
             return
         with state.locked(self.cfg.state_dir) as st:
+            if "services" in st.unverified:
+                st.unverified.remove("services")
             restarts.note(st, found, self.cfg.services.exclude)
 
     def watch_restart(self) -> None:
@@ -359,9 +421,9 @@ class Bot:
             st.restart_request = {}
             if found is not None:
                 restarts.note(st, found, self.cfg.services.exclude)
-            st.restart_reports.append({"chat_id": request["chat_id"], "message_id": request["message_id"],
+            st.outbox.append({"chat_id": request["chat_id"], "message_id": request["message_id"],
                                        "at": time.time(), "text": text, "loud": loud})
-        self.deliver_restart_reports()
+        self.deliver_outbox()
 
     def _report_overdue(self, request: dict, overdue: list[str]) -> None:
         """Einmal warnen und weiter beobachten: Der Auftrag besteht noch und kann auch noch scheitern."""
@@ -372,23 +434,28 @@ class Bot:
             if st.restart_request:
                 st.restart_request["overdue"] = True
             # Ohne message_id: Die Wartemeldung bleibt für das endgültige Ergebnis stehen
-            st.restart_reports.append({"chat_id": request["chat_id"], "at": time.time(), "text": text, "loud": True})
-        self.deliver_restart_reports()
+            st.outbox.append({"chat_id": request["chat_id"], "at": time.time(), "text": text, "loud": True})
+        self.deliver_outbox()
 
-    def deliver_restart_reports(self) -> None:
+    def deliver_outbox(self) -> None:
         """Ergebnisse bleiben gespeichert, bis Telegram sie angenommen hat; `tick` versucht es erneut."""
         with state.locked(self.cfg.state_dir) as st:
-            if not st.restart_reports:
+            if not st.outbox:
                 return
-            kept = [report for report in st.restart_reports if not self._deliver_restart_report(report)]
-            delivered = len(kept) < len(st.restart_reports)
-            st.restart_reports = kept
+            kept = [report for report in st.outbox if not self._deliver_one(st, report)]
+            delivered = len(kept) < len(st.outbox)
+            st.outbox = kept
             if delivered:
                 send_due(self.cfg, st, self.tg)
 
-    def _deliver_restart_report(self, report: dict) -> bool:
+    def _deliver_one(self, st: state.State, report: dict) -> bool:
         if not report["loud"]:
-            return messages.edit_or_send(self.tg, report, report["text"]) is not None
+            shown = messages.edit_or_send(self.tg, report, report["text"])
+            if shown and report.get("maintenance"):
+                # „wieder da“ bei belegter Paketverwaltung: ergänzen, sobald sie frei ist (watch_maintenance)
+                st.maintenance = {"chat_id": shown["chat_id"], "message_id": shown["message_id"], "at": report["at"],
+                                  "text": report["maintenance"]}
+            return shown is not None
         # Ein gescheiterter Dienst steht nicht mehr in `zypper ps`; nur diese Meldung weist auf ihn hin
         try:
             self.tg.send(report["text"], chat_id=report["chat_id"])
@@ -432,15 +499,6 @@ class Bot:
             lines.append(line("⚠️", tr("Ergebnis des Neustarts unbekannt, systemd gab keine Auskunft: {services}",
                                        services=join(list(unsettled)))))
         return "\n".join(lines), bool(stopped or rejected or unsettled) or found is None
-
-    def _check_running(self) -> bool:
-        """Läuft der Prüflauf? Als oneshot steht er währenddessen auf „activating“, nicht „active“."""
-        try:
-            p = subprocess.run(["systemctl", "is-active", CHECK_UNIT], capture_output=True, text=True,
-                               timeout=restarts.SYSTEMCTL_TIMEOUT)
-        except (OSError, subprocess.TimeoutExpired):
-            return True
-        return p.stdout.strip() in ("active", "activating", "reloading", "deactivating")
 
     def start_check(self) -> None:
         # Der Takt fragt nur alle 30 min; ein ausstehender Neustart soll schon im Ergebnis stehen
@@ -506,8 +564,14 @@ class Bot:
     def status_view(self) -> tuple[str, Buttons]:
         # Nicht auf den Takt warten: Der Status soll einen ausstehenden Neustart gleich mit Knopf zeigen
         self.update_reboot(shown=True)
+        shutdown = busy.shutdown()
         with state.locked(self.cfg.state_dir) as st:
+            busy.note_shutdown(st, shutdown)
             text, buttons = format_status(self.cfg.hostname, st, time.time()), status_buttons(st)
+        holder = zypper.lock_holder()
+        if holder:
+            text += "\n" + tr("🔒 Paketverwaltung belegt: {holder}. Prüfen und Einspielen warten darauf.",
+                              holder=escape(holder))
         if self.cfg.observe:
             text += f"\n<i>{tr('Beobachtungsmodus: Updates werden nur gemeldet.')}</i>"
         if self.cfg.mode != self.configured_mode:
@@ -569,6 +633,9 @@ class Bot:
 
     def approve(self, fingerprint: str = "") -> str:
         """Freigabe erteilen; Rückgabe: Fehlertext oder leer. Mit Fingerabdruck nur für genau diesen Stand."""
+        refused = self.refused("approve")
+        if refused:
+            return refused
         with state.locked(self.cfg.state_dir) as st:
             issue = st.issues.get("manual")
             if issue is None and fingerprint and fingerprint == st.observed_fingerprint:
@@ -592,7 +659,16 @@ class Bot:
                   "das Ergebnis erscheint hier, meist nach ein bis zwei Minuten.", host=self.host)
 
     def cmd_check(self, args: list[str], addressed: bool = False) -> Out:
+        refused = self.refused("check")
+        if refused:
+            return Out(refused, ttl=SHORT)
         return Out(self.checking_text(), topic="status", start_check=True)
+
+    def refused(self, action: str) -> str:
+        """Ablehnung nach `busy` mit Servername, leer heißt frei. Nur Vorabprüfung, reserviert nichts."""
+        with state.locked(self.cfg.state_dir) as st:
+            text = busy.refusal(action, st)
+        return f"⏸️ <b>{self.host}</b>: {escape(text)}" if text else ""
 
     def cmd_later(self, args: list[str], addressed: bool = False) -> Out:
         hours = parse_duration(args[0]) if args else 24
@@ -624,13 +700,31 @@ class Bot:
         return "\n".join(lines)
 
     def reboot(self) -> str:
-        """Neustart in einer Minute planen; Rückgabe: Fehlertext oder leer."""
-        p = subprocess.run(["shutdown", "-r", "+1", "twguard: Neustart per Telegram"],
-                           capture_output=True, text=True)
+        """Neustart in einer Minute planen; Rückgabe: Fehlertext oder leer.
+
+        Prüfen und Reservieren unter derselben Sperre wie das Einspielen: Ein Prüflauf, der dazwischen
+        reservieren will, sieht `reboot_planning` und spielt nichts ein; danach sieht er den Plan in logind.
+        """
+        with state.locked(self.cfg.state_dir) as st:
+            text = busy.refusal("reboot", st)
+            if not text:
+                st.reboot_planning = mine = state.holder()
+        if text:
+            return f"⏸️ <b>{self.host}</b>: {escape(text)}"
+        try:
+            p = subprocess.run(["shutdown", "-r", "+1", "twguard: Neustart per Telegram"],
+                               capture_output=True, text=True)
+        except OSError as e:
+            p = subprocess.CompletedProcess([], 1, "", str(e))
+        shutdown = busy.shutdown()
+        with state.locked(self.cfg.state_dir) as st:
+            if st.reboot_planning == mine:
+                st.reboot_planning = {}
+            busy.note_shutdown(st, shutdown)
+            if not p.returncode:
+                st.reboot_requested_at = time.time()
         if p.returncode:
             return tr("Neustart fehlgeschlagen: {error}", error=escape(p.stderr.strip()))
-        with state.locked(self.cfg.state_dir) as st:
-            st.reboot_requested_at = time.time()
         return ""
 
     def reboot_view(self) -> tuple[str, Buttons]:
@@ -650,11 +744,16 @@ class Bot:
         Ist der Neustart weiter nötig, bietet die Nachricht ihn wieder an wie die Erinnerung.
         """
         p = subprocess.run(["shutdown", "-c"], capture_output=True, text=True)
+        shutdown = busy.shutdown()
         with state.locked(self.cfg.state_dir) as st:
-            st.reboot_requested_at = 0.0
+            busy.note_shutdown(st, shutdown)
+            # Nur ein tatsächlich aufgehobener Plan gilt als abgebrochen
+            if shutdown.state != "planned":
+                st.reboot_requested_at = 0.0
             issue = st.issues.get("reboot")
-        if p.returncode:
-            return tr("Abbrechen fehlgeschlagen: {error}", error=escape(p.stderr.strip())), []
+        if p.returncode or shutdown.state == "planned":
+            error = p.stderr.strip() or busy.planned_text(shutdown)
+            return tr("Abbrechen fehlgeschlagen: {error}", error=escape(error)), [[(tr("✖️ Neustart abbrechen"), "cancel")]]
         return (tr("✖️ <b>{host}</b>: Neustart abgebrochen.", host=self.host),
                 issue_buttons(issue) if issue else [])
 
@@ -668,9 +767,9 @@ class Bot:
 
     def cmd_update(self, args: list[str], addressed: bool = False) -> Out:
         """Neuen Stand holen und zur Bestätigung anbieten."""
-        with state.locked(self.cfg.state_dir) as st:
-            if st.update_request:
-                return Out(tr("<b>{host}</b>: Ein Update läuft bereits.", host=self.host), ttl=SHORT)
+        refused = self.refused("update")
+        if refused:
+            return Out(refused, ttl=SHORT)
         try:
             pending = ota.check_remote(self.cfg.update)
         except ota.UpdateError as e:
@@ -700,8 +799,9 @@ class Bot:
         if not pending.commits:
             return tr("<b>{host}</b>: twguard ist schon aktuell.", host=self.host)
         with state.locked(self.cfg.state_dir) as st:
-            if st.update_request:
-                return tr("Ein Update läuft bereits.")
+            refused = busy.refusal("update", st)
+            if refused:
+                return f"⏸️ <b>{self.host}</b>: {escape(refused)}"
             messages.release(st, pressed)
             st.update_request = {"commit": commit, "chat_id": pressed["chat_id"],
                                  "message_id": pressed["message_id"], "at": time.time()}
@@ -923,6 +1023,10 @@ class Bot:
                 st.manual_shown = fingerprint
 
     def press_check(self, cq: dict, pressed: dict, arg: str) -> None:
+        refused = self.refused("check")
+        if refused:
+            self._answer(cq, plain(refused), alert=True)
+            return
         self._answer(cq, tr("Prüfung läuft …"))
         with state.locked(self.cfg.state_dir) as st:
             on_status = messages.same(st.messages.get("status", {}), pressed)
@@ -956,9 +1060,8 @@ class Bot:
     def press_cancel(self, cq: dict, pressed: dict, arg: str) -> None:
         text, buttons = self.cancel()
         self._answer(cq, plain(text))
-        with state.locked(self.cfg.state_dir) as st:
-            messages.release(st, pressed)
-        messages.edit(self.tg, pressed, text, buttons)
+        # Aus Status oder Briefing: eigene Nachricht, die übrigen Punkte bleiben; die alte Neustart-Meldung geht
+        self._own(cq, pressed, "reboot", text, buttons, topic="reboot")
 
     def press_update(self, cq: dict, pressed: dict, commit: str) -> None:
         error = self.update_go(commit, pressed)
@@ -979,16 +1082,12 @@ class Bot:
 
     def press_restart(self, cq: dict, pressed: dict, arg: str) -> None:
         """Einen Dienst oder (`*:<Kennung>`) genau die gezeigte Liste neu starten."""
+        refused = self.refused("restart")
+        if refused:
+            self._answer(cq, plain(refused), alert=True)
+            return
         with state.locked(self.cfg.state_dir) as st:
-            running, listed = bool(st.restart_request), list(st.restart_services)
-            updating = bool(st.update_request)
-            applying = state.alive(st.applying)
-        if running or updating:
-            self._answer(cq, tr("Ein Neustart läuft bereits.") if running else tr("Ein Update läuft bereits."), alert=True)
-            return
-        if applying or self._check_running():
-            self._answer(cq, tr("Gerade läuft ein Prüflauf, nichts neu gestartet. Bitte danach erneut."), alert=True)
-            return
+            listed = list(st.restart_services)
         found = zypper.services_needing_restart()
         if found is None:
             self._answer(cq, tr("zypper ps gab keine Auskunft, nichts neu gestartet."), alert=True)
@@ -1003,12 +1102,12 @@ class Bot:
         # Reservieren, bevor etwas angezeigt wird: Ein Prüflauf, der inzwischen einspielt, hat Vorrang.
         # Unter derselben Sperre prüft der Prüflauf restart_request, einer von beiden gewinnt.
         with state.locked(self.cfg.state_dir) as st:
-            applying = state.alive(st.applying)
-            if not applying:
+            refused = busy.refusal("restart", st)
+            if not refused:
                 st.restart_request = {"chat_id": pressed["chat_id"], "message_id": None,
                                       "at": time.time(), "services": names}
-        if applying:
-            self._answer(cq, tr("Gerade läuft ein Prüflauf, nichts neu gestartet. Bitte danach erneut."), alert=True)
+        if refused:
+            self._answer(cq, plain(refused), alert=True)
             return
         # Erst alles anzeigen und festhalten: Ist der Bot selbst dabei, wird er gleich beendet
         try:
