@@ -3,8 +3,6 @@ import unittest
 
 import testlang  # noqa: F401
 from twguard import messages
-from twguard.config import Config
-from twguard.notify import send_due
 from twguard.state import State
 
 from fakes import FakeTelegram
@@ -35,47 +33,18 @@ class MessagesTest(unittest.TestCase):
 
     def test_claim_moves_message_between_topics(self):
         msg = messages.ref(self.tg.send("x"))
-        messages.claim(self.st, "status", msg)
-        messages.claim(self.st, "issue:manual", msg)
-        self.assertNotIn("status", self.st.messages)
-        self.assertEqual(self.st.messages["issue:manual"], msg)
+        messages.claim(self.st, "language", msg)
+        messages.claim(self.st, "mode", msg)
+        self.assertNotIn("language", self.st.messages)
+        self.assertEqual(self.st.messages["mode"], msg)
 
     def test_ephemeral_deleted_after_ttl(self):
         sent = self.tg.send("kurz")
         messages.expire(self.st, sent, 60)
-        messages.cleanup(self.tg, self.st, time.time() + 30)
-        self.assertEqual(self.tg.deleted, [])
-        messages.cleanup(self.tg, self.st, time.time() + 61)
-        self.assertEqual(self.tg.deleted, [sent["message_id"]])
+        self.assertEqual(messages.expired(self.st, time.time() + 30), [])
+        due = messages.expired(self.st, time.time() + 61)
+        self.assertEqual([m["message_id"] for m in due], [sent["message_id"]])
         self.assertEqual(self.st.ephemeral, [])
-
-
-class ReminderTest(unittest.TestCase):
-    def setUp(self):
-        self.tg = FakeTelegram()
-        self.st = State()
-        self.cfg = Config(language="de", hostname="server1")
-        self.cfg.escalation.quiet_hours = ""
-
-    def test_reminder_replaces_previous_reminder(self):
-        now = time.time()
-        self.st.open_issue("reboot", "Kernel", now=now - 100 * 3600)
-        send_due(self.cfg, self.st, self.tg, now)
-        send_due(self.cfg, self.st, self.tg, now + 8 * 3600)
-        self.assertEqual(len(self.tg.sent), 2)
-        self.assertEqual(self.tg.deleted, [101])
-        self.assertEqual(self.st.messages["issue:reboot"]["message_id"], 102)
-
-    def test_resolved_issue_stays_as_done(self):
-        self.st.open_issue("reboot", "Kernel")
-        send_due(self.cfg, self.st, self.tg)
-        self.st.resolve("reboot")
-        send_due(self.cfg, self.st, self.tg)
-        message_id, text, buttons = self.tg.edited[0]
-        self.assertEqual(message_id, 101)
-        self.assertIn("erledigt", text)
-        self.assertIsNone(buttons)
-        self.assertNotIn("issue:reboot", self.st.messages)
 
 
 if __name__ == "__main__":

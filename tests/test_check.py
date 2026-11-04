@@ -7,7 +7,7 @@ from pathlib import Path
 from unittest import mock
 
 import testlang  # noqa: F401
-from twguard import check, state
+from twguard import check, panel, state
 from twguard.config import Config
 from twguard.i18n import set_language
 from twguard.zypper import Plan, Solvable
@@ -25,21 +25,33 @@ class CheckTest(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
         self.addCleanup(self.tmp.cleanup)
-        self.tg = FakeTelegram()
         for target, kwargs in (
             ("refresh", {"return_value": []}),
             ("dry_run", {"side_effect": lambda args: routine_plan()}),
             ("apply", {"side_effect": lambda args: (0, "", routine_plan())}),
             ("needs_rebooting", {"return_value": False}),
-            ("services_needing_restart", {"return_value": []}),
         ):
             setattr(self, target, mock.patch.object(check.zypper, target, **kwargs).start())
-        mock.patch.object(check, "Telegram", return_value=self.tg).start()
+        self.survey = mock.patch.object(check.restarts, "survey", return_value=check.restarts.Survey([], {})).start()
         self.logind = mock.patch.object(check.busy, "shutdown", return_value=check.busy.Shutdown("none")).start()
         self.addCleanup(mock.patch.stopall)
 
     def cfg(self, mode):
         return Config(language="de", token="x", chat_id=-100, hostname="server1", mode=mode, state_dir=Path(self.tmp.name))
+
+    def outbox(self) -> list[dict]:
+        """Der Prüflauf sendet nichts selbst; Ergebnisse stehen als Ereignis im Zustand."""
+        return state.load(Path(self.tmp.name) / "state.json").outbox
+
+    def events(self) -> list[str]:
+        return [e["text"] for e in self.outbox()]
+
+    def activity(self) -> dict:
+        return state.load(Path(self.tmp.name) / "state.json").activity
+
+    def test_sends_nothing_itself(self):
+        # Ein Sender je Server: Zugestellt wird alles vom Bot
+        self.assertFalse(hasattr(check, "Telegram"))
 
     def test_changed_critical_plan_is_a_new_offer(self):
         cfg = self.cfg("auto")
@@ -50,17 +62,19 @@ class CheckTest(unittest.TestCase):
         self.dry_run.side_effect = lambda args: plan_a
         plan_a.packages_to_change = plan_b.packages_to_change = 2
         check.run(cfg)
-        self.assertEqual(len(self.tg.sent), 1)
         with state.locked(cfg.state_dir) as st:
+            st.issues["manual"].last_notified = time.time()
             st.issues["manual"].snoozed_until = time.time() + 3600
             st.issues["manual"].snooze_count = 2
-        check.run(cfg)  # gleicher Plan: keine neue Meldung
-        self.assertEqual(len(self.tg.sent), 1)
+        check.run(cfg)  # gleicher Plan: Aufschub bleibt
+        with state.locked(cfg.state_dir) as st:
+            self.assertEqual(st.issues["manual"].snooze_count, 2)
         self.dry_run.side_effect = lambda args: plan_b
         check.run(cfg)
-        self.assertEqual(len(self.tg.sent), 2)
         with state.locked(cfg.state_dir) as st:
-            self.assertEqual(st.manual_shown, plan_b.fingerprint())
+            # Neuer Plan: sofort fällig (die Zustandsnachricht kommt mit Ton), der Aufschub galt dem alten
+            self.assertEqual(st.issues["manual"].fingerprint, plan_b.fingerprint())
+            self.assertEqual(st.issues["manual"].last_notified, 0.0)
             self.assertEqual(st.issues["manual"].snoozed_until, 0.0)
             self.assertEqual(st.issues["manual"].snooze_count, 0)
 
@@ -68,17 +82,19 @@ class CheckTest(unittest.TestCase):
         cfg = self.cfg("observe")
         check.run(cfg)
         self.apply.assert_not_called()
-        self.assertIn("Beobachtungsmodus", self.tg.sent[0])
-        # gleicher Stand am nächsten Tag: keine erneute Meldung
+        self.assertIn("im Beobachtungsmodus nicht", self.events()[0])
+        # gleicher Stand am nächsten Tag: kein weiteres Ereignis, er steht in der Zustandsnachricht
         check.run(cfg)
-        self.assertEqual(len(self.tg.sent), 1)
+        self.assertEqual(len(self.events()), 1)
 
     def test_observe_applies_after_approval(self):
         cfg = self.cfg("observe")
         check.run(cfg)
         fingerprint = routine_plan().fingerprint()
-        self.assertEqual(self.tg.buttons[0][0][0], ("▶️ Diesmal einspielen", f"approve:{fingerprint}"))
         with state.locked(cfg.state_dir) as st:
+            self.assertEqual(st.observed_fingerprint, fingerprint)
+            self.assertEqual(panel.render(cfg, st, time.time()).buttons[0][0],
+                             ("▶️ Diesmal einspielen", f"approve:{fingerprint}"))
             st.approved_fingerprint = fingerprint
         check.run(cfg)
         self.apply.assert_called_once()
@@ -89,7 +105,7 @@ class CheckTest(unittest.TestCase):
         with state.locked(cfg.state_dir) as st:
             st.language_override = "en"
         check.run(cfg)
-        self.assertIn("Observation mode", self.tg.sent[0])
+        self.assertIn("not in observe mode", self.events()[0])
 
     def test_observe_remembers_pending_until_applied(self):
         cfg = self.cfg("observe")
@@ -103,36 +119,46 @@ class CheckTest(unittest.TestCase):
 
     def request(self, cfg, age=0):
         with state.locked(cfg.state_dir) as st:
-            st.check_request = {"chat_id": -100, "message_id": 55, "at": time.time() - age}
+            st.check_request = {"at": time.time() - age}
 
-    def test_requested_check_edits_waiting_message(self):
+    def test_requested_check_reports_result_as_event(self):
         cfg = self.cfg("observe")
         self.request(cfg)
         check.run(cfg)
-        self.assertEqual(self.tg.sent, [])  # keine zweite Meldung neben dem Ergebnis
-        message_id, text, buttons = self.tg.edited[0]
-        self.assertEqual(message_id, 55)
-        self.assertIn("Beobachtungsmodus", text)
-        self.assertTrue(buttons)
+        self.assertEqual(len(self.events()), 1)
+        self.assertIn("im Beobachtungsmodus nicht", self.events()[0])
         with state.locked(cfg.state_dir) as st:
             self.assertEqual(st.check_request, {})
 
-    def test_requested_check_shows_progress_before_applying(self):
+    def test_phases_shown_while_running_and_cleared_after(self):
         cfg = self.cfg("auto")
-        self.request(cfg)
-        shown = []
-        self.apply.side_effect = lambda args: (shown.extend(self.tg.edited), (0, "", routine_plan()))[1]
+        seen = []
+        record = lambda result: lambda *args: (seen.append(self.activity()["check"]["phase"]), result)[1]
+        self.refresh.side_effect = record([])
+        self.dry_run.side_effect = record(routine_plan())
+        self.apply.side_effect = record((0, "", routine_plan()))
         check.run(cfg)
-        # Während zypper läuft, steht schon „spielt ein“ in der Wartemeldung, danach das Ergebnis
-        self.assertEqual(len(shown), 1)
-        self.assertEqual(shown[0][0], 55)
-        self.assertIn("spielt das Update ein", shown[0][1])
-        self.assertEqual(self.tg.edited[-1][0], 55)
-        self.assertNotIn("spielt das Update ein", self.tg.edited[-1][1])
+        # Während zypper einspielt, steht schon „spielt ein“ samt Umfang in der Zustandsnachricht
+        self.assertEqual(seen, ["refresh", "dry-run", "apply"])
+        self.assertEqual(self.activity(), {})
 
-    def test_timer_run_sends_no_progress(self):
+    def test_phase_carries_own_process(self):
+        cfg = self.cfg("auto")
+        self.apply.side_effect = lambda args: (seen.append(self.activity()["check"]), (0, "", routine_plan()))[1]
+        seen = []
+        check.run(cfg)
+        self.assertEqual(seen[0]["pid"], os.getpid())
+        self.assertIn("Paket", seen[0]["detail"])
+
+    def test_timer_run_reports_routine_quietly(self):
         check.run(self.cfg("auto"))
-        self.assertFalse([text for _, text, _ in self.tg.edited if "spielt das Update ein" in text])
+        self.assertEqual([e["loud"] for e in self.outbox()], [False])
+        self.assertIn("1 Paket aktualisiert", self.events()[0])
+
+    def test_timer_run_without_updates_stays_silent(self):
+        self.dry_run.side_effect = lambda args: Plan(raw="<stream/>")
+        check.run(self.cfg("auto"))
+        self.assertEqual(self.events(), [])
 
     def test_mode_from_bot_applies_to_check(self):
         cfg = self.cfg("observe")
@@ -167,7 +193,7 @@ class CheckTest(unittest.TestCase):
         with state.locked(cfg.state_dir) as st:
             self.assertEqual(st.mode_override, "observe")
         self.apply.assert_not_called()
-        self.assertIn("Beobachtungsmodus", self.tg.sent[0])
+        self.assertIn("im Beobachtungsmodus nicht", self.events()[0])
 
     def test_mode_auto_during_dry_run_applies(self):
         self.switch_during("dry_run", "observe", "auto")
@@ -216,14 +242,17 @@ class CheckTest(unittest.TestCase):
     def test_apply_waits_for_service_restart(self):
         cfg = self.cfg("auto")
         with state.locked(cfg.state_dir) as st:
-            st.restart_request = {"chat_id": -100, "message_id": 9, "at": time.time(), "services": ["postfix"]}
+            st.restart_request = {"at": time.time(), "services": ["postfix"]}
 
         def restart_done(seconds):
+            phases.append(self.activity()["check"]["phase"])
             with state.locked(cfg.state_dir) as st:
                 st.restart_request = {}
+        phases = []
         with mock.patch.object(check.time, "sleep", side_effect=restart_done) as sleep:
             check.run(cfg)
         sleep.assert_called_once()
+        self.assertEqual(phases, ["wait-restart"])
         self.apply.assert_called_once()
 
     def test_no_apply_while_service_restart_runs(self):
@@ -231,12 +260,13 @@ class CheckTest(unittest.TestCase):
         self.request(cfg)
         fingerprint = routine_plan().fingerprint()
         with state.locked(cfg.state_dir) as st:
-            st.restart_request = {"chat_id": -100, "message_id": 9, "at": time.time(), "services": ["postfix"]}
+            st.restart_request = {"at": time.time(), "services": ["postfix"]}
             st.approved_fingerprint = fingerprint
         with mock.patch.object(check, "RESTART_WAIT", 0), mock.patch.object(check.time, "sleep"):
             self.assertEqual(check.run(cfg), 0)
         self.apply.assert_not_called()
-        self.assertIn("nicht eingespielt", self.tg.sent[-1])
+        self.assertIn("nicht eingespielt", self.events()[-1])
+        self.assertTrue(self.outbox()[-1]["loud"])
         with state.locked(cfg.state_dir) as st:
             self.assertEqual(st.approved_fingerprint, fingerprint)  # die Freigabe gilt beim nächsten Lauf
             self.assertEqual(st.applying, {})
@@ -257,14 +287,15 @@ class CheckTest(unittest.TestCase):
         cfg = self.cfg("auto")
         self.request(cfg)
         self.refresh.side_effect = self.locked_then(2, [])
-        with mock.patch.object(check.time, "sleep") as sleep:
+        waits = []
+        with mock.patch.object(check.time, "sleep", side_effect=lambda s: waits.append(self.activity()["check"])) as sleep:
             self.assertEqual(check.run(cfg), 0)
         self.assertEqual(sleep.call_count, 2)
         self.apply.assert_called_once()
-        # Ein Hinweis, solange derselbe Besitzer sperrt
-        waits = [t for _, t, _ in self.tg.edited if "Paketverwaltung ist belegt" in t]
-        self.assertEqual(len(waits), 1)
-        self.assertIn("purge-kernels.service", waits[0])
+        # Die Zustandsnachricht nennt den Besitzer der Sperre; kein Ereignis je Warteversuch
+        self.assertEqual([w["phase"] for w in waits], ["wait-zypp", "wait-zypp"])
+        self.assertIn("purge-kernels.service", waits[0]["detail"])
+        self.assertEqual(len(self.events()), 1)
         with state.locked(cfg.state_dir) as st:
             self.assertNotIn("error", st.issues)
 
@@ -278,7 +309,7 @@ class CheckTest(unittest.TestCase):
         with mock.patch.object(check, "LOCK_WAIT", 0), mock.patch.object(check.time, "sleep"):
             self.assertEqual(check.run(cfg), 0)
         self.apply.assert_not_called()
-        self.assertIn("seit 0 min belegt durch purge-kernels.service", self.tg.sent[-1])
+        self.assertIn("seit 0 min belegt durch purge-kernels.service", self.events()[-1])
         with state.locked(cfg.state_dir) as st:
             self.assertEqual(st.issues, {})
             self.assertEqual(st.approved_fingerprint, fingerprint)
@@ -288,12 +319,13 @@ class CheckTest(unittest.TestCase):
         cfg = self.cfg("auto")
         self.request(cfg)
         self.apply.side_effect = self.locked_then(1, lambda args: (0, "", routine_plan()))
-        with mock.patch.object(check.time, "sleep"):
+        phases = []
+        original = self.apply.side_effect
+        self.apply.side_effect = lambda args: (phases.append(self.activity()["check"]["phase"]), original(args))[1]
+        with mock.patch.object(check.time, "sleep", side_effect=lambda s: phases.append(self.activity()["check"]["phase"])):
             check.run(cfg)
         self.assertEqual(self.apply.call_count, 2)
-        texts = [t for _, t, _ in self.tg.edited]
-        wait = next(i for i, t in enumerate(texts) if "Paketverwaltung ist belegt" in t)
-        self.assertTrue(any("spielt das Update ein" in t for t in texts[wait + 1:]))
+        self.assertEqual(phases, ["apply", "wait-zypp", "apply"])
         with state.locked(cfg.state_dir) as st:
             self.assertEqual(st.applying, {})
             self.assertNotIn("apply-failed", st.issues)
@@ -315,7 +347,7 @@ class CheckTest(unittest.TestCase):
         self.assertEqual(check.run(cfg), 0)
         self.refresh.assert_not_called()
         self.apply.assert_not_called()
-        self.assertIn("Neustart geplant um", self.tg.edited[-1][1])
+        self.assertIn("Neustart geplant um", self.events()[-1])
 
     def test_no_apply_when_reboot_gets_planned_during_check(self):
         cfg = self.cfg("auto")
@@ -327,7 +359,7 @@ class CheckTest(unittest.TestCase):
         self.dry_run.side_effect = dry_run
         self.assertEqual(check.run(cfg), 0)
         self.apply.assert_not_called()
-        self.assertIn("Nichts eingespielt: Neustart geplant um", self.tg.sent[-1])
+        self.assertIn("Nichts eingespielt: Neustart geplant um", self.events()[-1])
         with state.locked(cfg.state_dir) as st:
             self.assertEqual(st.applying, {})
 
@@ -345,7 +377,8 @@ class CheckTest(unittest.TestCase):
         self.assertEqual(check.run(cfg), 0)
         self.refresh.assert_called_once()
         self.apply.assert_not_called()
-        self.assertIn("logind gibt keine Auskunft", self.tg.sent[-1])
+        # Auch ohne Anfrage: sonst bliebe ein stummes logind unbemerkt
+        self.assertIn("logind gibt keine Auskunft", self.events()[-1])
 
     def test_mode_switch_during_lock_wait_is_respected(self):
         # F18: Nach dem Warten wird neu entschieden, nicht nur zypper wiederholt
@@ -359,7 +392,7 @@ class CheckTest(unittest.TestCase):
             check.run(cfg)
         self.assertEqual(self.apply.call_count, 1)  # nur der gesperrte Versuch
         self.assertEqual(self.refresh.call_count, 2)
-        self.assertIn("Beobachtungsmodus", self.tg.sent[-1])
+        self.assertIn("im Beobachtungsmodus nicht", self.events()[-1])
 
     def test_plan_changed_during_lock_wait_drops_approval(self):
         # F18: Eine fremde Paketoperation während des Wartens kann den Plan ändern; die Freigabe galt dem alten
@@ -398,7 +431,9 @@ class CheckTest(unittest.TestCase):
         self.refresh.side_effect = self.locked_then(1, [])
         with mock.patch.object(check.time, "sleep"), mock.patch("builtins.print"):
             self.assertEqual(check.run(cfg, dry_run=True), 0)
-        self.assertEqual((self.tg.sent, self.tg.edited, self.tg.deleted), ([], [], []))
+        st = state.load(cfg.state_dir / "state.json")
+        self.assertEqual((st.outbox, st.activity), ([], {}))
+        self.assertTrue(st.check_request)  # die Anfrage beantwortet der nächste echte Prüflauf
         self.apply.assert_not_called()
 
     def test_reservation_held_during_apply_and_released(self):
@@ -453,7 +488,8 @@ class CheckTest(unittest.TestCase):
         self.request(cfg)
         self.assertEqual(check.run(cfg), 0)
         self.apply.assert_not_called()
-        self.assertIn("twguard spielt gerade ein", self.tg.sent[-1])
+        # Das Ergebnis meldet A selbst; B schweigt dazu
+        self.assertFalse([t for t in self.events() if "twguard spielt gerade ein" in t])
         with state.locked(cfg.state_dir) as st:
             self.assertEqual(st.applying, held)  # weder übernommen noch gelöst
             self.assertTrue(state.alive(st.applying))
@@ -502,59 +538,69 @@ class CheckTest(unittest.TestCase):
         self.dry_run.side_effect = lambda args: Plan(raw="<stream/>")
         self.request(cfg)
         check.run(cfg)
-        self.assertIn("keine Updates", self.tg.edited[0][1])
-        self.assertIsNone(self.tg.edited[0][2])
+        self.assertEqual(self.events(), ["🔄 <b>server1</b>: Prüfung fertig, keine Updates."])
 
     def test_nothing_to_do_keeps_open_items_operable(self):
+        # Beobachtung auf einem Server: Das Prüfergebnis zeigte die offenen Punkte ohne den Neustart-Knopf
         cfg = self.cfg("auto")
         self.dry_run.side_effect = lambda args: Plan(raw="<stream/>")
         with state.locked(cfg.state_dir) as st:
             st.open_issue("reboot", "Neustart nötig")
+            st.open_issue("services", "", )
+            st.restart_services = ["postfix"]
         self.request(cfg)
         check.run(cfg)
-        _, text, buttons = self.tg.edited[0]
-        self.assertIn("keine Updates", text)
-        self.assertIn("Neustart", text)
-        self.assertIn("reboot", [b[1] for row in buttons for b in row])
+        self.assertNotIn("Neustart", self.events()[0])  # das Ereignis nennt nur das Ergebnis
+        with state.locked(cfg.state_dir) as st:
+            shown = panel.render(cfg, st, time.time())
+        actions = [b[1] for row in shown.buttons for b in row]
+        self.assertIn("reboot", actions)
+        self.assertIn("restart:postfix", actions)
 
-    def test_requested_check_reports_manual_issue_in_quiet_hours(self):
+    def test_requested_check_with_manual_result(self):
         cfg = self.cfg("auto")
-        cfg.escalation.quiet_hours = "00:00-23:59"
         self.dry_run.side_effect = lambda args: Plan(
             sections={"to-upgrade": [Solvable("grub2", "2.12-60.1", "x86_64", edition_old="2.12-59.1")]},
             packages_to_change=1, raw="<stream/>")
         self.request(cfg)
         check.run(cfg)
         self.apply.assert_not_called()
-        _, text, buttons = self.tg.edited[0]
-        self.assertIn("Freigabe", text)
+        self.assertIn("Freigabe nötig", self.events()[0])
+        with state.locked(cfg.state_dir) as st:
+            self.assertTrue(st.issues["manual"].approvable)
+            buttons = panel.render(cfg, st, time.time()).buttons
         self.assertTrue(buttons[0][0][1].startswith("approve:"))
-        with state.locked(cfg.state_dir) as st:
-            self.assertEqual(st.issues["manual"].notify_count, 1)
 
-    def test_manual_result_becomes_issue_message(self):
+    def test_expired_approval_is_reported(self):
         cfg = self.cfg("auto")
-        self.dry_run.side_effect = lambda args: Plan(
-            sections={"to-upgrade": [Solvable("grub2", "2.12-60.1", "x86_64", edition_old="2.12-59.1")]},
-            packages_to_change=1, raw="<stream/>")
+        cfg.rules.block = ["bash"]
         with state.locked(cfg.state_dir) as st:
-            st.messages["status"] = {"chat_id": -100, "message_id": 55, "at": time.time()}
-            st.messages["issue:manual"] = {"chat_id": -100, "message_id": 30, "at": time.time()}
+            st.approved_fingerprint = "alt"
+        check.run(cfg)
+        self.apply.assert_not_called()
+        self.assertIn("vorige Freigabe ist verfallen", self.events()[0])
+        with state.locked(cfg.state_dir) as st:
+            self.assertIn("älteren Stand", st.issues["manual"].detail)
+
+    def test_failure_is_issue_and_event_on_request(self):
+        cfg = self.cfg("auto")
+        self.refresh.return_value = ["Repo x nicht erreichbar"]
+        check.run(cfg)
+        self.assertEqual(self.events(), [])  # vom Timer: nur der offene Punkt
         self.request(cfg)
         check.run(cfg)
+        self.assertIn("Repos lassen sich nicht auffrischen", self.events()[0])
         with state.locked(cfg.state_dir) as st:
-            self.assertEqual(st.messages["issue:manual"]["message_id"], 55)
-            self.assertNotIn("status", st.messages)
-        self.assertIn(30, self.tg.deleted)  # alte Meldung zum selben Punkt entfernt
+            self.assertIn("Repo x", st.issues["error"].detail)
 
-    def test_routine_report_kept_for_briefing(self):
+    def test_routine_report_can_be_switched_off(self):
         cfg = self.cfg("auto")
+        cfg.report_routine = False
         check.run(cfg)
-        with state.locked(cfg.state_dir) as st:
-            self.assertEqual(len(st.reports), 1)
-            self.assertEqual(st.reports[0]["packages"], 1)
-            self.assertTrue(st.reports[0]["message_id"])
-        self.assertTrue(self.tg.silent[0])
+        self.assertEqual(self.events(), [])
+        self.request(cfg)
+        check.run(cfg)
+        self.assertEqual(len(self.events()), 1)  # auf Anfrage trotzdem
 
     def test_deviating_plan_reported_with_sound(self):
         cfg = self.cfg("auto")
@@ -563,10 +609,10 @@ class CheckTest(unittest.TestCase):
                      packages_to_change=1)
         self.apply.side_effect = lambda args: (0, "", other)
         check.run(cfg)
-        self.assertIn("nicht genau der geprüfte Plan", self.tg.sent[0])
-        self.assertIn("+ to-upgrade: bash 5.3.2-1.1 → 5.3.4-1.1 (x86_64)", self.tg.sent[0])
-        self.assertIn("− to-upgrade: bash 5.3.2-1.1 → 5.3.3-1.1 (x86_64)", self.tg.sent[0])
-        self.assertFalse(self.tg.silent[0])
+        self.assertIn("nicht genau der geprüfte Plan", self.events()[0])
+        self.assertIn("+ to-upgrade: bash 5.3.2-1.1 → 5.3.4-1.1 (x86_64)", self.events()[0])
+        self.assertIn("− to-upgrade: bash 5.3.2-1.1 → 5.3.3-1.1 (x86_64)", self.events()[0])
+        self.assertTrue(self.outbox()[0]["loud"])
 
     def test_arch_only_deviation_reported(self):
         cfg = self.cfg("auto")
@@ -575,40 +621,36 @@ class CheckTest(unittest.TestCase):
                                                        arch_old="i586")]}, packages_to_change=1)
         self.apply.side_effect = lambda args: (0, "", other)
         check.run(cfg)
-        self.assertIn("+ to-upgrade: bash 5.3.2-1.1 → 5.3.3-1.1 (i586 → x86_64)", self.tg.sent[0])
-        self.assertFalse(self.tg.silent[0])
+        self.assertIn("+ to-upgrade: bash 5.3.2-1.1 → 5.3.3-1.1 (i586 → x86_64)", self.events()[0])
+        self.assertTrue(self.outbox()[0]["loud"])
 
     def test_unreadable_applied_plan_warns(self):
         cfg = self.cfg("auto")
         cfg.report_routine = False
         self.apply.side_effect = lambda args: (0, "", Plan())
         check.run(cfg)
-        self.assertIn("nicht lesen", self.tg.sent[0])
-        self.assertFalse(self.tg.silent[0])
+        self.assertIn("nicht lesen", self.events()[0])
+        self.assertTrue(self.outbox()[0]["loud"])
 
-    def test_deviation_after_request_comes_as_new_message(self):
+    def test_reboot_after_apply_is_issue_not_report_line(self):
         cfg = self.cfg("auto")
-        other = Plan(sections={"to-upgrade": [Solvable("bash", "5.3.4-1.1", "x86_64", edition_old="5.3.2-1.1")]},
-                     packages_to_change=1)
-        self.apply.side_effect = lambda args: (0, "", other)
-        self.request(cfg)
+        self.apply.side_effect = lambda args: (check.zypper.EXIT_REBOOT_NEEDED, "", routine_plan())
         check.run(cfg)
-        self.assertIn(55, self.tg.deleted)  # Wartemeldung weg, Bearbeiten hätte keinen Ton
-        # Bearbeitet wird nur der Zwischenstand vor dem Einspielen, nicht mit dem Ergebnis
-        self.assertEqual([text for _, text, _ in self.tg.edited if "spielt das Update ein" not in text], [])
-        self.assertIn("nicht genau der geprüfte Plan", self.tg.sent[-1])
-        self.assertFalse(self.tg.silent[-1])
+        with state.locked(cfg.state_dir) as st:
+            self.assertIn("reboot", st.issues)
+        self.assertNotIn("Neustart", self.events()[0])
 
     def test_matching_plan_reports_quietly(self):
         check.run(self.cfg("auto"))
-        self.assertNotIn("nicht genau", self.tg.sent[0])
+        self.assertNotIn("nicht genau", self.events()[0])
+        self.assertFalse(self.outbox()[0]["loud"])
 
     def test_old_request_ignored(self):
-        cfg = self.cfg("observe")
+        cfg = self.cfg("auto")
+        self.dry_run.side_effect = lambda args: Plan(raw="<stream/>")
         self.request(cfg, age=7200)
         check.run(cfg)
-        self.assertEqual(self.tg.edited, [])
-        self.assertEqual(len(self.tg.sent), 1)
+        self.assertEqual(self.events(), [])
 
     def test_auto_applies(self):
         check.run(self.cfg("auto"))

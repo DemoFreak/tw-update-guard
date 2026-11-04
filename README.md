@@ -35,11 +35,11 @@ Telegram messages, the `twguard` command line output, `--help` and the log lines
 
    Nights (22:00–08:00) are quiet; a reminder due when the daily briefing goes out is part of the briefing. `/later` postpones twice, at most 72 hours each. Temporary errors (repository unreachable) are only reported after a day. If no check succeeds for three days, that is reported too.
 
-**Observation mode** (`mode = "observe"` in `[general]`, the default after installation): the timer checks and reports as usual but installs nothing. Routine updates are reported silently as “would be installed” (once per state), with an “Install this time” button. Approvals also work in this mode. Only with `mode = "auto"` does twguard install routine updates by itself. Every non-empty zypper output is saved under `/var/lib/twguard/plans/` (the last 20).
+**Observation mode** (`mode = "observe"` in `[general]`, the default after installation): the timer checks and reports as usual but installs nothing. Routine updates appear in the state message as pending, with an “Install this time” button; a new state also comes once as a short silent event. Approvals also work in this mode. Only with `mode = "auto"` does twguard install routine updates by itself. Every non-empty zypper output is saved under `/var/lib/twguard/plans/` (the last 20).
 
 An approval is bound to exactly the reported state (fingerprint of the package list with old and new version, architecture and repository). If a new snapshot arrives first, the approval expires and the new state is reported. zypper recomputes the plan when installing; if the executed plan differs from the checked one (for example because of a parallel `zypper ref`), the report lists the differences, with sound.
 
-**Daily briefing** (`[briefing]`, default 08:00): every server reports once a day, also when everything is fine (“☀️ server: all good”, with the last check, kernel, uptime and, in observation mode, the pending packages). It is silent as long as nothing is open. If a server's briefing is missing, the server is off, offline or the bot is not running.
+**Daily briefing** (`[briefing]`, default 08:00): every server sends its state message again once a day, also when everything is fine (“☀️ server: all good”, with the last check, kernel and, in observation mode, the pending packages). It is silent as long as nothing is open. If a server's briefing is missing, the server is off, offline or the bot is not running.
 
 If you run `zypper dup` yourself via SSH, nothing else is needed: the bot notices the change of the RPM database and checks again right away.
 
@@ -59,10 +59,10 @@ In a group, commands for a specific server only apply as a **reply to a message 
 
 | Command | Effect |
 |---|---|
-| `/status` | open issues; without `@botname` all servers answer |
-| `/details` | package list of the last dry run |
+| `/status` | bring the state message down; without `@botname` all servers answer |
+| `/details` | package list of the last dry run, inside the state message |
 | `/approve` | approve and install the reported update |
-| `/check` | check now; a waiting message appears at once and is replaced by the result |
+| `/check` | check now; the state message shows the progress, the result follows as a short event |
 | `/later 12h`, `/later 2d` | postpone reminders (limited) |
 | `/reboot` | reboot in 1 minute; the server reports back after the restart |
 | `/cancel` | cancel a scheduled reboot |
@@ -75,11 +75,11 @@ In a group, commands for a specific server only apply as a **reply to a message 
 
 All commands are also in the menu next to the input line.
 
-**Services holding old files:** After an update, and every 30 minutes, twguard asks `zypper ps` which services still hold deleted files. They become an open issue with one button per service and “Restart all”. A press restarts only services that were offered and that `zypper ps` still lists; the same message then shows the result, and a service that is not running afterwards is reported as a new message with sound. Services whose restart would end sessions or cut off the network (D-Bus, `systemd-*`, `user@*`, network services and the like) are not offered; `[services] exclude` sets the patterns, `["*"]` turns the offer off. These services get renewed by the next reboot.
+**Services holding old files:** After an update, and every 30 minutes, twguard asks `zypper ps` which services still hold deleted files. They become an open issue with one button per service and “Restart all”. A press restarts only services that were offered and that `zypper ps` still lists; the state message shows the restart while it runs, the result follows as a short event (with sound if a service is not running afterwards). Services whose restart would end sessions or cut off the network (D-Bus, `systemd-*`, `user@*`, network services and the like) are not offered; `[services] exclude` sets the patterns, `["*"]` turns the offer off. These services get renewed by the next reboot.
 
 **Language:** `language = "en"` (default) or `"de"` in `[general]` sets the language of the Telegram output per server, including buttons, command menu and the HTML file; then run `systemctl restart twguard-bot`. `/language` changes it at runtime and says so; a bot restart (also through `/update` or a reboot) returns to the configuration, so to make a change permanent you enter it there. Every server understands the permanent keyboard in all languages, even if it comes from a bot with a different language. Messages already sent and the reasons of open issues stay in the old language until they are generated again.
 
-Messages have buttons for the most important commands (Approve, Details, 1 day later, Reboot, Cancel reboot, Restart service, Check again). A button only reaches the bot that sent the message; buttons with consequences disappear after the first press. “Approve” only applies to the state reported in that message.
+Only the state message has buttons (Approve, Details, 1 day later, Reboot, Cancel reboot, Restart service, Check now). A button only reaches the bot that sent the message, and it only acts on that bot's current state message: a button on an older message does nothing, says so and brings the current state down. “Approve” only applies to the state shown.
 
 ## Updating twguard itself (OTA)
 
@@ -92,16 +92,14 @@ Messages have buttons for the most important commands (Approve, Details, 1 day l
 
 Log: `journalctl -u twguard-update`. Changes per version and upgrade notes: [CHANGELOG.md](CHANGELOG.md).
 
-Feedback: for commands Telegram immediately shows “typing …”, for buttons briefly “Running …”. `/check`, “Check now” and approvals immediately send a waiting message that the check later replaces with its result (also “no updates”).
-
-**Tidy chat:** at most one message stays per server and topic.
-- Commands are deleted after the answer (admin right needed). Help, version, details and confirmations delete themselves after 2 to 5 minutes.
-- `/status`, briefing and reminders replace their predecessor. A reminder therefore still arrives as new (with sound), the previous one disappears.
-- Buttons edit the message they belong to: “Approve” turns it into the waiting message and then the result, “Details” expands the package list (by name, switchable to “by version” with grouped packages, paged if long; “📄 As a file” sends all packages as an HTML file; “◀️ Back” collapses it), “1 day later” notes the postponement, “Reboot” shows the reboot and “back” after the restart.
-- Briefing and status list several items, with the buttons of each open item. A button pressed there answers in a message of its own and only removes the buttons of its item; the other items stay usable.
-- Resolved issues remain as “✅ … resolved”, without buttons.
-- Silent update reports stay until the next briefing, which summarizes and deletes them.
+**One state message per server.** Everything that is true right now stands in a single message: open issues with their buttons, what is running (check and its phase, service restart, self-update, scheduled reboot, who holds the package lock), hints, last check and kernel. The bot edits it whenever the state changes, so a running check shows its progress there.
+- What happened (installed, restarted, back after reboot, errors) arrives as a short **event** without buttons, and the state message is sent again below it. Events during a running action of twguard are collected and come as one message once it is done (at the latest after 5 minutes); errors come at once, with sound.
+- `/status`, a due reminder and the daily briefing send the state message again at the bottom; the previous one disappears. A reminder comes with sound and starts with “🔔”.
+- “Details” shows the package list inside the state message (by name, switchable to “by version”, paged if long; “📄 As a file” sends all packages as an HTML file; “◀️ Back” returns). If the state changes meanwhile, it returns to the overview by itself.
+- Commands are deleted after the answer (admin right needed). Help, version and confirmations delete themselves after 2 to 5 minutes.
 - Telegram only allows deleting within the first 48 hours. The bot shortens older messages to one line instead.
+
+Feedback: for commands Telegram immediately shows “typing …”, for buttons a short note.
 
 Commands are only accepted from the user IDs in `allowed_user_ids`, only from the configured chat or a private chat, and only if they are at most 10 minutes old. There are no shell commands via Telegram.
 

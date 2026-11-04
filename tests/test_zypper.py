@@ -114,7 +114,7 @@ class ParsePlanTest(unittest.TestCase):
                     call()
                 self.assertEqual(caught.exception.holder, "ein anderes Programm")
             self.assertIsNone(zypper.needs_rebooting())
-            self.assertIsNone(zypper.services_needing_restart())
+            self.assertIsNone(zypper.processes_needing_restart())
         with mock.patch.object(zypper.subprocess, "run", return_value=locked), \
                 mock.patch.object(zypper, "lock_holder", return_value="purge-kernels.service (zypper, PID 707)"):
             with self.assertRaises(zypper.Locked) as caught:
@@ -129,7 +129,7 @@ class ParsePlanTest(unittest.TestCase):
             self.assertTrue(plan.failed)
             self.assertIn("keine Antwort", plan.errors[0])
             self.assertIsNone(zypper.needs_rebooting())
-            self.assertIsNone(zypper.services_needing_restart())
+            self.assertIsNone(zypper.processes_needing_restart())
             limits = [c.kwargs["timeout"] for c in run.call_args_list]
         self.assertEqual(limits, [1800, 1800, 120, 120])
 

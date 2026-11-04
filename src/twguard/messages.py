@@ -1,8 +1,8 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
 """Nachrichten je Thema: ersetzen statt neu senden, bearbeiten, kurzlebige wieder löschen.
 
-Ein Thema ist z. B. "status", "briefing" oder "issue:reboot". Je Thema merkt sich der
-Zustand die zuletzt gesendete Nachricht ({"chat_id", "message_id", "at"}).
+Ein Thema ist z. B. "state" (die Zustandsnachricht), "keyboard" oder "language". Je Thema merkt
+sich der Zustand die zuletzt gesendete Nachricht ({"chat_id", "message_id", "at"}).
 """
 
 from __future__ import annotations
@@ -18,7 +18,7 @@ log = logging.getLogger(__name__)
 
 # Telegram erlaubt Löschen nur in den ersten 48 Stunden; ältere Nachrichten werden gekürzt
 DELETE_LIMIT = 48 * 3600
-REPLACED = "↓ ersetzt durch eine neuere Nachricht"
+REPLACED = "↓ veraltet, der aktuelle Stand steht weiter unten (/status)"
 
 
 def ref(sent: dict) -> dict:
@@ -65,11 +65,11 @@ def delete(tg: Telegram, message: dict) -> bool:
         return False
 
 
-def retire(tg: Telegram, message: dict, short: str = "") -> None:
+def retire(tg: Telegram, message: dict, short: str = "") -> bool:
     """Löschen; geht das nicht mehr (älter als 48 h), auf eine Zeile ohne Schaltflächen kürzen."""
     if time.time() - message.get("at", 0) < DELETE_LIMIT and delete(tg, message):
-        return
-    edit(tg, message, short or tr(REPLACED))
+        return True
+    return edit(tg, message, short or tr(REPLACED))
 
 
 def replace(tg: Telegram, st: State, topic: str, text: str, buttons: Buttons | None = None,
@@ -84,27 +84,14 @@ def replace(tg: Telegram, st: State, topic: str, text: str, buttons: Buttons | N
     return sent
 
 
-def edit_or_send(tg: Telegram, message: dict, text: str, buttons: Buttons | None = None) -> dict | None:
-    """Ergebnis in eine vorhandene (Warte-)Nachricht schreiben, sonst neu senden."""
-    if message.get("message_id") and edit(tg, message, text, buttons):
-        return message
-    try:
-        return ref(tg.send(text, chat_id=message.get("chat_id"), buttons=buttons))
-    except TelegramError as e:
-        log.warning(tr("Nachricht nicht gesendet: %s"), e)
-        return None
-
-
 def expire(st: State, sent: dict, seconds: float) -> None:
     """Kurzlebige Antwort: der Bot löscht sie nach `seconds`."""
     st.ephemeral.append({**ref(sent), "delete_at": time.time() + seconds})
 
 
-def cleanup(tg: Telegram, st: State, now: float | None = None) -> None:
+def expired(st: State, now: float | None = None) -> list[dict]:
+    """Fällige kurzlebige Antworten aus dem Zustand nehmen; löschen muss sie der Aufrufer (außerhalb der Sperre)."""
     now = now or time.time()
     due = [m for m in st.ephemeral if m["delete_at"] <= now]
     st.ephemeral = [m for m in st.ephemeral if m["delete_at"] > now]
-    for message in due:
-        delete(tg, message)
-    # Aufgeklappte Details lassen sich nach 48 h ohnehin nicht mehr sinnvoll zurückklappen
-    st.collapsed = {k: v for k, v in st.collapsed.items() if now - v.get("at", 0) < DELETE_LIMIT}
+    return due

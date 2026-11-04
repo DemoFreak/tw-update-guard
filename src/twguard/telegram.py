@@ -47,10 +47,12 @@ def keyboard(buttons: Buttons | None) -> dict:
 
 
 class TelegramError(Exception):
-    def __init__(self, message: str, migrate_to: int = 0):
+    def __init__(self, message: str, migrate_to: int = 0, retry_after: float = 0):
         super().__init__(message)
         # Gruppe wurde zur Supergruppe: deren neue ID (Telegram nennt sie im Fehler)
         self.migrate_to = migrate_to
+        # Zu viele Nachrichten (429): so viele Sekunden nichts mehr senden
+        self.retry_after = retry_after
 
 
 class ErrorMeter:
@@ -118,6 +120,22 @@ def format_phases(phases: dict) -> str:
     return ", ".join(parts)
 
 
+# Abrufen und Schaltflächen bestätigen bleibt während einer Wartezeit erlaubt
+UNGATED = ("getUpdates", "getMe", "answerCallbackQuery")
+
+
+def gate(client, method: str) -> None:
+    """Während der von Telegram verlangten Wartezeit (`retry_after`) gar nicht erst anfragen.
+
+    So umgeht auch ein Rückfall (Bearbeiten scheitert, also neu senden; Löschen scheitert, also kürzen)
+    die Wartezeit nicht.
+    """
+    remaining = client.blocked_until - time.time()
+    if remaining > 0 and method not in UNGATED:
+        raise TelegramError(f"{method}: " + tr("Wartezeit nach Too Many Requests, noch {n} s", n=f"{remaining:.0f}"),
+                            retry_after=remaining)
+
+
 class Telegram:
     def __init__(self, token: str, chat_id: int, max_errors_per_hour: int = 0):
         self.errors = ErrorMeter(max_errors_per_hour)
@@ -128,9 +146,12 @@ class Telegram:
         self._prefer = ""
         # (alte, neue) Chat-ID, falls die Gruppe beim Senden umgezogen ist; der Besitzer übernimmt sie
         self.migration: tuple[int, int] | None = None
+        # Nach „Too Many Requests“ bis dahin nichts senden, bearbeiten oder löschen (siehe `gate`)
+        self.blocked_until = 0.0
 
     def call(self, method: str, http_timeout: float = 20, body: bytes | None = None, content_type: str = "",
              **params):
+        gate(self, method)
         start = time.monotonic()
         phases: dict = {}
         try:
@@ -139,6 +160,8 @@ class Telegram:
             # Der Umzug zur Supergruppe ist kein Fehler; send() wiederholt an die neue ID
             if not e.migrate_to:
                 self.errors.add(method, e)
+            if e.retry_after:
+                self.blocked_until = max(self.blocked_until, time.time() + e.retry_after)
             raise
         finally:
             elapsed = time.monotonic() - start
@@ -176,7 +199,8 @@ class Telegram:
         if not data.get("ok"):
             parameters = data.get("parameters") or {}
             raise TelegramError(f"{method}: {data.get('description')}",
-                                migrate_to=int(parameters.get("migrate_to_chat_id", 0)))
+                                migrate_to=int(parameters.get("migrate_to_chat_id", 0)),
+                                retry_after=float(parameters.get("retry_after", 0)))
         return data["result"]
 
     def send(self, text: str, chat_id: int | None = None, silent: bool = False,

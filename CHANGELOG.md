@@ -4,6 +4,36 @@ Published versions of tw-update-guard. Versions in between were development step
 published version. **Upgrade** notes name what you may have to change by hand; `twguard config-diff` shows which
 values in your `config.toml` differ from the defaults.
 
+## 0.10.0 – 2026-11-04
+
+- **One state message per server.** Everything that is true right now (open issues with their buttons, a running
+  check with its phase, a service restart, a self-update, a scheduled reboot, who holds the package lock, hints,
+  last check and kernel) stands in a single message that the bot edits whenever the state changes. It is the
+  only message with buttons. Before, status, briefing, reminders, check results and update offers were separate
+  messages, each with its own buttons; a button pressed in one could make the buttons of another item disappear
+  (e.g. the reboot button after a service restart), and `/check` could leave two nearly identical messages
+- What happened (installed, restarted, back after a reboot, errors) arrives as a short event without buttons,
+  followed by the state message again. Events during a running action of twguard are collected into one message
+  (at the latest after 5 minutes); errors come at once, with sound
+- A button on an older message no longer acts: it says the message is outdated, removes it and brings the
+  current state message down
+- `/status`, a due reminder (with sound, "🔔") and the daily briefing send the state message again at the bottom.
+  A reminder counts only once it was delivered. "Details" shows the package list inside the state message and
+  returns to the overview by itself when the state changes
+- The check run and the self-update no longer talk to Telegram; only the bot sends. When Telegram answers
+  "Too Many Requests", the bot pauses for the time Telegram asks for
+- Services whose own process is already fresh but where other processes keep old files (units with
+  `KillMode=process`, e.g. a `screen` session inside `sshd.service` or a server started by cron) no longer get
+  a restart button and no reminder: restarting never helps there. The status, the briefing and the restart
+  result say "Service sshd restarted. Process screen (PID …, user) keeps using deleted files until it ends."
+- `zypper ps` is now read as a table (`-ss`) instead of names only (`-sss`); unexpected output counts as unknown
+- A very full state message is shortened by whole sections (each open item keeps its title), never in the middle
+  of its formatting; long events are sent completely, spread over several messages if needed
+
+**Upgrade:** none. After the update the bot sends its state message once and then removes the old status,
+briefing, reminder, reboot and update messages (older than 48 hours: shortened to one line). The persistent
+keyboard stays.
+
 ## 0.9.5 – 2026-11-04
 
 - A locked package management (zypper exit code 7, e.g. `purge-kernels` right after boot) is no longer an

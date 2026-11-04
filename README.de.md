@@ -33,11 +33,11 @@ Ein Dienst für headless openSUSE-Tumbleweed-Server. Er spielt Routine-Updates (
 
    Nachts (22–8 Uhr) ist Ruhe; eine Erinnerung, die beim täglichen Briefing fällig ist, steht im Briefing. Mit `/later` lässt sich zweimal aufschieben, jeweils höchstens 72 Stunden. Vorübergehende Fehler (Repo nicht erreichbar) werden erst nach einem Tag gemeldet. Läuft drei Tage lang keine Prüfung erfolgreich, kommt ebenfalls eine Meldung.
 
-**Beobachtungsmodus** (`mode = "observe"` in `[general]`, Standard nach der Installation): Der Timer prüft und meldet wie sonst, spielt aber nichts ein. Routine-Updates kommen als stille Meldung „würde eingespielt“ (je Stand einmal), mit einer Schaltfläche „Diesmal einspielen“. Freigaben wirken auch in diesem Modus. Erst mit `mode = "auto"` spielt twguard Routine-Updates selbst ein. Jede nicht leere zypper-Ausgabe wird unter `/var/lib/twguard/plans/` gesichert (die letzten 20).
+**Beobachtungsmodus** (`mode = "observe"` in `[general]`, Standard nach der Installation): Der Timer prüft und meldet wie sonst, spielt aber nichts ein. Routine-Updates stehen in der Zustandsnachricht als ausstehend, mit der Schaltfläche „Diesmal einspielen“; ein neuer Stand kommt zudem einmal als kurzes stilles Ereignis. Freigaben wirken auch in diesem Modus. Erst mit `mode = "auto"` spielt twguard Routine-Updates selbst ein. Jede nicht leere zypper-Ausgabe wird unter `/var/lib/twguard/plans/` gesichert (die letzten 20).
 
 Eine Freigabe gilt nur für genau den gemeldeten Stand (Fingerabdruck der Paketliste mit Ausgangs- und Zielversion, Architektur und Repository). Kommt vorher ein neuer Snapshot, verfällt sie und es wird neu gemeldet. zypper rechnet beim Einspielen neu; weicht der dabei ausgeführte Plan vom geprüften ab (etwa durch ein paralleles `zypper ref`), meldet der Bericht die Unterschiede mit Ton.
 
-**Tägliches Briefing** (`[briefing]`, Standard 08:00): Jeder Server meldet sich einmal am Tag, auch wenn alles in Ordnung ist („☀️ server: alles in Ordnung“, mit letzter Prüfung, Kernel, Laufzeit und im Beobachtungsmodus den ausstehenden Paketen). Solange nichts offen ist, kommt es ohne Ton. Bleibt das Briefing eines Servers aus, ist er aus, ohne Netz oder der Bot läuft nicht.
+**Tägliches Briefing** (`[briefing]`, Standard 08:00): Jeder Server sendet einmal am Tag seine Zustandsnachricht neu, auch wenn alles in Ordnung ist („☀️ server: alles in Ordnung“, mit letzter Prüfung, Kernel und im Beobachtungsmodus den ausstehenden Paketen). Solange nichts offen ist, kommt es ohne Ton. Bleibt das Briefing eines Servers aus, ist er aus, ohne Netz oder der Bot läuft nicht.
 
 Wer per SSH selbst `zypper dup` ausführt, braucht nichts weiter zu tun: Der Bot bemerkt die Änderung an der RPM-Datenbank und prüft sofort neu.
 
@@ -57,10 +57,10 @@ In der Gruppe gelten Befehle für einen bestimmten Server nur, wenn sie **als An
 
 | Befehl | Wirkung |
 |---|---|
-| `/status` | offene Punkte; ohne `@botname` antworten alle Server |
-| `/details` | Paketliste des letzten Probelaufs |
+| `/status` | Zustandsnachricht nach unten holen; ohne `@botname` antworten alle Server |
+| `/details` | Paketliste des letzten Probelaufs, in der Zustandsnachricht |
 | `/approve` | gemeldetes Update freigeben und einspielen |
-| `/check` | sofort prüfen; eine Wartemeldung erscheint sofort und wird nach dem Prüflauf durch das Ergebnis ersetzt |
+| `/check` | sofort prüfen; die Zustandsnachricht zeigt den Fortschritt, das Ergebnis folgt als kurzes Ereignis |
 | `/later 12h`, `/later 2d` | Erinnerungen aufschieben (begrenzt) |
 | `/reboot` | Neustart in 1 Minute; nach dem Start meldet sich der Server zurück |
 | `/cancel` | geplanten Neustart abbrechen |
@@ -73,11 +73,11 @@ In der Gruppe gelten Befehle für einen bestimmten Server nur, wenn sie **als An
 
 Alle Befehle stehen außerdem im Menü neben der Eingabezeile.
 
-**Dienste mit alten Dateien:** Nach einem Update und alle 30 Minuten fragt twguard `zypper ps`, welche Dienste noch gelöschte Dateien festhalten. Daraus wird ein offener Punkt mit je einer Schaltfläche pro Dienst und „Alle neu starten“. Ein Druck startet nur Dienste neu, die angeboten wurden und die `zypper ps` noch nennt; dieselbe Nachricht zeigt dann das Ergebnis, ein danach nicht laufender Dienst kommt als neue Nachricht mit Ton. Dienste, deren Neustart Sitzungen beenden oder das Netz trennen würde (D-Bus, `systemd-*`, `user@*`, Netzwerkdienste u. Ä.), werden nicht angeboten; die Muster stehen in `[services] exclude`, `["*"]` schaltet das Angebot ab. Diese Dienste erneuert der nächste Neustart des Servers.
+**Dienste mit alten Dateien:** Nach einem Update und alle 30 Minuten fragt twguard `zypper ps`, welche Dienste noch gelöschte Dateien festhalten. Daraus wird ein offener Punkt mit je einer Schaltfläche pro Dienst und „Alle neu starten“. Ein Druck startet nur Dienste neu, die angeboten wurden und die `zypper ps` noch nennt; die Zustandsnachricht zeigt den laufenden Neustart, das Ergebnis folgt als kurzes Ereignis (mit Ton, wenn ein Dienst danach nicht läuft). Dienste, deren Neustart Sitzungen beenden oder das Netz trennen würde (D-Bus, `systemd-*`, `user@*`, Netzwerkdienste u. Ä.), werden nicht angeboten; die Muster stehen in `[services] exclude`, `["*"]` schaltet das Angebot ab. Diese Dienste erneuert der nächste Neustart des Servers.
 
 **Sprache:** `language = "en"` (Standard) oder `"de"` in `[general]` bestimmt die Sprache der Telegram-Ausgabe je Server, einschließlich Schaltflächen, Befehlsmenü und HTML-Datei; danach `systemctl restart twguard-bot`. `/language` ändert sie zur Laufzeit und weist darauf hin; ein Neustart des Bots (auch durch `/update` oder einen Reboot) gilt wieder die Konfiguration, dauerhaft wird eine Änderung also erst durch den Eintrag dort. Die feste Tastatur versteht jeder Server in allen Sprachen, auch wenn sie von einem Bot mit anderer Sprache stammt. Bereits gesendete Meldungen und die Begründungen offener Punkte bleiben in der alten Sprache, bis sie neu erzeugt werden. Auch die Ausgaben von `twguard` auf der Kommandozeile und `--help` folgen dieser Einstellung, sobald die Konfiguration lesbar ist. Das Protokoll (Journal) ebenso.
 
-Die Meldungen haben Schaltflächen für die wichtigsten Befehle (Freigeben, Details, 1 Tag später, Neu starten, Neustart abbrechen, Neu prüfen). Eine Schaltfläche geht nur an den Bot, der die Nachricht geschickt hat; folgenreiche Schaltflächen verschwinden nach dem ersten Druck. „Freigeben“ gilt nur für den Stand, der in dieser Nachricht gemeldet wurde.
+Schaltflächen hat nur die Zustandsnachricht (Freigeben, Details, 1 Tag später, Neu starten, Neustart abbrechen, Dienst neu starten, Jetzt prüfen). Eine Schaltfläche geht nur an den Bot, der die Nachricht geschickt hat, und wirkt nur auf seiner aktuellen Zustandsnachricht: Ein Druck auf eine ältere Nachricht führt nichts aus, sagt das und holt den aktuellen Stand nach unten. „Freigeben“ gilt nur für den gezeigten Stand.
 
 ## Update von twguard selbst (OTA)
 
@@ -90,16 +90,14 @@ Die Meldungen haben Schaltflächen für die wichtigsten Befehle (Freigeben, Deta
 
 Protokoll: `journalctl -u twguard-update`. Änderungen je Version und Hinweise zum Aktualisieren: [CHANGELOG.md](CHANGELOG.md) (englisch).
 
-Rückmeldung: Bei Befehlen zeigt Telegram sofort „schreibt …“, bei Schaltflächen kurz „Läuft …“. `/check`, „Jetzt prüfen“ und Freigaben senden sofort eine Wartemeldung, die der Prüflauf später durch sein Ergebnis ersetzt (auch „keine Updates“).
-
-**Aufgeräumter Chat:** Je Server und Thema bleibt höchstens eine Nachricht stehen.
-- Befehle werden nach der Antwort gelöscht (Admin-Recht nötig). Hilfe, Version, Details und Bestätigungen löschen sich nach 2 bis 5 Minuten selbst.
-- `/status`, Briefing und Erinnerungen ersetzen ihren Vorgänger. Eine Erinnerung kommt also weiterhin neu (mit Ton), die vorige verschwindet.
-- Schaltflächen bearbeiten die Nachricht, an der sie hängen: „Freigeben“ macht daraus die Wartemeldung und dann das Ergebnis, „Details“ klappt die Paketliste auf (nach Name, umschaltbar auf „nach Version“ mit gruppierten Paketen, bei langen Listen mit Seiten; „📄 Als Datei“ schickt alle Pakete als HTML-Datei; „◀️ Zurück“ wieder zu), „1 Tag später“ vermerkt die Aufschiebung, „Neu starten“ zeigt den Neustart und nach dem Start „wieder da“.
-- Briefing und Status zeigen mehrere Punkte, mit den Schaltflächen jedes offenen Punkts. Eine Schaltfläche darin antwortet in einer eigenen Nachricht und entfernt nur die Schaltflächen ihres Punkts; die übrigen bleiben bedienbar.
-- Erledigte Punkte bleiben als „✅ … erledigt“ stehen, ohne Schaltflächen.
-- Stille Update-Berichte bleiben bis zum nächsten Briefing; das fasst sie zusammen und löscht sie.
+**Eine Zustandsnachricht je Server.** Alles, was gerade gilt, steht in einer einzigen Nachricht: offene Punkte mit ihren Schaltflächen, was läuft (Prüfung mit Phase, Dienst-Neustart, Update von twguard, geplanter Neustart, wer die Paketverwaltung belegt), Hinweise, letzte Prüfung und Kernel. Der Bot bearbeitet sie bei jeder Änderung; eine laufende Prüfung zeigt dort ihren Fortschritt.
+- Was geschehen ist (eingespielt, neu gestartet, wieder da, Fehler), kommt als kurzes **Ereignis** ohne Schaltflächen, die Zustandsnachricht darunter neu. Ereignisse während einer laufenden Aktion von twguard werden gesammelt und kommen danach als eine Nachricht (spätestens nach 5 Minuten); Fehler kommen sofort und mit Ton.
+- `/status`, eine fällige Erinnerung und das tägliche Briefing senden die Zustandsnachricht unten neu, die vorige verschwindet. Eine Erinnerung kommt mit Ton und beginnt mit „🔔“.
+- „Details“ zeigt die Paketliste in der Zustandsnachricht (nach Name, umschaltbar auf „nach Version“, bei langen Listen mit Seiten; „📄 Als Datei“ schickt alle Pakete als HTML-Datei; „◀️ Zurück“ führt zurück). Ändert sich inzwischen der Zustand, geht es von selbst zur Übersicht zurück.
+- Befehle werden nach der Antwort gelöscht (Admin-Recht nötig). Hilfe, Version und Bestätigungen löschen sich nach 2 bis 5 Minuten selbst.
 - Telegram erlaubt Löschen nur in den ersten 48 Stunden. Ältere Nachrichten kürzt der Bot stattdessen auf eine Zeile.
+
+Rückmeldung: Bei Befehlen zeigt Telegram sofort „schreibt …“, bei Schaltflächen einen kurzen Hinweis.
 
 Befehle werden nur von den Benutzer-IDs in `allowed_user_ids` angenommen, nur aus dem konfigurierten Chat oder dem privaten Chat, und nur, wenn sie höchstens 10 Minuten alt sind. Es gibt keine Shell-Befehle über Telegram.
 

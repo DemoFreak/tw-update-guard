@@ -272,17 +272,41 @@ def needs_rebooting() -> bool | None:
     return None
 
 
-def services_needing_restart() -> list[str] | None:
-    """Dienste, die gelöschte Dateien festhalten; None, wenn es nicht feststellbar war.
+@dataclass(frozen=True)
+class Proc:
+    """Ein Prozess eines Dienstes, der gelöschte Dateien festhält (Zeile von `zypper ps -ss`)."""
 
-    `-sss` statt der Tabelle von `-s`: nur die Namen, unabhängig von der Sprache.
+    pid: int
+    user: str
+    command: str
+    service: str
+
+
+def processes_needing_restart() -> list[Proc] | None:
+    """Prozesse von Diensten, die gelöschte Dateien festhalten; None, wenn es nicht feststellbar war.
+
+    `-ss` zeigt nur Prozesse mit Dienst, ohne die Dateien. Kopfzeile und Hinweise sind übersetzt, die
+    Zeilen der Tabelle (PID | PPID | UID | User | Command | Service) nicht. Weicht eine Zeile von diesem
+    Aufbau ab, ist das Ergebnis unbekannt, nicht leer.
     """
-    p = _run(["ps", "-sss"], xml=False, timeout=QUERY_TIMEOUT)
+    p = _run(["ps", "-ss"], xml=False, timeout=QUERY_TIMEOUT)
     if p.returncode == EXIT_ZYPP_LOCKED:
         log.info(tr("zypper ps: Paketverwaltung belegt durch %s"), lock_holder() or tr("ein anderes Programm"))
         return None
     if p.returncode not in OK_CODES:
         log.warning(tr("zypper ps: %s"), p.stderr)
         return None
-    names = {line.strip() for line in p.stdout.splitlines()}
-    return sorted(n for n in names if SERVICE_NAME.fullmatch(n) and n not in OWN_UNITS)
+    procs, heads = [], 0
+    for line in p.stdout.splitlines():
+        if "|" not in line:
+            continue
+        cells = [cell.strip() for cell in line.split("|")]
+        if len(cells) == 6 and cells[0].isdigit():
+            if cells[5] and SERVICE_NAME.fullmatch(cells[5]) and cells[5] not in OWN_UNITS:
+                procs.append(Proc(int(cells[0]), cells[3], cells[4], cells[5]))
+            continue
+        heads += 1
+        if len(cells) != 6 or heads > 1:
+            log.warning(tr("zypper ps: unerwartete Zeile: %s"), line)
+            return None
+    return procs

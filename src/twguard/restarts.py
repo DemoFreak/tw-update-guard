@@ -5,13 +5,54 @@ from __future__ import annotations
 
 import hashlib
 import subprocess
+from dataclasses import asdict, dataclass
 from fnmatch import fnmatchcase
 
+from . import zypper
 from .i18n import tr
 from .state import State
 
 SYSTEMCTL_TIMEOUT = 60
 BOT_SERVICE = "twguard-bot"
+
+
+@dataclass(frozen=True)
+class Survey:
+    """Dienste mit alten Dateien laut `zypper ps`; `lingering`: die, bei denen ein Neustart nichts bewirkt."""
+
+    services: list[str]
+    lingering: dict[str, list[zypper.Proc]]
+
+
+def survey() -> Survey | None:
+    """`zypper ps` abfragen und je Dienst bewerten; None, wenn zypper keine Auskunft gibt."""
+    procs = zypper.processes_needing_restart()
+    if procs is None:
+        return None
+    by_service: dict[str, list[zypper.Proc]] = {}
+    for proc in procs:
+        by_service.setdefault(proc.service, []).append(proc)
+    return Survey(sorted(by_service), {name: found for name, found in sorted(by_service.items())
+                                       if left_over(name, found)})
+
+
+def left_over(name: str, procs: list[zypper.Proc]) -> bool:
+    """Halten nur Prozesse neben dem Hauptprozess alte Dateien, die ein Neustart nicht beendet?
+
+    Bei KillMode=process (oder none) beendet systemd beim Neustart nur den Hauptprozess; was sonst im
+    Cgroup des Dienstes läuft, bleibt (z. B. screen in einer SSH-Sitzung bei sshd, ein per Cron gestarteter
+    Server bei cron). Ist der Hauptprozess schon frisch, hilft ein weiterer Neustart nie. Ohne Auskunft
+    oder ohne Hauptprozess wird der Neustart weiter angeboten.
+    """
+    try:
+        p = _systemctl("show", "-p", "MainPID", "-p", "KillMode", "--", name)
+    except (OSError, subprocess.TimeoutExpired):
+        return False
+    props = dict(line.partition("=")[::2] for line in p.stdout.splitlines())
+    main = props.get("MainPID", "")
+    if p.returncode or not main.isdigit() or int(main) == 0:
+        return False
+    return props.get("KillMode") in ("process", "none") and all(proc.pid != int(main) for proc in procs)
 
 
 def digest(names: list[str]) -> str:
@@ -25,16 +66,18 @@ def split(found: list[str], exclude: list[str]) -> tuple[list[str], list[str]]:
     return [name for name in found if name not in skipped], skipped
 
 
-def note(st: State, found: list[str], exclude: list[str]) -> None:
-    """Offenen Punkt `services` an das Ergebnis von `zypper ps` anpassen.
+def note(st: State, found: Survey, exclude: list[str]) -> None:
+    """Offenen Punkt `services` und die Hinweise auf übrig gebliebene Prozesse an `zypper ps` anpassen.
 
     Ausgeschlossene Dienste allein öffnen keinen Punkt: Er ließe sich nur mit einem Neustart des
-    Servers schließen und würde sonst dauerhaft erinnern. Solange ein Neustart läuft, gilt erst
-    dessen Ergebnis.
+    Servers schließen und würde sonst dauerhaft erinnern. Dasselbe gilt für Dienste, bei denen ein
+    Neustart nichts bewirkt; sie stehen als Hinweis ohne Schaltfläche und ohne Erinnerung im Status.
+    Solange ein Neustart läuft, gilt erst dessen Ergebnis.
     """
     if st.restart_request:
         return
-    offered, skipped = split(found, exclude)
+    st.lingering = {name: [asdict(proc) for proc in procs] for name, procs in found.lingering.items()}
+    offered, skipped = split([name for name in found.services if name not in found.lingering], exclude)
     added = set(offered) - set(st.restart_services)
     st.restart_services = offered
     if not offered:

@@ -75,7 +75,7 @@ class CheckRemoteTest(unittest.TestCase):
 
 
 class SelfUpdateTest(CheckRemoteTest):
-    """Ablauf von self-update mit Attrappen für Tests, install.sh, systemctl und Telegram."""
+    """Ablauf von self-update mit Attrappen für Tests, install.sh und systemctl."""
 
     def setUp(self):
         super().setUp()
@@ -87,16 +87,9 @@ class SelfUpdateTest(CheckRemoteTest):
         self.units = root / "units"
         self.units.mkdir()
         (self.units / "twguard-bot.service").write_text("alte Unit")
-        self.sent = []
-        tg = mock.Mock()
-        def send(text, **kw):
-            self.sent.append(text)
-            return {"message_id": len(self.sent), "chat": {"id": -100}}
-
-        tg.send.side_effect = send
         self.systemctl = mock.patch.object(ota, "_systemctl", return_value=0).start()
         for name, value in (("INSTALLED", self.installed), ("PREVIOUS", self.previous), ("UNIT_DIR", self.units),
-                            ("START_TIMEOUT", 0.5), ("Telegram", mock.Mock(return_value=tg))):
+                            ("START_TIMEOUT", 0.5)):
             mock.patch.object(ota, name, value).start()
         self.run_cmd = mock.patch.object(ota, "_run").start()
         mock.patch.object(ota, "_restart_bot").start()
@@ -106,6 +99,11 @@ class SelfUpdateTest(CheckRemoteTest):
         git(self.work, "push", "-q", "origin", "HEAD:main")
         self.target = ota.check_remote(self.upd).target
         self.old = git(self.server, "rev-parse", "HEAD")
+
+    @property
+    def sent(self) -> list[str]:
+        """Ergebnisse gehen als Ereignis in den Zustand; zustellen tut sie der Bot."""
+        return [e["text"] for e in state.load(self.cfg.state_dir / "state.json").outbox]
 
     def test_success(self):
         # Der neue Bot meldet sich (install.sh hat ihn gestartet)
@@ -360,8 +358,9 @@ class StartupReportTest(unittest.TestCase):
     @mock.patch.object(ota, "__version__", "0.9.3")
     def test_success_reported_by_new_bot(self):
         st = state.State(update_request={"commit": "abcdef1234567890", "at": 100.0})
-        text, _ = ota.startup_report(self.cfg, st, now=200.0)
+        text = ota.startup_report(self.cfg, st, now=200.0)
         self.assertIn("läuft jetzt mit v0.9.3 (abcdef12)", text)
+        self.assertEqual([(e["text"], e["loud"]) for e in st.outbox], [(text, False)])
         self.assertEqual(st.update_request, {})
 
     @mock.patch.object(ota, "COMMIT", "abcdef123456")
@@ -369,6 +368,7 @@ class StartupReportTest(unittest.TestCase):
         st = state.State(update_request={"commit": "abcdef1234567890", "at": 100.0, "console": True})
         self.assertIsNone(ota.startup_report(self.cfg, st, now=200.0))
         self.assertEqual(st.update_request, {})
+        self.assertEqual(st.outbox, [])
 
     def test_waits_while_update_runs(self):
         st = state.State(update_request={"commit": "f" * 40, "at": 100.0})
@@ -377,8 +377,9 @@ class StartupReportTest(unittest.TestCase):
 
     def test_stuck_update_reported(self):
         st = state.State(update_request={"commit": "f" * 40, "at": 100.0})
-        text, _ = ota.startup_report(self.cfg, st, now=100.0 + ota.STUCK_AFTER + 1)
+        text = ota.startup_report(self.cfg, st, now=100.0 + ota.STUCK_AFTER + 1)
         self.assertIn("keine Rückmeldung", text)
+        self.assertTrue(st.outbox[0]["loud"])
         self.assertEqual(st.update_request, {})
 
 

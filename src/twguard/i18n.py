@@ -22,25 +22,12 @@ EN = {
     "Update ist fehlgeschlagen": "Update failed",
     "Keine Update-Prüfung mehr": "No more update checks",
     "… und {n} weitere (/details)": "… and {n} more (/details)",
-    "Schaltflächen unten oder als Antwort /approve, /details, /later 1d.":
-        "Use the buttons below or reply /approve, /details, /later 1d.",
     "Bitte per SSH lösen (zypper dup). „Details“ zeigt den Konflikt.":
         "Please resolve via SSH (zypper dup). “Details” shows the conflict.",
-    "Schaltflächen unten oder als Antwort /reboot (Neustart in 1 Minute), /later 1d.":
-        "Use the buttons below or reply /reboot (reboot in 1 minute), /later 1d.",
-    "Bitte per SSH nachsehen: journalctl -u twguard-check": "Please check via SSH: journalctl -u twguard-check",
-    "offen seit {age}": "open for {age}",
-    ", {n}. Erinnerung": ", reminder {n}",
     "{title}, seit {age}": "{title}, for {age}",
-    " (aufgeschoben bis {when})": " (snoozed until {when})",
-    "letzte Prüfung vor {age}": "last check {age} ago",
-    "noch keine Prüfung": "no check yet",
-    "nichts offen ({last})": "nothing open ({last})",
-    "{title} – erledigt ({when})": "{title} – resolved ({when})",
     # Schaltflächen
     "⏰ 1 Tag später": "⏰ 1 day later",
     "✅ Freigeben": "✅ Approve",
-    "🔄 Neu prüfen": "🔄 Check again",
     "🔁 Neu starten": "🔁 Reboot",
     "▶️ Diesmal einspielen": "▶️ Install this time",
     "🔄 Jetzt prüfen": "🔄 Check now",
@@ -50,7 +37,6 @@ EN = {
     "📄 Als Datei": "📄 As a file",
     "✖️ Neustart abbrechen": "✖️ Cancel reboot",
     "⬆️ Einspielen": "⬆️ Install",
-    "✖️ Abbrechen": "✖️ Cancel",
     # Feste Tastatur
     "🔄 Alle prüfen": "🔄 Check all",
     "❓ Hilfe": "❓ Help",
@@ -58,11 +44,6 @@ EN = {
     "{n} offener Punkt": "{n} open issue",
     "{n} offene Punkte": "{n} open issues",
     "alles in Ordnung": "all good",
-    "ausstehend: {plan}": "pending: {plan}",
-    "{n} Paket": "{n} package",
-    "{n} Pakete": "{n} packages",
-    "seit dem letzten Briefing {times}× eingespielt, {packages}": "installed {times}× since the last briefing, {packages}",
-    "Kernel {kernel}, läuft seit {age}": "kernel {kernel}, up for {age}",
     "Beobachtungsmodus": "observation mode",
     "{n} Paket aktualisiert": "{n} package updated",
     "{n} Pakete aktualisiert": "{n} packages updated",
@@ -74,12 +55,9 @@ EN = {
     "… und {n} weitere": "… and {n} more",
     "⚠️ Eingespielt wurde nicht genau der geprüfte Plan (zwischendurch geändert?). Bitte ansehen:\n<pre>{diff}</pre>":
         "⚠️ What was installed is not exactly the checked plan (changed in between?). Please review:\n<pre>{diff}</pre>",
-    "Ein Neustart ist nötig.": "A reboot is required.",
-    "Dienste mit alten Bibliotheken: {services}": "Services using old libraries: {services}",
     "Dienste nutzen alte Dateien": "Services using old files",
     "{what} nicht ausführbar: {error}": "{what} cannot be run: {error}",
     "Der Plan hat sich geändert, nichts freigegeben. Bitte die aktuelle Meldung prüfen.": "The plan has changed, nothing approved. Please check the current message.",
-    "Bitte per SSH nachsehen: journalctl -u twguard-check. Danach „Behoben“ drücken; ein leerer Plan allein zeigt das nicht.": "Please check via SSH: journalctl -u twguard-check. Then press “Fixed”; an empty plan alone does not show that.",
     "✅ Behoben": "✅ Fixed",
     "läuft, aber zypper ps gab keine Auskunft über alte Dateien: {services}": "running, but zypper ps gave no information about old files: {services}",
     "Neustart abgewiesen: {services}": "restart rejected: {services}",
@@ -87,9 +65,14 @@ EN = {
     "Die Liste hat sich geändert, nichts neu gestartet.": "The list has changed, nothing restarted.",
     "Diese Dienste nutzen noch alte Dateien:\n{services}": "These services still use old files:\n{services}",
     "Nicht angeboten (Ausschlussliste): {services}": "Not offered (exclude list): {services}",
-    "Schaltflächen unten oder als Antwort /later 1d.": "Buttons below or reply /later 1d.",
     "🔁 Alle neu starten ({n})": "🔁 Restart all ({n})",
     "neu gestartet: {services}": "restarted: {services}",
+    "{command} (PID {pid}, {user})": "{command} (PID {pid}, {user})",
+    "{n} weitere": "{n} more",
+    "Dienst {service} neu gestartet. Prozess {procs} nutzt bis zu seinem Ende weiter gelöschte Dateien.":
+        "Service {service} restarted. Process {procs} keeps using deleted files until it ends.",
+    "Dienst {service} neu gestartet. Prozesse {procs} nutzen bis zu ihrem Ende weiter gelöschte Dateien.":
+        "Service {service} restarted. Processes {procs} keep using deleted files until they end.",
     "nutzt weiter alte Dateien: {services}": "still using old files: {services}",
     "nach dem Neustart nicht aktiv: {services}": "not active after the restart: {services}",
     "Ergebnis des Neustarts unbekannt, systemd gab keine Auskunft: {services}":
@@ -98,32 +81,21 @@ EN = {
     "Das Ergebnis folgt.":
         "restart not finished after {minutes} minutes, systemd is still working on it: {services}. "
         "The result will follow.",
-    "Dieser Neustart ist nicht mehr nötig.": "This restart is no longer needed.",
     "Neustart läuft …": "Restarting …",
-    "⏳ <b>{host}</b>: starte neu: {services}. Das Ergebnis erscheint hier.": "⏳ <b>{host}</b>: restarting {services}. The result will appear here.",
     "Exit-Code {rc}": "exit code {rc}",
-    "{n} Paket wäre Routine und würde eingespielt.": "{n} package is routine and would be installed.",
-    "{n} Pakete wären Routine und würden eingespielt.": "{n} packages are routine and would be installed.",
-    "Beobachtungsmodus: Es wurde nichts verändert.": "Observation mode: nothing was changed.",
     "Danach wäre ein Neustart nötig.": "A reboot would be required afterwards.",
     "Die Gruppe ist jetzt eine Supergruppe mit neuer ID <code>{new}</code>. twguard nutzt sie ab sofort; "
     "bitte in /etc/twguard/config.toml <code>chat_id = {new}</code> eintragen.":
         "The group is now a supergroup with the new ID <code>{new}</code>. twguard uses it from now on; "
         "please set <code>chat_id = {new}</code> in /etc/twguard/config.toml.",
     # Prüflauf
-    "Details in der Meldung oder per journalctl -u twguard-check.": "Details in the message or via journalctl -u twguard-check.",
     "Repos lassen sich nicht auffrischen:": "Repositories cannot be refreshed:",
     "zypper dup --dry-run schlägt fehl:": "zypper dup --dry-run fails:",
     "Prüfung fertig, keine Updates.": "Check finished, no updates.",
     "Die Freigabe galt einem älteren Stand und ist verfallen.": "The approval was for an older state and has expired.",
     "(Unterschied nicht darstellbar, siehe Journal)": "(difference cannot be shown, see the journal)",
     "zypper dup endete mit Exit-Code {rc}:\n{tail}": "zypper dup ended with exit code {rc}:\n{tail}",
-    "⏳ <b>{host}</b> spielt das Update ein: {summary}. Das Ergebnis erscheint hier.":
-        "⏳ <b>{host}</b> is installing the update: {summary}. The result will appear here.",
-    "Danach ist ein Neustart nötig.": "A reboot will be required afterwards.",
     "Dienste werden neu gestartet, das Einspielen wartet": "services are being restarted, installation is waiting",
-    "⏳ <b>{host}</b>: Dienste werden gerade neu gestartet, das Update wartet darauf.":
-        "⏳ <b>{host}</b>: services are being restarted, the update is waiting for them.",
     "Neustart von Diensten läuft noch, nichts eingespielt": "service restart still running, nothing installed",
     "Paketverwaltung belegt durch %s, warte": "package management locked by %s, waiting",
     "Gerade nicht möglich: {reason}. Bitte danach erneut.": "Not possible right now: {reason}. Please try again afterwards.",
@@ -150,29 +122,14 @@ EN = {
     "Dienste mit alten Dateien": "services using old files",
     "Der Neustart von {services} wurde durch den Neustart des Servers unterbrochen; das Ergebnis ist unbekannt.":
         "Restarting {services} was interrupted by the server reboot; the result is unknown.",
-    "⏳ <b>{host}</b>: Die Paketverwaltung ist belegt durch {holder}, twguard wartet darauf.":
-        "⏳ <b>{host}</b>: package management is locked by {holder}, twguard is waiting for it.",
     "Paketverwaltung seit %d min belegt durch %s, nichts eingespielt":
         "package management locked for %d min by %s, nothing installed",
-    "Die Paketverwaltung ist seit {minutes} min belegt durch {holder}, nichts eingespielt. Der nächste "
-    "Prüflauf versucht es erneut (sofort: /check).":
-        "Package management has been locked by {holder} for {minutes} min, nothing installed. The next check "
-        "will try again (now: /check).",
     "Paketverwaltung belegt: {holder}": "Package management locked: {holder}",
     "zypper needs-rebooting: Paketverwaltung belegt durch %s": "zypper needs-rebooting: package management locked by %s",
     "zypper ps: Paketverwaltung belegt durch %s": "zypper ps: package management locked by %s",
     "ein anderes Programm": "another program",
-    "🔒 Paketverwaltung noch belegt: {holder}. Prüfen und Einspielen warten darauf.":
-        "🔒 Package management still locked: {holder}. Checks and installs wait for it.",
-    "🔒 Paketverwaltung seit über {hours} h belegt, siehe /status.":
-        "🔒 Package management locked for more than {hours} h, see /status.",
-    "✅ Paketverwaltung wieder frei ({when}).": "✅ Package management free again ({when}).",
     "🔒 Paketverwaltung belegt: {holder}. Prüfen und Einspielen warten darauf.":
         "🔒 Package management locked: {holder}. Checks and installs wait for it.",
-    "Der Neustart von Diensten läuft noch, das Update wurde nicht eingespielt. Der nächste Prüflauf "
-    "versucht es erneut (sofort: /check).":
-        "The service restart is still running, the update was not installed. The next check will try "
-        "again (now: /check).",
     "Ein Update wird gerade eingespielt und läuft noch zu Ende.":
         "An update is being installed right now and will run to completion.",
     "Nach dem Update ist ein Neustart nötig (Kernel oder Systembibliotheken).":
@@ -213,40 +170,6 @@ EN = {
     "Keine Paketliste vorhanden.": "No package list available.",
     "Datei konnte nicht gesendet werden.": "The file could not be sent.",
     # Bot
-    """Befehle. In der Gruppe als Antwort auf eine Nachricht dieses Bots oder mit @botname:
-/status – offene Punkte (ohne @botname antworten alle Server)
-/details – Paketliste des letzten Probelaufs
-/approve – gemeldetes Update freigeben und einspielen
-/check – sofort prüfen
-/later 1d – Erinnerungen aufschieben (z. B. 12h, 2d)
-/reboot – Neustart in 1 Minute
-/cancel – geplanten Neustart abbrechen
-/update – neuen Stand von twguard holen (ohne @botname: alle Server)
-/version – Version und Modus
-/language en – Sprache bis zum nächsten Neustart des Bots ändern (ohne @botname: alle Server)
-/mode auto – Modus bis zum nächsten Neustart des Bots ändern (auto oder observe; nur gezielt)
-/help – diese Hilfe (ohne @botname antwortet nur ein Server, gezielt jeder)
-/keyboard – feste Tastatur einblenden (/keyboard off: ausblenden)
-
-Die Tastatur „📊 Status“, „🔄 Alle prüfen“, „⬆️ Update“, „🏷️ Version“, „❓ Hilfe“ gilt für alle Server.
-Meldungen haben dafür auch Schaltflächen.""":
-    """Commands. In a group as a reply to a message from this bot or with @botname:
-/status – open issues (without @botname all servers answer)
-/details – package list of the last dry run
-/approve – approve and install the reported update
-/check – check now
-/later 1d – snooze reminders (e.g. 12h, 2d)
-/reboot – reboot in 1 minute
-/cancel – cancel a scheduled reboot
-/update – fetch the new twguard version (without @botname: all servers)
-/version – version and mode
-/language de – change the language until the next restart of the bot (without @botname: all servers)
-/mode auto – change the mode until the next restart of the bot (auto or observe; only when addressed)
-/help – this help (without @botname only one server answers, when addressed each one does)
-/keyboard – show the permanent keyboard (/keyboard off: hide it)
-
-The keyboard “📊 Status”, “🔄 Check all”, “⬆️ Update”, “🏷️ Version”, “❓ Help” applies to all servers.
-Messages also have buttons for this.""",
     "Offene Punkte (alle Server)": "Open issues (all servers)",
     "Sofort prüfen": "Check now",
     "Paketliste des letzten Probelaufs": "Package list of the last dry run",
@@ -288,31 +211,20 @@ Messages also have buttons for this.""",
     "Feste Tastatur einblenden": "Show the permanent keyboard",
     "Seit {age} keine erfolgreiche Prüfung. Läuft twguard-check.timer?":
         "No successful check for {age}. Is twguard-check.timer running?",
-    "✅ eingespielt, siehe Briefing": "✅ installed, see the briefing",
     "zypper needs-rebooting meldet einen ausstehenden Neustart.": "zypper needs-rebooting reports a pending reboot.",
     "Unbekannter Befehl. /help zeigt die Befehle.": "Unknown command. /help shows the commands.",
-    "Beobachtungsmodus: Updates werden nur gemeldet.": "Observation mode: updates are only reported.",
-    "⏳ Freigegeben. <b>{host}</b> spielt das Update ein; das Ergebnis erscheint hier.":
-        "⏳ Approved. <b>{host}</b> is installing the update; the result will appear here.",
     "Es liegt kein Update zur Freigabe vor.": "There is no update to approve.",
     "Das lässt sich nicht per Telegram freigeben, bitte per SSH lösen.":
         "This cannot be approved via Telegram, please resolve it via SSH.",
     "Diese Meldung gilt einem älteren Stand. /status zeigt den aktuellen.":
         "This message refers to an older state. /status shows the current one.",
-    "🔄 <b>{host}</b>: Prüfung läuft (Repos auffrischen, Probelauf); das Ergebnis erscheint hier, meist nach ein bis zwei Minuten.":
-        "🔄 <b>{host}</b>: check running (refresh, dry run); the result will appear here, usually within a minute or two.",
     "Format: /later 12h oder /later 2d": "Format: /later 12h or /later 2d",
     "Es ist nichts offen.": "Nothing is open.",
     "Aufgeschoben um {hours} Stunden: {titles}": "Snoozed for {hours} hours: {titles}",
     "Nicht weiter aufschiebbar: {titles}": "Cannot be snoozed any further: {titles}",
     "Neustart fehlgeschlagen: {error}": "Reboot failed: {error}",
-    "🔁 <b>{host}</b> startet in 1 Minute neu; danach steht das Ergebnis hier.":
-        "🔁 <b>{host}</b> reboots in 1 minute; the result will appear here afterwards.",
     "Abbrechen fehlgeschlagen: {error}": "Cancelling failed: {error}",
-    "✖️ <b>{host}</b>: Neustart abgebrochen.": "✖️ <b>{host}</b>: reboot cancelled.",
     "<b>{host}</b>: twguard ist aktuell ({commit}).": "<b>{host}</b>: twguard is up to date ({commit}).",
-    "⬆️ <b>{host}</b>: twguard {target} mit {n} neuen Commits (läuft mit {commit}):\n<pre>{commits}</pre>":
-        "⬆️ <b>{host}</b>: twguard {target} with {n} new commits (running {commit}):\n<pre>{commits}</pre>",
     "Inzwischen gibt es einen anderen Stand. Bitte /update erneut.": "There is a different version by now. Please run /update again.",
     "<b>{host}</b>: twguard ist schon aktuell.": "<b>{host}</b>: twguard is already up to date.",
     "Ein Update läuft bereits.": "An update is already running.",
@@ -327,14 +239,9 @@ Messages also have buttons for this.""",
     "Nicht berechtigt.": "Not authorized.",
     "Unbekannte Schaltfläche.": "Unknown button.",
     "Freigegeben": "Approved",
-    "Nicht mehr verfügbar.": "No longer available.",
-    "\n\n⏰ Aufgeschoben bis {when}": "\n\n⏰ Snoozed until {when}",
     "Prüfung läuft …": "Check running …",
     "Update läuft …": "Update running …",
-    "⏳ <b>{host}</b>: Update auf {commit} läuft, der Bot startet gleich neu und antwortet so lange nicht. Tests und Installation dauern einige Minuten, danach wartet twguard bis zu {seconds} s auf den neuen Bot. Meldet er sich nicht oder schlägt die Installation fehl, wird die ursprüngliche Version wiederhergestellt. Das Ergebnis erscheint hier.":
-        "⏳ <b>{host}</b>: updating to {commit}, the bot will restart shortly and not answer meanwhile. Tests and installation take a few minutes, then twguard waits up to {seconds} s for the new bot. If it does not report back or the installation fails, the original version is restored. The result will appear here.",
     "✖️ verworfen": "✖️ dismissed",
-    "↓ ersetzt durch eine neuere Nachricht": "↓ replaced by a newer message",
     # Update über das Netz
     "{what}: keine Antwort nach {n} s": "{what}: no response after {n} s",
     "{what} endete mit Exit-Code {rc}:\n{tail}": "{what} ended with exit code {rc}:\n{tail}",
@@ -369,17 +276,13 @@ Messages also have buttons for this.""",
     "Falls die Gruppe zur Supergruppe wurde: chat_id = %s in config.toml eintragen (bisher %s)":
         "If the group became a supergroup: set chat_id = %s in config.toml (currently %s)",
     "Datei nicht gesendet: %s": "file not sent: %s",
-    "Details nicht zurückgeklappt: %s": "details not collapsed: %s",
-    "Details von Nachricht %s nicht zurückklappbar: Inhalt nicht gespeichert": "details of message %s cannot be collapsed: content not stored",
     "Antwort nicht gesendet: %s": "answer not sent: %s",
     "Nachricht nicht gesendet: %s": "message not sent: %s",
     "{address} nach {seconds} s: {error}": "{address} after {seconds} s: {error}",
     "antwort": "response",
-    "Schaltflächen im Briefing nicht angepasst: %s": "briefing buttons not updated: %s",
     "Tippanzeige nicht gesendet: %s": "typing indicator not sent: %s",
     "Schaltfläche nicht bestätigt: %s": "button not acknowledged: %s",
     "Telegram nicht erreichbar: %s": "Telegram not reachable: %s",
-    "Briefing nicht gesendet: %s": "briefing not sent: %s",
     "Befehle werden nicht gelöscht (Bot braucht das Admin-Recht „Nachrichten löschen“): %s":
         "commands are not deleted (the bot needs the admin right “Delete messages”): %s",
     "spiele %d Pakete ein (%s)": "installing %d packages (%s)",
@@ -391,8 +294,6 @@ Messages also have buttons for this.""",
     "Plan des Einspielens nicht lesbar, Abgleich mit dem Probelauf entfällt":
         "plan of the installation not readable, comparison with the dry run skipped",
     "eingespielter Plan weicht vom geprüften ab:\n%s": "installed plan differs from the checked one:\n%s",
-    "Bericht nicht gesendet: %s": "report not sent: %s",
-    "Meldung nicht gesendet: %s": "notification not sent: %s",
     "chat_id %s in der Konfiguration ist veraltet, nutze %s (bitte eintragen)":
         "chat_id %s in the configuration is outdated, using %s (please update it)",
     "Nachricht %s nicht bearbeitet: %s": "message %s not edited: %s",
@@ -400,7 +301,6 @@ Messages also have buttons for this.""",
     "Gruppe %s ist jetzt Supergruppe %s; bitte chat_id in config.toml anpassen":
         "group %s is now supergroup %s; please update chat_id in config.toml",
     "Hinweis zur neuen Gruppen-ID nicht gesendet: %s": "notice about the new group ID not sent: %s",
-    "Erinnerung nicht gesendet: %s": "reminder not sent: %s",
     "neuer Bot hat sich nicht gemeldet, spiele alte Version zurück": "new bot did not report, restoring the old version",
     "Zurückrollen: %s": "rollback: %s",
     "Telegram: mehr als %d Fehler in einer Stunde (Abruf %d, Senden %d), zuletzt: %s":
@@ -412,6 +312,7 @@ Messages also have buttons for this.""",
     "starte: %s": "starting: %s",
     "zypper needs-rebooting: Exit-Code %s": "zypper needs-rebooting: exit code %s",
     "zypper ps: %s": "zypper ps: %s",
+    "zypper ps: unerwartete Zeile: %s": "zypper ps: unexpected line: %s",
     "%s: keine Antwort nach %d s, abgebrochen": "%s: no response after %d s, aborted",
     # Kommandozeile
     "Keine Konfiguration gefunden ({path})": "No configuration found ({path})",
@@ -467,6 +368,59 @@ then write /start@botname in the group again and repeat twguard telegram-ids."""
     "twguard läuft jetzt mit {commit}.": "twguard is now running {commit}.",
     "Update fehlgeschlagen, siehe die Meldung in Telegram und oben.": "Update failed, see the message in Telegram and above.",
     "Unbekannter Commit: {commit}": "Unknown commit: {commit}",
+    '(dauert ungewöhnlich lange, systemd arbeitet noch daran)': '(taking unusually long, systemd is still working on it)',
+    'Ausgenommen vom Neustart, nutzen alte Bibliotheken: {services}':
+        'Excluded from restarts, using old libraries: {services}',
+    'Ausstehend: {plan}': 'Pending: {plan}',
+    'Bitte per SSH nachsehen (journalctl -u twguard-check), danach „Behoben“.':
+        'Please check via SSH (journalctl -u twguard-check), then press "Fixed".',
+    'Der Neustart von Diensten läuft noch, das Update wurde nicht eingespielt. Der nächste Prüflauf versucht es erneut.':
+        'Services are still restarting, the update was not installed. The next check will try again.',
+    'Die vorige Freigabe ist verfallen.': 'The previous approval has expired.',
+    'Diese Nachricht ist veraltet, nichts ausgeführt. Der aktuelle Stand steht jetzt ganz unten.':
+        'This message is outdated, nothing was done. The current state is now at the bottom.',
+    'Erinnerung: {titles}': 'Reminder: {titles}',
+    'Kernel {kernel} seit {when}': 'kernel {kernel} since {when}',
+    'Letzte Prüfung {when}': 'Last check {when}',
+    'Neustart abgebrochen.': 'Reboot cancelled.',
+    'Neustart per Telegram ausgelöst ({planned}).': 'Reboot requested via Telegram ({planned}).',
+    'Noch keine Prüfung': 'No check yet',
+    'Paketverwaltung seit {minutes} min belegt durch {holder}, nichts eingespielt; der nächste Prüflauf versucht es erneut.':
+        'Package management locked for {minutes} min by {holder}, nothing installed; the next check will try again.',
+    'Prüfung fertig: {summary}, Freigabe nötig.': 'Check finished: {summary}, approval needed.',
+    'Stand {when}': 'as of {when}',
+    'Telegram: zu viele Nachrichten, warte %d s': 'Telegram: too many messages, waiting %d s',
+    'Wartezeit nach Too Many Requests, noch {n} s': 'waiting after Too Many Requests, {n} s left',
+    '(gekürzt, siehe journalctl)': '(shortened, see journalctl)',
+    '(Text gekürzt, zu viele offene Punkte)': '(text shortened, too many open items)',
+    '… weitere Angaben passen nicht in die Nachricht': '… more does not fit into the message',
+    'Updates ausstehend (Beobachtungsmodus)': 'updates pending (observe mode)',
+    'Zustandsnachricht nicht gesendet: %s': 'state message not sent: %s',
+    'aufgeschoben bis {when}': 'snoozed until {when}',
+    'danach Neustart nötig': 'reboot needed afterwards',
+    'nichts offen': 'nothing open',
+    'seit {when}': 'since {when}',
+    '{n} Paket wäre Routine und würde eingespielt, im Beobachtungsmodus nicht.':
+        '{n} package would be routine and installed, but not in observe mode.',
+    '{n} Pakete wären Routine und würden eingespielt, im Beobachtungsmodus nicht.':
+        '{n} packages would be routine and installed, but not in observe mode.',
+    '{title}: als behoben quittiert.': '{title}: marked as fixed.',
+    '↓ veraltet, der aktuelle Stand steht weiter unten (/status)': '↓ outdated, the current state is further down (/status)',
+    '⏳ Einspielen wartet, bis die Dienste neu gestartet sind': '⏳ Installing waits until the services have restarted',
+    '⏳ Freigegeben, Prüfung und Einspielen starten …': '⏳ Approved, check and installation starting …',
+    '⏳ Prüfung wartet auf die Paketverwaltung: {holder}': '⏳ Check waits for package management: {holder}',
+    '⏳ Spielt ein: {summary}': '⏳ Installing: {summary}',
+    '✖️ Verwerfen': '✖️ Dismiss',
+    '⬆️ Update von twguard auf {commit} läuft, der Bot antwortet so lange nicht. Tests und Installation dauern einige Minuten, danach wartet twguard bis zu {seconds} s auf den neuen Bot. Meldet er sich nicht oder schlägt die Installation fehl, wird die ursprüngliche Version wiederhergestellt.':
+        '⬆️ Updating twguard to {commit}, the bot does not answer meanwhile. Tests and installation take a few minutes, then twguard waits up to {seconds} s for the new bot. If it does not report back or the installation fails, the original version is restored.',
+    '⬆️ twguard {target} verfügbar, {n} neue Commits (läuft mit {commit}):':
+        '⬆️ twguard {target} available, {n} new commits (running {commit}):',
+    '🔁 Dienste werden neu gestartet: {services}': '🔁 Restarting services: {services}',
+    '🔄 Prüfung läuft: Probelauf': '🔄 Check running: dry run',
+    '🔄 Prüfung läuft: Repos auffrischen': '🔄 Check running: refreshing repos',
+    '🔄 Prüfung startet …': '🔄 Check starting …',
+    'Befehle. In der Gruppe als Antwort auf eine Nachricht dieses Bots oder mit @botname:\n/status – Zustandsnachricht nach unten holen (ohne @botname antworten alle Server)\n/details – Paketliste des letzten Probelaufs in der Zustandsnachricht\n/approve – gemeldetes Update freigeben und einspielen\n/check – sofort prüfen\n/later 1d – Erinnerungen aufschieben (z. B. 12h, 2d)\n/reboot – Neustart in 1 Minute\n/cancel – geplanten Neustart abbrechen\n/update – neuen Stand von twguard holen (ohne @botname: alle Server)\n/version – Version und Modus\n/language en – Sprache bis zum nächsten Neustart des Bots ändern (ohne @botname: alle Server)\n/mode auto – Modus bis zum nächsten Neustart des Bots ändern (auto oder observe; nur gezielt)\n/help – diese Hilfe (ohne @botname antwortet nur ein Server, gezielt jeder)\n/keyboard – feste Tastatur einblenden (/keyboard off: ausblenden)\n\nDie Tastatur „📊 Status“, „🔄 Alle prüfen“, „⬆️ Update“, „🏷️ Version“, „❓ Hilfe“ gilt für alle Server.\nDie Schaltflächen stehen in der Zustandsnachricht, der jeweils neuesten Nachricht mit Schaltflächen.':
+        'Commands. In a group as a reply to a message from this bot or with @botname:\n/status – bring the state message to the bottom (without @botname all servers answer)\n/details – package list of the last dry run in the state message\n/approve – approve and install the reported update\n/check – check now\n/later 1d – snooze reminders (e.g. 12h, 2d)\n/reboot – reboot in 1 minute\n/cancel – cancel a scheduled reboot\n/update – fetch the new twguard version (without @botname: all servers)\n/version – version and mode\n/language de – change the language until the next restart of the bot (without @botname: all servers)\n/mode auto – change the mode until the next restart of the bot (auto or observe; only when addressed)\n/help – this help (without @botname only one server answers, when addressed each one does)\n/keyboard – show the permanent keyboard (/keyboard off: hide it)\n\nThe keyboard “📊 Status”, “🔄 Check all”, “⬆️ Update”, “🏷️ Version”, “❓ Help” applies to all servers.\nThe buttons are in the state message, always the newest message with buttons.',
 }
 
 TRANSLATIONS = {"de": {}, "en": EN}

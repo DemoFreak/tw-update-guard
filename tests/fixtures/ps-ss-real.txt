@@ -1,0 +1,12 @@
+Die folgenden aktiven Prozesse verwenden gelöschte Dateien:
+
+PID     | PPID | UID  | User  | Command          | Service
+--------+------+------+-------+------------------+--------
+6341    | 1    | 1000 | alice | screen (deleted) | sshd
+3849108 | 1    | 5019 | games | screen (deleted) | cron
+
+Diese Prozesse sollten neu gestartet werden.
+Informationen über die Bedeutung der Werte in der obigen Tabelle finden Sie unter 'man zypper'.
+
+Seit dem letzten Systemstart wurden zentrale Bibliotheken oder Dienste aktualisiert.
+Ein Neustart wird empfohlen, um sicherzustellen, dass Ihr System von diesen Aktualisierungen profitiert.

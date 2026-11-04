@@ -11,12 +11,12 @@ from pathlib import Path
 from unittest import mock
 
 import testlang  # noqa: F401
-from twguard import bot, cli, i18n, messages, notify, rules, zypper
+from twguard import bot, cli, i18n, messages, notify, panel, rules, zypper
 from twguard.bot import Bot
 from twguard.config import Config
 from twguard.details import file_html, file_name
 from twguard.i18n import EN, set_language, tr, trn
-from twguard.state import Issue
+from twguard.state import Issue, State
 
 from fakes import FakeTelegram
 
@@ -75,18 +75,18 @@ class LanguageTest(unittest.TestCase):
 
     def test_tr_and_plural(self):
         self.assertEqual(tr("{n} Tagen", n=3), "3 days")
-        self.assertEqual(trn("{n} Paket", "{n} Pakete", 1), "1 package")
-        self.assertEqual(trn("{n} Paket", "{n} Pakete", 2), "2 packages")
+        self.assertEqual(trn("{n} Paket aktualisiert", "{n} Pakete aktualisiert", 1), "1 package updated")
+        self.assertEqual(trn("{n} Paket aktualisiert", "{n} Pakete aktualisiert", 2), "2 packages updated")
 
     def test_value_with_braces_is_safe(self):
         self.assertEqual(tr("zypper-Ausgabe nicht lesbar: {error}", error="{x}"), "zypper output not readable: {x}")
 
-    def test_issue_in_english(self):
-        issue = Issue(kind="reboot", since=0.0)
-        text = notify.format_issue("host", issue, 7200.0, Config().escalation)
-        self.assertIn("Reboot pending", text)
-        self.assertIn("open for 2 hours", text)
-        self.assertEqual(notify.issue_buttons(issue)[0][0][0], "🔁 Reboot")
+    def test_state_message_in_english(self):
+        st = State(issues={"reboot": Issue(kind="reboot", since=0.0)})
+        shown = panel.render(Config(hostname="host"), st, 7200.0)
+        self.assertIn("1 open issue", shown.text)
+        self.assertIn("Reboot pending", shown.text)
+        self.assertEqual(shown.buttons[0][0][0], "🔁 Reboot")
 
     def test_file_is_english(self):
         plan = {"summary": "1 package", "rows": [["to-upgrade", "a", "1-1", "2-1", ""]], "problems": []}

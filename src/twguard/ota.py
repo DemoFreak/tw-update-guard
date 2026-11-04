@@ -21,11 +21,10 @@ from dataclasses import dataclass
 from html import escape
 from pathlib import Path
 
-from . import COMMIT, __version__, busy, messages, state
+from . import COMMIT, __version__, busy, panel, state
 from .i18n import tr
 from .config import Config, Update
 from .notify import clip, use_language
-from .telegram import Telegram
 
 log = logging.getLogger(__name__)
 
@@ -186,7 +185,8 @@ def command(cfg: Config, commit: str = "") -> int:
     with state.locked(cfg.state_dir) as st:
         refused = busy.refusal("update", st)
         if not refused:
-            st.update_request = {"commit": target, "at": time.time(), "console": True, "runner": state.holder()}
+            st.update_request = {"commit": target, "at": time.time(), "console": True, "runner": state.holder(),
+                                 "label": label(target, version_of(cfg.update.repo, target)), "wait": START_TIMEOUT}
     if refused:
         print(refused, file=sys.stderr)
         return 1
@@ -209,16 +209,15 @@ def self_update(cfg: Config, commit: str) -> int:
     """Läuft als Unit `twguard-update`: einspielen, prüfen, bei Fehlern zurückrollen."""
     use_language(cfg)
     repo = cfg.update.repo
-    tg = Telegram(cfg.token, cfg.chat_id)
     with state.locked(cfg.state_dir) as st:
         request = dict(st.update_request)
 
     def report(text: str) -> None:
+        # Ein Fehlschlag als Ereignis; zugestellt wird es vom Bot (dem zurückgerollten, falls nötig)
         with state.locked(cfg.state_dir) as st:
             if st.update_request.get("runner") == request.get("runner"):
                 st.update_request = {}
-        # Die Bestätigungsnachricht („Update läuft“) wird zum Ergebnis
-        messages.edit_or_send(tg, request, text)
+            panel.event(st, text, loud=True)
 
     host = escape(cfg.hostname)
     try:
@@ -307,8 +306,8 @@ def _rollback(cfg: Config, repo: str, old: str, installed: bool) -> list[str]:
     return problems
 
 
-def startup_report(cfg: Config, st: state.State, now: float | None = None) -> tuple[str, dict] | None:
-    """Beim Start des Bots: Ergebnis eines laufenden Updates (Text, Anfrage) oder None."""
+def startup_report(cfg: Config, st: state.State, now: float | None = None) -> str | None:
+    """Beim Start des Bots: Ergebnis eines laufenden Updates als Ereignis vormerken; Rückgabe: dessen Text."""
     request = st.update_request
     if not request:
         return None
@@ -317,10 +316,14 @@ def startup_report(cfg: Config, st: state.State, now: float | None = None) -> tu
         st.update_request = {}
         if request.get("console"):
             return None  # Erfolg von Hand steht auf der Konsole, nicht in Telegram
-        return tr("✅ <b>{host}</b>: twguard läuft jetzt mit {commit}.", host=host, commit=escape(running())), request
+        text = tr("✅ <b>{host}</b>: twguard läuft jetzt mit {commit}.", host=host, commit=escape(running()))
+        panel.event(st, text, now=now)
+        return text
     if (now or time.time()) - request.get("at", 0) > STUCK_AFTER:
         st.update_request = {}
-        return tr("⚠️ <b>{host}</b>: Vom Update auf {commit} kam keine Rückmeldung. Läuft weiter mit {running}; "
+        text = tr("⚠️ <b>{host}</b>: Vom Update auf {commit} kam keine Rückmeldung. Läuft weiter mit {running}; "
                   "siehe journalctl -u {unit}.", host=host, commit=escape(label(request.get("commit", ""))),
-                  running=escape(running()), unit=UNIT), request
+                  running=escape(running()), unit=UNIT)
+        panel.event(st, text, loud=True, now=now)
+        return text
     return None

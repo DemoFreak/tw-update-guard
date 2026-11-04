@@ -1,8 +1,10 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
 """Telegram-Bot (Dienst): beantwortet Befehle, schickt Erinnerungen und hält den Chat aufgeräumt.
 
-Grundsatz: je Thema eine Nachricht. Antworten ersetzen ihre Vorgänger, Schaltflächen bearbeiten
-die Nachricht, an der sie hängen, Befehle und kurzlebige Antworten werden wieder gelöscht.
+Grundsatz: eine Zustandsnachricht je Server (`panel`), die einzige mit Schaltflächen, dazu kurze
+Ereignisse ohne Schaltflächen. Der Bot ist der einzige Sender: Prüflauf und Update schreiben nur in
+den Zustand, `Bot.pump` stellt Ereignisse zu und führt die Zustandsnachricht nach. Befehle und
+kurzlebige Antworten werden wieder gelöscht.
 """
 
 from __future__ import annotations
@@ -12,16 +14,14 @@ import os
 import re
 import subprocess
 import time
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
 from html import escape
 from pathlib import Path
 
-from . import COMMIT, busy, details, messages, ota, restarts, state, zypper
+from . import COMMIT, busy, details, messages, ota, panel, restarts, state, zypper
 from .config import MODES, Config
 from .i18n import EN, LANGUAGES, current, set_language, tr
-from .notify import (adopt_migration, button_kind, clip, fmt_age, format_briefing, format_issue, format_status,
-                     due_issues, issue_buttons, status_buttons, mark_resolved, minutes_of_day, note_reminded,
-                     send_due, stamp, title)
+from .notify import adopt_migration, clip, due_issues, fmt_age, lingering_line, issue_identity, minutes_of_day, note_reminded, title
 from .telegram import Buttons, Telegram, TelegramError
 
 log = logging.getLogger(__name__)
@@ -32,8 +32,21 @@ RPMDB_PATHS = (Path("/usr/lib/sysimage/rpm/rpmdb.sqlite"), Path("/var/lib/rpm/rp
 MAX_COMMAND_AGE = 600
 TICK_SECONDS = 60
 REBOOT_CHECK_SECONDS = 1800
-# So lange ergänzt der Bot die Meldung „wieder da“, sobald die Paketverwaltung nach dem Boot frei ist
-MAINTENANCE_MAX = 2 * 3600
+# Ereignisse eines laufenden Vorgangs (Prüflauf, Dienst-Neustart) warten auf dessen Ende, höchstens so lange,
+# damit sie zusammen in einer Nachricht kommen
+EVENT_HOLD = 300
+# So lange zeigt die Zustandsnachricht Details, danach wieder die Übersicht
+VIEW_MAX = 900
+# Ein angestoßener Prüflauf, der sich so lange nicht gemeldet hat, ist nicht gestartet
+QUEUED_MAX = 180
+# So lange gilt ein mit /update angebotener Stand
+OFFER_MAX = 3600
+# So oft wird eine ersetzte Nachricht noch zu entfernen versucht
+STALE_TRIES = 3
+# Themen bis 0.9: Sie gehen beim ersten Start mit der Zustandsnachricht
+LEGACY_TOPICS = ("status", "briefing", "reboot", "observed", "update")
+# Schaltflächen, die auch auf einer älteren Nachricht gelten; alle anderen nur auf der Zustandsnachricht
+ANYWHERE = ("status", "file", "dismiss")
 # So lange wird höchstens auf das Ende eingereihter Dienst-Neustarts gewartet
 RESTART_TIMEOUT = 900
 # Nach einem Fehler bei getUpdates: erst kurz, dann länger warten
@@ -45,8 +58,8 @@ SHORT = 120
 LONG = 300
 
 HELP = """Befehle. In der Gruppe als Antwort auf eine Nachricht dieses Bots oder mit @botname:
-/status – offene Punkte (ohne @botname antworten alle Server)
-/details – Paketliste des letzten Probelaufs
+/status – Zustandsnachricht nach unten holen (ohne @botname antworten alle Server)
+/details – Paketliste des letzten Probelaufs in der Zustandsnachricht
 /approve – gemeldetes Update freigeben und einspielen
 /check – sofort prüfen
 /later 1d – Erinnerungen aufschieben (z. B. 12h, 2d)
@@ -60,7 +73,7 @@ HELP = """Befehle. In der Gruppe als Antwort auf eine Nachricht dieses Bots oder
 /keyboard – feste Tastatur einblenden (/keyboard off: ausblenden)
 
 Die Tastatur „📊 Status“, „🔄 Alle prüfen“, „⬆️ Update“, „🏷️ Version“, „❓ Hilfe“ gilt für alle Server.
-Meldungen haben dafür auch Schaltflächen."""
+Die Schaltflächen stehen in der Zustandsnachricht, der jeweils neuesten Nachricht mit Schaltflächen."""
 
 # Befehlsmenü neben der Eingabezeile
 MENU = [
@@ -102,7 +115,6 @@ class Out:
     buttons: Buttons | None = None
     topic: str = ""  # ersetzt die vorige Nachricht zu diesem Thema
     ttl: float = 0  # löscht sich nach so vielen Sekunden
-    start_check: bool = False  # Prüflauf starten; er schreibt sein Ergebnis in diese Nachricht
     markup: dict | None = None  # statt Schaltflächen, z. B. feste Tastatur
 
 
@@ -172,7 +184,8 @@ class Bot:
         self.startup()
         failures = 0
         while True:
-            # Kurzes Long-Polling (10 s): Antworten, die unterwegs verloren gehen, kosten so wenig Zeit
+            # Kurzes Long-Polling (10 s): Antworten, die unterwegs verloren gehen, kosten so wenig Zeit,
+            # und was Prüflauf oder Update in den Zustand schreiben, erscheint nach höchstens 10 s
             try:
                 updates = self.tg.get_updates(self.offset)
                 failures = 0
@@ -186,6 +199,7 @@ class Bot:
             self.watch_restart()
             if time.time() - self.last_tick >= TICK_SECONDS:
                 self.tick()
+            self.pump()
 
     def startup(self) -> None:
         self._set_menu()
@@ -203,41 +217,36 @@ class Bot:
             if booted:
                 self.after_boot(st)
             st.bot_commit = COMMIT
-            self._report_update(st)
-        self.deliver_outbox()
+            ota.startup_report(self.cfg, st)
+        self.observe_system()
         self.check_reboot()
+        self.pump()
+        self.migrate_legacy()
 
     def after_boot(self, st: state.State) -> None:
         """Einmal nach jedem Boot (nicht bei einem bloßen Neustart des Bots).
 
         Neustart und Dienste von vorher sind damit erledigt; ob wieder etwas ansteht, sagt erst zypper, und
-        das kann nach einem Kernel-Wechsel minutenlang gesperrt sein (purge-kernels). Bis dahin zeigt der
-        Status „noch nicht abgefragt“ statt Entwarnung. Rückmeldungen gehen über die Warteschlange, damit
-        ein Telegram-Fehler beim Start nichts verliert.
+        das kann nach einem Kernel-Wechsel minutenlang gesperrt sein (purge-kernels). Bis dahin zeigt die
+        Zustandsnachricht „noch nicht abgefragt“ statt Entwarnung. Rückmeldungen gehen als Ereignis über
+        die Warteschlange, damit ein Telegram-Fehler beim Start nichts verliert.
         """
         for kind in ("reboot", "services"):
             st.resolve(kind)
         st.restart_services = []
+        st.lingering = {}
         st.unverified = ["reboot", "services"]
         st.reboot_planning = {}
         busy.note_shutdown(st, busy.Shutdown("none"))
-        mark_resolved(self.cfg, st, self.tg)
-        now = time.time()
         if st.restart_request:
             request, st.restart_request = st.restart_request, {}
-            st.outbox.append({"chat_id": request.get("chat_id"), "message_id": request.get("message_id"), "at": now,
-                              "loud": True, "text": f"⚠️ <b>{self.host}</b>: " + tr(
-                                  "Der Neustart von {services} wurde durch den Neustart des Servers unterbrochen; "
-                                  "das Ergebnis ist unbekannt.", services=escape(", ".join(request.get("services", []))))})
+            panel.event(st, panel.line(self.cfg.hostname, "⚠️", tr(
+                "Der Neustart von {services} wurde durch den Neustart des Servers unterbrochen; "
+                "das Ergebnis ist unbekannt.", services=escape(", ".join(request.get("services", []))))), loud=True)
         if st.reboot_requested_at:
             st.reboot_requested_at = 0.0
-            text = tr("🟢 <b>{host}</b> ist wieder da (Kernel {kernel}).", host=self.host, kernel=escape(os.uname().release))
-            # Nach einem Kernel-Wechsel räumt purge-kernels minutenlang auf und sperrt zypper
-            holder = zypper.lock_holder()
-            note = "\n" + tr("🔒 Paketverwaltung noch belegt: {holder}. Prüfen und Einspielen warten darauf.",
-                             holder=escape(holder)) if holder else ""
-            st.outbox.append({**st.messages.pop("reboot", {}), "at": now, "loud": False, "text": text + note,
-                              **({"maintenance": text} if holder else {})})
+            panel.event(st, tr("🟢 <b>{host}</b> ist wieder da (Kernel {kernel}).", host=self.host,
+                               kernel=escape(os.uname().release)))
 
     def process(self, update: dict) -> None:
         # Offset vor der Ausführung sichern, damit z. B. /reboot nach dem Neustart nicht erneut greift
@@ -267,9 +276,8 @@ class Bot:
     def tick(self) -> None:
         now = self.last_tick = time.time()
         mtime = self._rpmdb_mtime()
-        shutdown = busy.shutdown()
+        freed = self.observe_system()
         with state.locked(self.cfg.state_dir) as st:
-            busy.note_shutdown(st, shutdown)
             rpmdb_changed = bool(st.rpmdb_mtime) and mtime != st.rpmdb_mtime
             st.rpmdb_mtime = mtime
             pending = bool(st.pending_text) or any(k in st.issues for k in ("manual", "apply-failed"))
@@ -278,12 +286,11 @@ class Bot:
             self.check_reboot()
             if pending:
                 self.start_check()
-        elif now - self.last_reboot_check >= REBOOT_CHECK_SECONDS:
+        elif freed or now - self.last_reboot_check >= REBOOT_CHECK_SECONDS:
+            # Nach purge-kernels antwortet zypper wieder: Neustart und Dienste nicht erst in 30 min abgleichen
             self.check_reboot()
 
         self.sync_migration()
-        self.deliver_outbox()
-        self.watch_maintenance(now)
         with state.locked(self.cfg.state_dir) as st:
             base = st.last_check_ok or st.first_seen
             stale = base and now - base > self.cfg.escalation.stale_after_hours * 3600
@@ -292,14 +299,29 @@ class Bot:
                                           age=fmt_age(now - base)), now=now)
             elif not stale:
                 st.resolve("stale")
-            self._report_update(st, now)
-        # Vor den Erinnerungen: Das Briefing nimmt die gleichzeitig fälligen auf
+            ota.startup_report(self.cfg, st, now)
+            due = messages.expired(st, now)
+        for message in due:
+            messages.delete(self.tg, message)
         self.maybe_briefing(now)
+        self.retry_stale()
+        self.migrate_legacy()
+
+    def observe_system(self) -> bool:
+        """logind und den Besitzer der zypp-Sperre für die Anzeige merken.
+
+        Rückgabe: Die Paketverwaltung ist seit dem letzten Aufruf frei geworden.
+        """
+        shutdown = busy.shutdown()
+        holder = zypper.lock_holder()
         with state.locked(self.cfg.state_dir) as st:
-            send_due(self.cfg, st, self.tg, now)
-            messages.cleanup(self.tg, st, now)
+            busy.note_shutdown(st, shutdown)
+            freed = bool(st.zypp_holder) and not holder
+            st.zypp_holder = holder
+        return freed
 
     def maybe_briefing(self, now: float) -> None:
+        """Einmal am Tag die Zustandsnachricht neu senden, mit Ton, wenn etwas offen ist (Lebenszeichen)."""
         if not self.cfg.briefing.at:
             return
         t = time.localtime(now)
@@ -310,62 +332,205 @@ class Bot:
         with state.locked(self.cfg.state_dir) as st:
             if st.last_briefing_day == today:
                 return
-            # Eine jetzt fällige Erinnerung kommt im Briefing mit ihren Schaltflächen, nicht als zweite Nachricht
-            due = due_issues(st, now, self.cfg.escalation)
-            text = format_briefing(self.cfg.hostname, st, now, self.cfg.observe,
-                                   os.uname().release, now - boot_time(), due)
-            buttons = [row for issue in due for row in issue_buttons(issue, services=st.restart_services)]
-            try:
-                messages.replace(self.tg, st, "briefing", text,
-                                 buttons=[*buttons, [("📊 Status", "status"), (tr("🔄 Jetzt prüfen"), "check")]],
-                                 silent=self.cfg.briefing.silent and not st.issues)
-            except TelegramError as e:
-                log.debug(tr("Briefing nicht gesendet: %s"), e)
-                return
-            st.last_briefing_day = today
-            for issue in due:
-                # Wie eine neue Erinnerung ersetzt das Briefing die vorige Meldung zum Punkt
-                old = st.messages.pop(f"issue:{issue.kind}", None)
-                if old:
-                    messages.retire(self.tg, old)
-                note_reminded(st, issue, now)
-            # Die Update-Berichte stehen jetzt im Briefing
-            for report in st.reports:
-                if report.get("message_id"):
-                    messages.retire(self.tg, report, tr("✅ eingespielt, siehe Briefing"))
-            st.reports = []
+        self.pump(briefing=today, now=now)
 
-    def watch_maintenance(self, now: float) -> None:
-        """Ist die Paketverwaltung nach dem Boot wieder frei, die Meldung „wieder da“ ergänzen und nachfragen."""
+    # --- Zustandsnachricht und Ereignisse ---------------------------------
+
+    def pump(self, resend: bool = False, briefing: str = "", view: str | None = None,
+             now: float | None = None) -> bool:
+        """Ereignisse zustellen und die Zustandsnachricht nachführen; Rückgabe: sie ist auf dem Stand.
+
+        Der einzige Weg, auf dem Zustand nach Telegram geht. Bearbeitet wird lautlos; neu gesendet wird
+        auf Anfrage (`resend`, z. B. /status), zum Briefing (`briefing` ist der Tag), nach Ereignissen
+        (still, damit sie wieder darunter steht) und mit Ton, wenn eine Erinnerung fällig ist. Gesendet
+        wird außerhalb der Sperre; was gezeigt ist, steht als Digest im Zustand. Ein neuerer Zustand
+        ergibt einen anderen Digest und wird beim nächsten Aufruf nachgezogen.
+        """
+        now = now or time.time()
+        if self._paused():
+            return False
+        if self.send_events(now):
+            resend = True
+        if self._paused():
+            return False  # Telegram verlangt eine Pause; der Rest wartet bis zum nächsten Aufruf
+        explicit = view is not None
         with state.locked(self.cfg.state_dir) as st:
-            entry = dict(st.maintenance)
-        if not entry:
+            self._prune(st, now)
+            due = due_issues(st, now, self.cfg.escalation)
+            # Was gesendet wird; quittiert wird nur, was danach noch genauso besteht
+            reminded = [(issue.kind, issue_identity(st, issue)) for issue in due]
+            old = dict(st.messages.get(panel.TOPIC) or {})
+            meta = dict(st.panel)
+            fresh = resend or bool(briefing) or bool(due) or not old
+            if due:
+                view = ""  # Eine Erinnerung zeigt die Übersicht
+            elif view is None:
+                view = "" if fresh or now - meta.get("view_at", 0) > VIEW_MAX else meta.get("view", "")
+            shown = self._render(st, now, due, bool(briefing), view)
+            if view and not explicit and shown.overview != meta.get("overview"):
+                # Etwas hat sich geändert: zurück zur Übersicht, statt es hinter der Paketliste zu verstecken
+                view, shown = "", self._render(st, now, due, bool(briefing), "")
+            loud = bool(due) or bool(briefing) and bool(st.issues or not self.cfg.briefing.silent)
+            manual = st.issues.get("manual")
+            fingerprint = manual.fingerprint if manual and manual.approvable else ""
+        if not fresh and shown.digest == meta.get("digest"):
+            return True
+        target = old if not fresh and messages.edit(self.tg, old, shown.text, shown.buttons) else None
+        if target is None and self._paused():
+            return False  # Bearbeiten scheiterte an der Wartezeit: nicht stattdessen neu senden
+        if target is None:
+            try:
+                target = messages.ref(self.tg.send(shown.text, silent=not loud, buttons=shown.buttons))
+            except TelegramError as e:
+                self._pause(e)
+                log.debug(tr("Zustandsnachricht nicht gesendet: %s"), e)
+                return False
+        with state.locked(self.cfg.state_dir) as st:
+            st.messages[panel.TOPIC] = target
+            st.panel = {"digest": shown.digest, "overview": shown.overview, "view": view,
+                        "view_at": (now if explicit else meta.get("view_at", now)) if view else 0}
+            if not view and fingerprint:
+                # /approve gilt nur für den Plan, den eine zugestellte Nachricht gezeigt hat
+                st.manual_shown = fingerprint
+            for kind, identity in reminded:
+                # Erinnert gilt erst, wenn die Nachricht mit Ton angekommen ist, und nur für den Stand,
+                # den sie zeigte; ein inzwischen geänderter Punkt bleibt fällig
+                current = st.issues.get(kind)
+                if current is not None and issue_identity(st, current) == identity:
+                    note_reminded(current, now)
+            if briefing:
+                st.last_briefing_day = briefing
+        if old and not messages.same(old, target) and not messages.retire(self.tg, old):
+            with state.locked(self.cfg.state_dir) as st:
+                st.stale_messages.append(old)
+        return True
+
+    def _render(self, st: state.State, now: float, due: list, briefing: bool, view: str) -> panel.Panel:
+        return panel.render(self.cfg, st, now, self.configured_mode, os.uname().release, boot_time(), due,
+                            briefing, view)
+
+    def _prune(self, st: state.State, now: float) -> None:
+        """Was nicht mehr läuft, nicht mehr als laufend zeigen."""
+        check = st.activity.get("check")
+        if check and (not state.alive(check) if check.get("pid") else now - check.get("at", 0) > QUEUED_MAX):
+            del st.activity["check"]
+        if st.update_offer and now - st.update_offer.get("at", 0) > OFFER_MAX:
+            st.update_offer = {}
+
+    def send_events(self, now: float) -> bool:
+        """Vorgemerkte Ereignisse zustellen; Rückgabe: es wurde etwas gesendet.
+
+        Solange ein eigener Vorgang läuft, warten seine Ereignisse (höchstens EVENT_HOLD) und kommen
+        dann zusammen; eines mit Ton (etwas ging schief) nimmt alle sofort mit. Eine Nachricht nimmt so
+        viele ganze Ereignisse auf, wie hineinpassen; aus der Warteschlange geht erst, was angekommen
+        ist. Der Rest folgt in weiteren Nachrichten oder beim nächsten Aufruf.
+        """
+        with state.locked(self.cfg.state_dir) as st:
+            batch = list(st.outbox)
+            running = bool(st.restart_request) or state.alive(st.applying) or "check" in st.activity
+        # Was schiefging, kommt sofort
+        held = running and not any(e.get("loud") for e in batch)
+        if not batch or held and now - min(e.get("at", now) for e in batch) < EVENT_HOLD:
+            return False
+        sent_any = False
+        for chunk in self._chunks(batch):
+            try:
+                self.tg.send("\n".join(e["text"] for e in chunk), silent=not any(e.get("loud") for e in chunk))
+            except TelegramError as e:
+                self._pause(e)
+                log.debug(tr("Nachricht nicht gesendet: %s"), e)
+                break
+            sent_any = True
+            sent = {self._event_key(e) for e in chunk}
+            with state.locked(self.cfg.state_dir) as st:
+                st.outbox = [e for e in st.outbox if self._event_key(e) not in sent]
+            for e in chunk:
+                if e.get("message_id"):
+                    # Bis 0.9 gehörte zum Ergebnis eine Wartemeldung
+                    messages.retire(self.tg, e)
+        return sent_any
+
+    @staticmethod
+    def _chunks(batch: list[dict]) -> list[list[dict]]:
+        """Ganze Ereignisse in Nachrichten bis TEXT_LIMIT; keins wird geteilt (`panel.event` begrenzt jedes)."""
+        chunks: list[list[dict]] = []
+        size = 0
+        for e in batch:
+            length = len(e["text"]) + 1
+            if chunks and size + length <= panel.TEXT_LIMIT:
+                chunks[-1].append(e)
+                size += length
+            else:
+                chunks.append([e])
+                size = length
+        return chunks
+
+    @staticmethod
+    def _event_key(e: dict) -> str:
+        return e.get("id") or f"{e.get('at')}:{e.get('text')}"
+
+    def _paused(self) -> bool:
+        """Telegram verlangt nach „Too Many Requests“ eine Wartezeit; der Client hält sie fest."""
+        return time.time() < self.tg.blocked_until
+
+    def _pause(self, e: TelegramError) -> None:
+        if e.retry_after:
+            self.tg.blocked_until = max(self.tg.blocked_until, time.time() + e.retry_after)
+            log.warning(tr("Telegram: zu viele Nachrichten, warte %d s"), e.retry_after)
+
+    def retry_stale(self) -> None:
+        """Ersetzte Nachrichten, die sich nicht entfernen ließen, erneut entfernen (höchstens STALE_TRIES).
+
+        Eine Wartezeit nach 429 ist kein Fehlschlag: Ab da bleiben die übrigen ohne verbrauchten Versuch stehen.
+        """
+        if self._paused():
             return
-        if zypper.lock_holder():
-            if now - entry.get("at", 0) < MAINTENANCE_MAX:
-                return
-            # Hängt etwas länger, sagt es der Status; die Meldung soll nicht ewig „belegt“ behaupten
-            text = entry["text"] + "\n" + tr("🔒 Paketverwaltung seit über {hours} h belegt, siehe /status.",
-                                             hours=MAINTENANCE_MAX // 3600)
-        else:
-            text = entry["text"] + "\n" + tr("✅ Paketverwaltung wieder frei ({when}).", when=stamp(now))
-        messages.edit(self.tg, entry, text)
         with state.locked(self.cfg.state_dir) as st:
-            st.maintenance = {}
-        # Jetzt antwortet zypper wieder: Neustart und Dienste nicht erst in 30 min abgleichen
-        self.check_reboot()
+            pending, st.stale_messages = st.stale_messages, []
+        kept = []
+        for index, message in enumerate(pending):
+            if messages.retire(self.tg, message):
+                continue
+            if self._paused():
+                # Diese und alle noch nicht versuchten mit unverändertem Zähler zurückstellen
+                kept += pending[index:]
+                break
+            if message.get("tries", 0) + 1 < STALE_TRIES:
+                kept.append({**message, "tries": message.get("tries", 0) + 1})
+        if kept:
+            with state.locked(self.cfg.state_dir) as st:
+                st.stale_messages += kept
+
+    def migrate_legacy(self) -> None:
+        """Nachrichten der Themen bis 0.9 abräumen, sobald die Zustandsnachricht steht.
+
+        Wiederholbar: Was sich nicht entfernen lässt, versucht `retry_stale` erneut; laufende Aufträge und
+        die Warteschlange bleiben, nur ihre Wartemeldungen gehen.
+        """
+        with state.locked(self.cfg.state_dir) as st:
+            if panel.TOPIC not in st.messages:
+                return
+            legacy = [t for t in st.messages if t in LEGACY_TOPICS or t.startswith("issue:")]
+            old = [st.messages.pop(t) for t in legacy]
+            for request in (st.check_request, st.restart_request, st.update_request):
+                if request.get("message_id"):
+                    old.append({"chat_id": request.get("chat_id"), "message_id": request["message_id"],
+                                "at": request.get("at", 0)})
+                request.pop("message_id", None)
+                request.pop("chat_id", None)
+            st.stale_messages += old
+        if old:
+            self.retry_stale()
+
+    # --- Abfragen ---------------------------------------------------------
 
     def check_reboot(self) -> None:
         self.last_reboot_check = time.time()
         self.check_services()
         self.update_reboot()
 
-    def update_reboot(self, shown: bool = False) -> None:
-        """Offenen Punkt „Neustart“ nach `zypper needs-rebooting` öffnen oder schließen.
-
-        Mit `shown` zeigt die Statusnachricht einen neuen Punkt gleich samt Knopf; das zählt als
-        erste Benachrichtigung, damit nicht kurz danach dieselbe Meldung noch einmal kommt.
-        """
+    def update_reboot(self) -> None:
+        """Offenen Punkt „Neustart“ nach `zypper needs-rebooting` öffnen oder schließen."""
         needed = zypper.needs_rebooting()
         if needed is None:
             return
@@ -373,18 +538,15 @@ class Bot:
             if "reboot" in st.unverified:
                 st.unverified.remove("reboot")
             if needed and "reboot" not in st.issues:
-                issue, _ = st.open_issue("reboot", tr("zypper needs-rebooting meldet einen ausstehenden Neustart."))
-                if shown:
-                    issue.last_notified = time.time()
-                    issue.notify_count = 1
-            elif not needed and st.resolve("reboot"):
-                mark_resolved(self.cfg, st, self.tg)
+                st.open_issue("reboot", tr("zypper needs-rebooting meldet einen ausstehenden Neustart."))
+            elif not needed:
+                st.resolve("reboot")
 
     def check_services(self) -> None:
         # Während twguard selbst einspielt, ändert sich die Liste noch; der Prüflauf gleicht sie am Ende ab
         if busy.check_running():
             return
-        found = zypper.services_needing_restart()
+        found = restarts.survey()
         if found is None:
             return
         with state.locked(self.cfg.state_dir) as st:
@@ -404,12 +566,12 @@ class Bot:
         jobs = restarts.pending(waiting)
         if jobs:
             if timed_out and not request.get("overdue"):
-                self._report_overdue(request, jobs)
+                self._report_overdue(jobs)
             return
         if jobs is None and not timed_out:
             return
         current = restarts.states(waiting) if waiting else {}
-        found = zypper.services_needing_restart()
+        found = restarts.survey()
         # Unbekannt ist kein Ergebnis: weiter nachfragen, erst an der Grenze ehrlich melden
         if (found is None or "unknown" in current.values()) and not timed_out:
             return
@@ -421,52 +583,21 @@ class Bot:
             st.restart_request = {}
             if found is not None:
                 restarts.note(st, found, self.cfg.services.exclude)
-            st.outbox.append({"chat_id": request["chat_id"], "message_id": request["message_id"],
-                                       "at": time.time(), "text": text, "loud": loud})
-        self.deliver_outbox()
+            panel.event(st, text, loud=loud)
+        self.pump()
 
-    def _report_overdue(self, request: dict, overdue: list[str]) -> None:
+    def _report_overdue(self, overdue: list[str]) -> None:
         """Einmal warnen und weiter beobachten: Der Auftrag besteht noch und kann auch noch scheitern."""
-        text = f"⏳ <b>{self.host}</b>: " + tr(
+        text = panel.line(self.cfg.hostname, "⏳", tr(
             "Neustart nach {minutes} Minuten nicht abgeschlossen, systemd arbeitet noch daran: {services}. "
-            "Das Ergebnis folgt.", minutes=RESTART_TIMEOUT // 60, services=escape(", ".join(overdue)))
+            "Das Ergebnis folgt.", minutes=RESTART_TIMEOUT // 60, services=escape(", ".join(overdue))))
         with state.locked(self.cfg.state_dir) as st:
             if st.restart_request:
                 st.restart_request["overdue"] = True
-            # Ohne message_id: Die Wartemeldung bleibt für das endgültige Ergebnis stehen
-            st.outbox.append({"chat_id": request["chat_id"], "at": time.time(), "text": text, "loud": True})
-        self.deliver_outbox()
+            panel.event(st, text, loud=True)
+        self.pump()
 
-    def deliver_outbox(self) -> None:
-        """Ergebnisse bleiben gespeichert, bis Telegram sie angenommen hat; `tick` versucht es erneut."""
-        with state.locked(self.cfg.state_dir) as st:
-            if not st.outbox:
-                return
-            kept = [report for report in st.outbox if not self._deliver_one(st, report)]
-            delivered = len(kept) < len(st.outbox)
-            st.outbox = kept
-            if delivered:
-                send_due(self.cfg, st, self.tg)
-
-    def _deliver_one(self, st: state.State, report: dict) -> bool:
-        if not report["loud"]:
-            shown = messages.edit_or_send(self.tg, report, report["text"])
-            if shown and report.get("maintenance"):
-                # „wieder da“ bei belegter Paketverwaltung: ergänzen, sobald sie frei ist (watch_maintenance)
-                st.maintenance = {"chat_id": shown["chat_id"], "message_id": shown["message_id"], "at": report["at"],
-                                  "text": report["maintenance"]}
-            return shown is not None
-        # Ein gescheiterter Dienst steht nicht mehr in `zypper ps`; nur diese Meldung weist auf ihn hin
-        try:
-            self.tg.send(report["text"], chat_id=report["chat_id"])
-        except TelegramError as e:
-            log.debug(tr("Nachricht nicht gesendet: %s"), e)
-            return False
-        if report.get("message_id"):
-            messages.retire(self.tg, report)
-        return True
-
-    def restart_result(self, current: dict[str, str], found: list[str] | None, errors: dict[str, str],
+    def restart_result(self, current: dict[str, str], found: restarts.Survey | None, errors: dict[str, str],
                        unsettled: list[str] = ()) -> tuple[str, bool]:
         """Text des Ergebnisses und ob es mit Ton kommen muss."""
         running = [name for name, s in current.items() if s == "active"]
@@ -474,7 +605,7 @@ class Bot:
         rejected = [f"{name} ({clip(e, 300)})" for name, e in errors.items()]
 
         def line(icon: str, text: str) -> str:
-            return f"{icon} <b>{self.host}</b>: {text}"
+            return panel.line(self.cfg.hostname, icon, text)
 
         def join(names: list[str]) -> str:
             return escape(", ".join(names))
@@ -485,10 +616,13 @@ class Bot:
                 lines.append(line("⚠️", tr("läuft, aber zypper ps gab keine Auskunft über alte Dateien: {services}",
                                            services=join(running))))
         else:
-            renewed = [name for name in running if name not in found]
-            old = [name for name in running if name in found]
+            # Übrig gebliebene Prozesse beendet kein Neustart; der Dienst selbst ist erneuert
+            old = [name for name in running if name in found.services and name not in found.lingering]
+            renewed = [name for name in running if name not in old and name not in found.lingering]
             if renewed:
                 lines.append(line("✅", tr("neu gestartet: {services}", services=join(renewed))))
+            lines += [lingering_line(name, [asdict(proc) for proc in found.lingering[name]])
+                      for name in running if name in found.lingering]
             if old:
                 lines.append(line("⚠️", tr("nutzt weiter alte Dateien: {services}", services=join(old))))
         if stopped:
@@ -500,9 +634,16 @@ class Bot:
                                        services=join(list(unsettled)))))
         return "\n".join(lines), bool(stopped or rejected or unsettled) or found is None
 
-    def start_check(self) -> None:
+    def start_check(self, requested: bool = False) -> None:
+        """Prüflauf anstoßen; mit `requested` kommt sein Ergebnis als Ereignis, auch wenn nichts zu tun war."""
         # Der Takt fragt nur alle 30 min; ein ausstehender Neustart soll schon im Ergebnis stehen
         self.update_reboot()
+        with state.locked(self.cfg.state_dir) as st:
+            # Ein schon laufender Prüflauf bleibt, was er ist (systemctl start startet ihn nicht ein zweites Mal)
+            if not state.alive(st.activity.get("check", {})):
+                st.activity["check"] = {"phase": "queued", "detail": "", "at": time.time()}
+            if requested:
+                st.check_request = {"at": time.time()}
         subprocess.run(["systemctl", "start", "--no-block", CHECK_UNIT], check=False)
 
     # --- Befehle ----------------------------------------------------------
@@ -557,79 +698,31 @@ class Bot:
         self._deliver(msg, func(args, addressed))
         self._delete_command(msg)
 
-    def cmd_status(self, args: list[str], addressed: bool = False) -> Out:
-        text, buttons = self.status_view()
-        return Out(text, buttons, topic="status")
+    def cmd_status(self, args: list[str], addressed: bool = False) -> None:
+        self.show_current()
 
-    def status_view(self) -> tuple[str, Buttons]:
-        # Nicht auf den Takt warten: Der Status soll einen ausstehenden Neustart gleich mit Knopf zeigen
-        self.update_reboot(shown=True)
-        shutdown = busy.shutdown()
-        with state.locked(self.cfg.state_dir) as st:
-            busy.note_shutdown(st, shutdown)
-            text, buttons = format_status(self.cfg.hostname, st, time.time()), status_buttons(st)
-        holder = zypper.lock_holder()
-        if holder:
-            text += "\n" + tr("🔒 Paketverwaltung belegt: {holder}. Prüfen und Einspielen warten darauf.",
-                              holder=escape(holder))
-        if self.cfg.observe:
-            text += f"\n<i>{tr('Beobachtungsmodus: Updates werden nur gemeldet.')}</i>"
-        if self.cfg.mode != self.configured_mode:
-            text += "\n<i>" + tr("Modus {mode} bis zum nächsten Neustart des Bots, in der Konfiguration {configured}.",
-                                 mode=self.cfg.mode, configured=self.configured_mode) + "</i>"
-        return text, buttons
+    def show_current(self, view: str | None = None) -> None:
+        """Zustandsnachricht nach unten holen; vorher abfragen, was der Takt nur alle 30 min fragt."""
+        self.observe_system()
+        self.update_reboot()
+        self.pump(resend=True, view=view)
 
-    def details_view(self, arg: str = "", back: bool = False) -> tuple[str, Buttons]:
-        """Eine Seite der Paketliste; `arg` ist "ansicht:seite" aus der Schaltfläche."""
-        view, _, number = arg.partition(":")
-        view = view if view in details.VIEWS else details.VIEWS[0]
-        with state.locked(self.cfg.state_dir) as st:
-            plan, text = st.last_plan, st.last_plan_text
-        back_row = [[(tr("◀️ Zurück"), "back")]] if back else []
-        if not plan:
-            # Noch kein Prüflauf seit dem Update auf diese Version
-            text = text or tr("Noch kein Probelauf.")
-            return f"<b>{self.host}</b>\n<pre>{escape(clip(text, 3500))}</pre>", back_row
-        all_pages = details.pages(plan, view)
-        page = min(max(int(number) if number.isdigit() else 1, 1), len(all_pages))
-        other, label = ("version", tr("🔢 Nach Version")) if view == "name" else ("name", tr("🔤 Nach Name"))
-        nav = [("⬅️", f"details:{view}:{page - 1}")] if page > 1 else []
-        if len(all_pages) > 1:
-            nav.append((f"{page}/{len(all_pages)}", f"details:{view}:{page}"))
-        if page < len(all_pages):
-            nav.append(("➡️", f"details:{view}:{page + 1}"))
-        # Ohne Pakete (Solver-Konflikt) gibt es nichts umzuschalten oder als Datei zu schicken
-        first = [(label, f"details:{other}:1"), (tr("📄 Als Datei"), "file")] if plan.get("rows") else []
-        rows = [*([first] if first else []), *([nav] if nav else []), *back_row]
-        return f"<b>{self.host}</b>\n{all_pages[page - 1]}", rows
+    def cmd_details(self, args: list[str], addressed: bool = False) -> None:
+        self.show_current(view="details")
 
-    def cmd_details(self, args: list[str], addressed: bool = False) -> Out:
-        text, buttons = self.details_view()
-        return Out(text, buttons, ttl=LONG)
-
-    def cmd_approve(self, args: list[str], addressed: bool = False) -> Out:
+    def cmd_approve(self, args: list[str], addressed: bool = False) -> Out | None:
         error = self.approve()
         if error:
-            self._show_unseen_plan()
+            with state.locked(self.cfg.state_dir) as st:
+                issue = st.issues.get("manual")
+                unseen = issue is not None and issue.approvable and issue.fingerprint != st.manual_shown
+            if unseen:
+                # Einen noch nicht gezeigten Plan sofort zeigen, auch in der Ruhezeit: es wird gerade gefragt
+                self.pump(resend=True)
             return Out(error, ttl=SHORT)
-        return Out(self.approved_text(), topic="status", start_check=True)
-
-    def _show_unseen_plan(self) -> None:
-        """Einen noch nicht gezeigten Plan sofort melden, auch in der Ruhezeit: es wird gerade gefragt."""
-        with state.locked(self.cfg.state_dir) as st:
-            issue = st.issues.get("manual")
-            if issue is None or not issue.approvable or issue.fingerprint == st.manual_shown:
-                return
-            text = format_issue(self.cfg.hostname, issue, time.time(), self.cfg.escalation)
-            try:
-                messages.replace(self.tg, st, "issue:manual", text, issue_buttons(issue))
-            except TelegramError as e:
-                log.debug(tr("Nachricht nicht gesendet: %s"), e)
-                return
-            st.manual_shown = issue.fingerprint
-
-    def approved_text(self) -> str:
-        return tr("⏳ Freigegeben. <b>{host}</b> spielt das Update ein; das Ergebnis erscheint hier.", host=self.host)
+        self.start_check(requested=True)
+        self.pump(resend=True)
+        return None
 
     def approve(self, fingerprint: str = "") -> str:
         """Freigabe erteilen; Rückgabe: Fehlertext oder leer. Mit Fingerabdruck nur für genau diesen Stand."""
@@ -654,15 +747,13 @@ class Bot:
                 st.approved_fingerprint = issue.fingerprint
         return ""
 
-    def checking_text(self) -> str:
-        return tr("🔄 <b>{host}</b>: Prüfung läuft (Repos auffrischen, Probelauf); "
-                  "das Ergebnis erscheint hier, meist nach ein bis zwei Minuten.", host=self.host)
-
-    def cmd_check(self, args: list[str], addressed: bool = False) -> Out:
+    def cmd_check(self, args: list[str], addressed: bool = False) -> Out | None:
         refused = self.refused("check")
         if refused:
             return Out(refused, ttl=SHORT)
-        return Out(self.checking_text(), topic="status", start_check=True)
+        self.start_check(requested=True)
+        self.pump(resend=True)
+        return None
 
     def refused(self, action: str) -> str:
         """Ablehnung nach `busy` mit Servername, leer heißt frei. Nur Vorabprüfung, reserviert nichts."""
@@ -674,7 +765,9 @@ class Bot:
         hours = parse_duration(args[0]) if args else 24
         if hours is None:
             return Out(tr("Format: /later 12h oder /later 2d"), ttl=SHORT)
-        return Out(self.snooze(hours), ttl=SHORT)
+        text = self.snooze(hours)
+        self.pump()
+        return Out(text, ttl=SHORT)
 
     def snooze(self, hours: float, kinds: list[str] | None = None) -> str:
         esc = self.cfg.escalation
@@ -723,50 +816,42 @@ class Bot:
             busy.note_shutdown(st, shutdown)
             if not p.returncode:
                 st.reboot_requested_at = time.time()
+                panel.event(st, panel.line(self.cfg.hostname, "🔁", tr("Neustart per Telegram ausgelöst ({planned}).",
+                                                                       planned=escape(busy.planned_text(shutdown)))))
         if p.returncode:
             return tr("Neustart fehlgeschlagen: {error}", error=escape(p.stderr.strip()))
         return ""
 
-    def reboot_view(self) -> tuple[str, Buttons]:
-        return (tr("🔁 <b>{host}</b> startet in 1 Minute neu; danach steht das Ergebnis hier.", host=self.host),
-                [[(tr("✖️ Neustart abbrechen"), "cancel")]])
-
-    def cmd_reboot(self, args: list[str], addressed: bool = False) -> Out:
+    def cmd_reboot(self, args: list[str], addressed: bool = False) -> Out | None:
         error = self.reboot()
         if error:
             return Out(error, ttl=SHORT)
-        text, buttons = self.reboot_view()
-        return Out(text, buttons, topic="reboot")
+        self.pump(resend=True)
+        return None
 
-    def cancel(self) -> tuple[str, Buttons]:
-        """Geplanten Neustart abbrechen; Rückgabe: Text und Schaltflächen für die Neustart-Nachricht.
-
-        Ist der Neustart weiter nötig, bietet die Nachricht ihn wieder an wie die Erinnerung.
-        """
+    def cancel(self) -> str:
+        """Geplanten Neustart abbrechen; Rückgabe: Fehlertext oder leer."""
         p = subprocess.run(["shutdown", "-c"], capture_output=True, text=True)
         shutdown = busy.shutdown()
+        # Nur ein tatsächlich aufgehobener Plan gilt als abgebrochen
+        failed = bool(p.returncode) or shutdown.state == "planned"
         with state.locked(self.cfg.state_dir) as st:
             busy.note_shutdown(st, shutdown)
-            # Nur ein tatsächlich aufgehobener Plan gilt als abgebrochen
             if shutdown.state != "planned":
                 st.reboot_requested_at = 0.0
-            issue = st.issues.get("reboot")
-        if p.returncode or shutdown.state == "planned":
-            error = p.stderr.strip() or busy.planned_text(shutdown)
-            return tr("Abbrechen fehlgeschlagen: {error}", error=escape(error)), [[(tr("✖️ Neustart abbrechen"), "cancel")]]
-        return (tr("✖️ <b>{host}</b>: Neustart abgebrochen.", host=self.host),
-                issue_buttons(issue) if issue else [])
+            if not failed:
+                panel.event(st, panel.line(self.cfg.hostname, "✖️", tr("Neustart abgebrochen.")))
+        if failed:
+            return tr("Abbrechen fehlgeschlagen: {error}", error=escape(p.stderr.strip() or busy.planned_text(shutdown)))
+        return ""
 
     def cmd_cancel(self, args: list[str], addressed: bool = False) -> Out | None:
-        text, buttons = self.cancel()
-        with state.locked(self.cfg.state_dir) as st:
-            previous = st.messages.pop("reboot", None)
-        if previous and messages.edit(self.tg, previous, text, buttons):
-            return None
-        return Out(text, buttons, ttl=0 if buttons else SHORT)
+        error = self.cancel()
+        self.pump(resend=not error)
+        return Out(error, ttl=SHORT) if error else None
 
-    def cmd_update(self, args: list[str], addressed: bool = False) -> Out:
-        """Neuen Stand holen und zur Bestätigung anbieten."""
+    def cmd_update(self, args: list[str], addressed: bool = False) -> Out | None:
+        """Neuen Stand holen und in der Zustandsnachricht zur Bestätigung anbieten."""
         refused = self.refused("update")
         if refused:
             return Out(refused, ttl=SHORT)
@@ -776,17 +861,14 @@ class Bot:
             return Out(f"<b>{self.host}</b>: {escape(str(e))}", ttl=LONG)
         if not pending.commits:
             return Out(tr("<b>{host}</b>: twguard ist aktuell ({commit}).", host=self.host, commit=escape(ota.running())), ttl=SHORT)
-        shown = "\n".join(pending.commits[:15])
-        if len(pending.commits) > 15:
-            shown += "\n" + tr("… und {n} weitere", n=len(pending.commits) - 15)
-        text = tr("⬆️ <b>{host}</b>: twguard {target} mit {n} neuen Commits (läuft mit {commit}):\n<pre>{commits}</pre>",
-                  host=self.host, target=escape(ota.label(pending.target, pending.version)), n=len(pending.commits),
-                  commit=escape(ota.running()), commits=escape(clip(shown, 2500)))
-        return Out(text, [[(tr("⬆️ Einspielen"), f"update:{pending.target}"), (tr("✖️ Abbrechen"), "dismiss")]],
-                   topic="update")
+        with state.locked(self.cfg.state_dir) as st:
+            st.update_offer = {"target": pending.target, "label": ota.label(pending.target, pending.version),
+                               "running": ota.running(), "commits": pending.commits, "at": time.time()}
+        self.pump(resend=True)
+        return None
 
-    def update_go(self, commit: str, pressed: dict) -> str:
-        """Bestätigtes Update starten; die gedrückte Nachricht wird später zum Ergebnis.
+    def update_go(self, commit: str) -> str:
+        """Bestätigtes Update starten; das Ergebnis meldet der neue Bot oder das Zurückrollen.
 
         Rückgabe: Fehlertext oder leer.
         """
@@ -802,9 +884,9 @@ class Bot:
             refused = busy.refusal("update", st)
             if refused:
                 return f"⏸️ <b>{self.host}</b>: {escape(refused)}"
-            messages.release(st, pressed)
-            st.update_request = {"commit": commit, "chat_id": pressed["chat_id"],
-                                 "message_id": pressed["message_id"], "at": time.time()}
+            st.update_offer = {}
+            st.update_request = {"commit": commit, "label": ota.label(commit, pending.version), "at": time.time(),
+                                 "wait": ota.START_TIMEOUT}
         error = ota.start(commit)
         if error:
             with state.locked(self.cfg.state_dir) as st:
@@ -836,6 +918,7 @@ class Bot:
             st.language_override = "" if language == configured else language
         self._set_menu()
         self._renew_keyboard()
+        self.pump()
         if language == configured:
             return Out(tr("🌐 <b>{host}</b>: Sprache {language}, wie in der Konfiguration.",
                           host=self.host, language=language), topic="language")
@@ -867,6 +950,7 @@ class Bot:
             applying = state.alive(st.applying)
         note = ("\n" + tr("Ein Update wird gerade eingespielt und läuft noch zu Ende.")
                 if applying and mode == "observe" else "")
+        self.pump()
         if mode == configured:
             return Out(tr("⚙️ <b>{host}</b>: Modus {mode}, wie in der Konfiguration.", host=self.host, mode=mode)
                        + note, topic="mode")
@@ -907,7 +991,8 @@ class Bot:
     def handle_callback(self, cq: dict) -> None:
         """Druck auf eine Schaltfläche. Telegram stellt ihn nur dem Bot zu, der die Nachricht sandte.
 
-        Die Antwort erscheint in der Nachricht selbst, statt eine neue zu senden.
+        Aktionen gelten nur auf der aktuellen Zustandsnachricht; eine ältere zeigt danach den aktuellen
+        Stand. Der Druck wird mit einem Hinweis beantwortet, das Ergebnis zeigt die Zustandsnachricht.
         """
         msg = cq.get("message") or {}
         user = (cq.get("from") or {}).get("id")
@@ -936,7 +1021,23 @@ class Bot:
         if handler is None:
             self._answer(cq, tr("Unbekannte Schaltfläche."))
             return
+        if action not in ANYWHERE and not self._on_panel(pressed):
+            self._outdated(cq, pressed)
+            return
         handler(cq, pressed, arg)
+
+    def _on_panel(self, pressed: dict) -> bool:
+        with state.locked(self.cfg.state_dir) as st:
+            return messages.same(st.messages.get(panel.TOPIC, {}), pressed)
+
+    def _outdated(self, cq: dict, pressed: dict) -> None:
+        """Knopf auf einer älteren Nachricht: nichts ausführen, sie abräumen und den aktuellen Stand zeigen."""
+        self._answer(cq, tr("Diese Nachricht ist veraltet, nichts ausgeführt. Der aktuelle Stand steht jetzt "
+                            "ganz unten."), alert=True)
+        if not messages.retire(self.tg, pressed):
+            with state.locked(self.cfg.state_dir) as st:
+                st.stale_messages.append(pressed)
+        self.show_current()
 
     def press_approve(self, cq: dict, pressed: dict, fingerprint: str) -> None:
         error = self.approve(fingerprint)
@@ -944,24 +1045,16 @@ class Bot:
             self._answer(cq, plain(error), alert=True)
             return
         self._answer(cq, tr("Freigegeben"))
-        self._take_over(cq, pressed, self.approved_text(), request=True, kind="manual")
-        self.start_check()
+        self.start_check(requested=True)
+        self.pump()
 
     def press_details(self, cq: dict, pressed: dict, arg: str) -> None:
         self._answer(cq)
-        msg = cq.get("message") or {}
-        with state.locked(self.cfg.state_dir) as st:
-            # Ursprünglichen Inhalt merken, damit „Zurück“ ihn genau so wiederherstellt;
-            # Umschalten und Blättern (mit `arg`) zeigen schon die Liste
-            if not arg:
-                st.collapsed[messages.key(pressed)] = {
-                    "text": msg.get("text", ""),
-                    "entities": msg.get("entities", []),
-                    "reply_markup": msg.get("reply_markup", {}),
-                    "at": time.time(),
-                }
-            back = messages.key(pressed) in st.collapsed
-        messages.edit(self.tg, pressed, *self.details_view(arg, back))
+        self.pump(view=f"details:{arg}" if arg else "details")
+
+    def press_back(self, cq: dict, pressed: dict, arg: str) -> None:
+        self._answer(cq)
+        self.pump(view="")
 
     def press_file(self, cq: dict, pressed: dict, arg: str) -> None:
         """Die ganze Paketliste als HTML-Datei; eine neuere ersetzt die vorige."""
@@ -985,42 +1078,10 @@ class Bot:
         if old:
             messages.delete(self.tg, old)
 
-    def press_back(self, cq: dict, pressed: dict, arg: str) -> None:
-        with state.locked(self.cfg.state_dir) as st:
-            original = st.collapsed.pop(messages.key(pressed), None)
-            on_status = messages.same(st.messages.get("status", {}), pressed)
-        if on_status:
-            # Den Status neu aufbauen statt den alten Inhalt: Er zeigt dann auch den jetzigen Stand
-            self._answer(cq)
-            messages.edit(self.tg, pressed, *self.status_view())
-            return
-        if original is None:
-            # Meist ein doppelter Druck: Der erste hat schon zurückgeklappt, die Nachricht bleibt, wie sie ist
-            log.info(tr("Details von Nachricht %s nicht zurückklappbar: Inhalt nicht gespeichert"), pressed["message_id"])
-            self._answer(cq, tr("Nicht mehr verfügbar."))
-            return
-        self._answer(cq)
-        try:
-            self.tg.edit_raw(pressed["chat_id"], pressed["message_id"], original["text"],
-                             original["entities"], original["reply_markup"])
-        except TelegramError as e:
-            log.warning(tr("Details nicht zurückgeklappt: %s"), e)
-
     def press_later(self, cq: dict, pressed: dict, arg: str) -> None:
         hours_text, _, kind = arg.partition(":")
         self._answer(cq, self.snooze(float(hours_text or 24), [kind] if kind else None))
-        with state.locked(self.cfg.state_dir) as st:
-            issue = st.issues.get(kind)
-            if issue is None or issue.snoozed_until <= time.time():
-                return
-            text = format_issue(self.cfg.hostname, issue, time.time(), self.cfg.escalation)
-            text += tr("\n\n⏰ Aufgeschoben bis {when}", when=stamp(issue.snoozed_until))
-            buttons = issue_buttons(issue, later=False, services=st.restart_services)
-            fingerprint = issue.fingerprint
-        # Die Nachricht zeigt danach den aktuellen Stand, auch wenn sie einen älteren zeigte
-        if self._own(cq, pressed, kind, text, buttons, topic=f"issue:{kind}") and kind == "manual":
-            with state.locked(self.cfg.state_dir) as st:
-                st.manual_shown = fingerprint
+        self.pump()
 
     def press_check(self, cq: dict, pressed: dict, arg: str) -> None:
         refused = self.refused("check")
@@ -1028,25 +1089,12 @@ class Bot:
             self._answer(cq, plain(refused), alert=True)
             return
         self._answer(cq, tr("Prüfung läuft …"))
-        with state.locked(self.cfg.state_dir) as st:
-            on_status = messages.same(st.messages.get("status", {}), pressed)
-        if on_status:
-            # Die Statusnachricht selbst wird zur Wartemeldung und dann zum Ergebnis
-            self._take_over(cq, pressed, self.checking_text(), request=True, topic="status")
-            self.start_check()
-        else:
-            # Briefing und Meldungen bleiben stehen; das Ergebnis kommt in eine neue Statusnachricht
-            self._deliver({"chat": {"id": pressed["chat_id"]}}, self.cmd_check([]))
+        self.start_check(requested=True)
+        self.pump()
 
     def press_status(self, cq: dict, pressed: dict, arg: str) -> None:
         self._answer(cq)
-        text, buttons = self.status_view()
-        with state.locked(self.cfg.state_dir) as st:
-            on_status = messages.same(st.messages.get("status", {}), pressed)
-        if on_status:
-            messages.edit(self.tg, pressed, text, buttons)
-        else:
-            self._deliver({"chat": {"id": pressed["chat_id"]}}, Out(text, buttons, topic="status"))
+        self.show_current()
 
     def press_reboot(self, cq: dict, pressed: dict, arg: str) -> None:
         error = self.reboot()
@@ -1054,31 +1102,20 @@ class Bot:
             self._answer(cq, plain(error), alert=True)
             return
         self._answer(cq, tr("Neustart in 1 Minute"))
-        text, buttons = self.reboot_view()
-        self._take_over(cq, pressed, text, buttons, topic="reboot", kind="reboot")
+        self.pump()
 
     def press_cancel(self, cq: dict, pressed: dict, arg: str) -> None:
-        text, buttons = self.cancel()
-        self._answer(cq, plain(text))
-        # Aus Status oder Briefing: eigene Nachricht, die übrigen Punkte bleiben; die alte Neustart-Meldung geht
-        self._own(cq, pressed, "reboot", text, buttons, topic="reboot")
+        error = self.cancel()
+        self._answer(cq, plain(error) or tr("Neustart abgebrochen."), alert=bool(error))
+        self.pump()
 
     def press_update(self, cq: dict, pressed: dict, commit: str) -> None:
-        error = self.update_go(commit, pressed)
+        error = self.update_go(commit)
         if error:
             self._answer(cq, plain(error), alert=True)
-            messages.edit(self.tg, pressed, error)
             return
         self._answer(cq, tr("Update läuft …"))
-        # Ohne die Frist wirkt ein Bot, der nicht startet, bis zum Zurückrollen einfach tot
-        messages.edit(self.tg, pressed, tr("⏳ <b>{host}</b>: Update auf {commit} läuft, der Bot startet gleich neu und "
-                                           "antwortet so lange nicht. Tests und Installation dauern "
-                                           "einige Minuten, danach wartet twguard bis zu {seconds} s auf den neuen Bot. "
-                                           "Meldet er sich nicht oder schlägt die Installation fehl, wird die "
-                                           "ursprüngliche Version wiederhergestellt. "
-                                           "Das Ergebnis erscheint hier.",
-                                           host=self.host, seconds=ota.START_TIMEOUT,
-                                           commit=escape(ota.label(commit, ota.version_of(self.cfg.update.repo, commit)))))
+        self.pump()
 
     def press_restart(self, cq: dict, pressed: dict, arg: str) -> None:
         """Einen Dienst oder (`*:<Kennung>`) genau die gezeigte Liste neu starten."""
@@ -1088,43 +1125,35 @@ class Bot:
             return
         with state.locked(self.cfg.state_dir) as st:
             listed = list(st.restart_services)
-        found = zypper.services_needing_restart()
+        found = restarts.survey()
         if found is None:
             self._answer(cq, tr("zypper ps gab keine Auskunft, nichts neu gestartet."), alert=True)
             return
         if arg.startswith("*:"):
-            names = listed if arg == f"*:{restarts.digest(listed)}" and set(listed) <= set(found) else []
+            names = listed if arg == f"*:{restarts.digest(listed)}" and set(listed) <= set(found.services) else []
         else:
-            names = [arg] if arg in listed and arg in found else []
+            names = [arg] if arg in listed and arg in found.services else []
         if not names:
-            self._offer_current(cq, pressed, found)
+            # Die Liste hat sich geändert: nichts neu starten, die Zustandsnachricht zeigt die jetzige
+            self._answer(cq, tr("Die Liste hat sich geändert, nichts neu gestartet."), alert=True)
+            with state.locked(self.cfg.state_dir) as st:
+                restarts.note(st, found, self.cfg.services.exclude)
+            self.pump()
             return
         # Reservieren, bevor etwas angezeigt wird: Ein Prüflauf, der inzwischen einspielt, hat Vorrang.
         # Unter derselben Sperre prüft der Prüflauf restart_request, einer von beiden gewinnt.
         with state.locked(self.cfg.state_dir) as st:
             refused = busy.refusal("restart", st)
             if not refused:
-                st.restart_request = {"chat_id": pressed["chat_id"], "message_id": None,
-                                      "at": time.time(), "services": names}
+                st.restart_request = {"at": time.time(), "services": names}
+                st.resolve("services")
+                st.restart_services = []
         if refused:
             self._answer(cq, plain(refused), alert=True)
             return
         # Erst alles anzeigen und festhalten: Ist der Bot selbst dabei, wird er gleich beendet
-        try:
-            self._answer(cq, tr("Neustart läuft …"))
-            shown = self._own(cq, pressed, "services",
-                              tr("⏳ <b>{host}</b>: starte neu: {services}. Das Ergebnis erscheint hier.",
-                                 host=self.host, services=escape(", ".join(names)))) or {"chat_id": pressed["chat_id"]}
-        except Exception:
-            # Noch nichts gestartet: Die Reservierung darf den Prüflauf nicht aufhalten
-            with state.locked(self.cfg.state_dir) as st:
-                st.restart_request = {}
-            raise
-        with state.locked(self.cfg.state_dir) as st:
-            st.resolve("services")
-            st.restart_services = []
-            # Ohne Nachricht (Sendefehler) kommt das Ergebnis später als neue
-            st.restart_request.update(chat_id=shown["chat_id"], message_id=shown.get("message_id"))
+        self._answer(cq, tr("Neustart läuft …"))
+        self.pump()
         # Abgewiesene merken, bevor sich der Bot selbst einreiht: Das kann ihn sofort beenden
         self._note_restart_errors(restarts.start([n for n in names if n != restarts.BOT_SERVICE]))
         if restarts.BOT_SERVICE in names:
@@ -1135,36 +1164,26 @@ class Bot:
             with state.locked(self.cfg.state_dir) as st:
                 st.restart_request["errors"] = {**st.restart_request.get("errors", {}), **errors}
 
-    def _offer_current(self, cq: dict, pressed: dict, found: list[str]) -> None:
-        """Alter Knopf: nichts neu starten, sondern in dieser Nachricht den aktuellen Stand zeigen."""
-        self._answer(cq, tr("Die Liste hat sich geändert, nichts neu gestartet."), alert=True)
-        with state.locked(self.cfg.state_dir) as st:
-            restarts.note(st, found, self.cfg.services.exclude)
-            issue = st.issues.get("services")
-            if issue is None:
-                text, buttons = f"✅ <b>{self.host}</b>: " + tr("Dieser Neustart ist nicht mehr nötig."), None
-            else:
-                text = format_issue(self.cfg.hostname, issue, time.time(), self.cfg.escalation)
-                buttons = issue_buttons(issue, services=st.restart_services)
-        self._own(cq, pressed, "services", text, buttons, topic="issue:services" if issue else "")
-
     def press_resolved(self, cq: dict, pressed: dict, kind: str) -> None:
         """Fehlgeschlagenes Einspielen als von Hand behoben quittieren."""
         if kind != "apply-failed":
             self._answer(cq, tr("Unbekannte Schaltfläche."))
             return
         self._answer(cq)
-        self._own(cq, pressed, kind, f"✅ <b>{self.host}</b>: " +
-                  tr("{title} – erledigt ({when})", title=title(kind), when=stamp(time.time())))
         with state.locked(self.cfg.state_dir) as st:
-            st.resolve(kind)
-            mark_resolved(self.cfg, st, self.tg)
+            if st.resolve(kind):
+                panel.event(st, panel.line(self.cfg.hostname, "✅", tr("{title}: als behoben quittiert.",
+                                                                       title=title(kind))))
+        self.pump()
 
     def press_dismiss(self, cq: dict, pressed: dict, arg: str) -> None:
+        """Update-Angebot verwerfen; auf einer älteren Nachricht (bis 0.9) diese entfernen."""
         self._answer(cq)
-        with state.locked(self.cfg.state_dir) as st:
-            messages.release(st, pressed)
-        if not messages.delete(self.tg, pressed):
+        if self._on_panel(pressed):
+            with state.locked(self.cfg.state_dir) as st:
+                st.update_offer = {}
+            self.pump()
+        elif not messages.delete(self.tg, pressed):
             messages.edit(self.tg, pressed, tr("✖️ verworfen"))
 
     # --- Hilfsfunktionen --------------------------------------------------
@@ -1187,55 +1206,6 @@ class Bot:
             except TelegramError as e:
                 log.debug(tr("Nachricht nicht gesendet: %s"), e)
 
-    def _take_over(self, cq: dict, pressed: dict, text: str, buttons: Buttons | None = None,
-                   request: bool = False, topic: str = "", kind: str = "") -> None:
-        """Gedrückte Nachricht umwidmen (siehe `_own`), ggf. als Ziel für das Ergebnis des Prüflaufs."""
-        # Kam nichts an, schickt der Prüflauf sein Ergebnis als neue Nachricht
-        shown = self._own(cq, pressed, kind, text, buttons, topic) or {"chat_id": pressed["chat_id"]}
-        if request:
-            with state.locked(self.cfg.state_dir) as st:
-                st.check_request = {**shown, "at": time.time()}
-
-    def _own(self, cq: dict, pressed: dict, kind: str, text: str, buttons: Buttons | None = None,
-             topic: str = "") -> dict | None:
-        """Ergebnis einer Aktion zum Punkt `kind` zeigen; Rückgabe: die Nachricht dafür, None wenn nichts ankam.
-
-        Sonst wird die gedrückte Nachricht umgewidmet (alte Themenzuordnung lösen, ggf. `topic` setzen).
-        Briefing und Status zeigen aber mehrere Punkte: Dort bekommt die Aktion eine eigene Nachricht, und nur
-        die Schaltflächen dieses Punkts verschwinden, damit die übrigen bedienbar bleiben. Scheitert das Senden,
-        bleibt die Übersicht ganz unverändert; die Rückmeldung zum Druck kam schon als Hinweis.
-        """
-        with state.locked(self.cfg.state_dir) as st:
-            shared = kind and any(messages.same(st.messages.get(topic, {}), pressed) for topic in ("briefing", "status"))
-        if shared:
-            try:
-                shown = messages.ref(self.tg.send(text, chat_id=pressed["chat_id"], buttons=buttons))
-            except TelegramError as e:
-                log.info(tr("Nachricht nicht gesendet: %s"), e)
-                return None
-            self._drop_buttons(cq, pressed, kind)
-        elif messages.edit(self.tg, pressed, text, buttons):
-            shown = pressed
-        else:
-            return None
-        with state.locked(self.cfg.state_dir) as st:
-            messages.release(st, shown)
-            if topic:
-                old = st.messages.get(topic)
-                messages.claim(st, topic, shown)
-                if old and not messages.same(old, shown):
-                    messages.retire(self.tg, old)
-        return shown
-
-    def _drop_buttons(self, cq: dict, pressed: dict, kind: str) -> None:
-        markup = (cq.get("message") or {}).get("reply_markup") or {}
-        rows = [row for row in markup.get("inline_keyboard", [])
-                if not any(button_kind(b.get("callback_data", "")) == kind for b in row)]
-        try:
-            self.tg.edit_markup(pressed["chat_id"], pressed["message_id"], {"inline_keyboard": rows})
-        except TelegramError as e:
-            log.info(tr("Schaltflächen im Briefing nicht angepasst: %s"), e)
-
     def _deliver(self, msg: dict, out: Out | None) -> None:
         if out is None:
             return
@@ -1249,13 +1219,8 @@ class Bot:
                     sent = self.tg.send(out.text, chat_id=chat_id, buttons=out.buttons, markup=out.markup)
                 if out.ttl:
                     messages.expire(st, sent, out.ttl)
-                if out.start_check:
-                    st.check_request = messages.ref(sent)
         except TelegramError as e:
             log.debug(tr("Antwort nicht gesendet: %s"), e)
-            return
-        if out.start_check:
-            self.start_check()
 
     def _delete_command(self, msg: dict) -> None:
         """Den Befehl nach der Antwort löschen; ohne Admin-Recht bleibt er stehen."""
@@ -1270,12 +1235,6 @@ class Bot:
                             "„Nachrichten löschen“): %s"), e)
                 self.delete_warned = True
 
-    def _send(self, text: str, silent: bool = False) -> None:
-        try:
-            self.tg.send(text, silent=silent)
-        except TelegramError as e:
-            log.debug(tr("Nachricht nicht gesendet: %s"), e)
-
     def _typing(self, chat_id: int) -> None:
         try:
             self.tg.typing(chat_id)
@@ -1287,12 +1246,6 @@ class Bot:
             self.tg.answer_callback(cq["id"], text, alert=alert)
         except (TelegramError, KeyError) as e:
             log.warning(tr("Schaltfläche nicht bestätigt: %s"), e)
-
-    def _report_update(self, st: state.State, now: float | None = None) -> None:
-        result = ota.startup_report(self.cfg, st, now)
-        if result:
-            text, request = result
-            messages.edit_or_send(self.tg, request, text)
 
     @staticmethod
     def _rpmdb_mtime() -> float:

@@ -59,35 +59,41 @@ class State:
     language_override: str = ""
     # Mit /mode gewählter Modus, gilt bis zum nächsten Start des Bots (auch für den Prüflauf)
     mode_override: str = ""
-    # OTA: laufendes Update {"commit", "chat_id", "message_id", "at"}; Ergebnis meldet der neue Bot
+    # OTA: laufendes Update {"commit", "at", "runner"?, "console"?}; Ergebnis meldet der neue Bot
     update_request: dict = field(default_factory=dict)
+    # Mit /update angebotener Stand {"target", "label", "running", "commits", "at"}, bis Einspielen oder Verwerfen
+    update_offer: dict = field(default_factory=dict)
     # Commit, mit dem der Bot zuletzt gestartet ist
     bot_commit: str = ""
-    # /check oder /approve wartet auf das Ergebnis {"chat_id", "message_id", "at"}
+    # /check oder eine Freigabe hat den Prüflauf angestoßen {"at"}; sein Ergebnis kommt dann als Ereignis
     check_request: dict = field(default_factory=dict)
+    # Was gerade läuft, das kein Zustand von systemd oder logind ist: {"check": {"phase", "detail", "at",
+    # "pid"?, "boot"?}}; ohne lebenden Prozess (pid) räumt der Bot es weg
+    activity: dict = field(default_factory=dict)
     # Tag (JJJJ-MM-TT) des zuletzt gesendeten Briefings
     last_briefing_day: str = ""
-    # Nachricht je Thema (messages.py): {"status": {"chat_id", "message_id", "at"}, "issue:reboot": …}
+    # Nachricht je Thema (messages.py): {"state": {"chat_id", "message_id", "at"}, "keyboard": …}
     messages: dict = field(default_factory=dict)
+    # Was die Zustandsnachricht (Thema "state") zeigt: {"digest", "overview", "view", "view_at"}
+    panel: dict = field(default_factory=dict)
+    # Paketverwaltung belegt durch (zypper.lock_holder), vom Bot für die Anzeige gemerkt
+    zypp_holder: str = ""
+    # Ersetzte Nachrichten, die sich nicht entfernen ließen; der Bot versucht es erneut
+    stale_messages: list = field(default_factory=list)
     # Kurzlebige Antworten, die der Bot wieder löscht: [{"chat_id", "message_id", "at", "delete_at"}]
     ephemeral: list = field(default_factory=list)
-    # Stille Update-Berichte seit dem letzten Briefing: [{"chat_id"?, "message_id"?, "at", "packages"}]
-    reports: list = field(default_factory=list)
     # Gruppe wurde zur Supergruppe: {"from": alte ID, "to": neue ID, "at"}; gilt, solange config.toml
     # noch die alte ID enthält
     chat_migration: dict = field(default_factory=dict)
-    # Aufgeklappte Details: message_id → ursprünglicher Inhalt {"text", "entities", "reply_markup", "at"}
-    collapsed: dict = field(default_factory=dict)
     # Dienste, die zum Neustart anstehen; „Alle“ trägt den Hash der gezeigten Liste (restarts.digest)
     restart_services: list = field(default_factory=list)
-    # Laufender Neustart {"chat_id", "message_id", "at", "services", "errors", "overdue"}; überlebt den Neustart des Bots
+    # Dienst → Prozesse, die alte Dateien halten, obwohl ein Neustart des Dienstes nichts bewirkt (restarts.note)
+    lingering: dict = field(default_factory=dict)
+    # Laufender Neustart {"at", "services", "errors", "overdue"}; überlebt den Neustart des Bots
     restart_request: dict = field(default_factory=dict)
-    # Rückmeldungen, die noch zugestellt werden müssen (Dienst-Neustart, Rückkehr nach dem Boot),
-    # je {"chat_id", "message_id", "at", "text", "loud"}; der Bot versucht es bei jedem Takt erneut
+    # Ereignisse, die noch zugestellt werden müssen, je {"id", "chat_id", "message_id", "at", "text", "loud"}
+    # (panel.event). chat_id und message_id (None) nur, damit eine zurückgerollte Version 0.9 sie zustellt
     outbox: list = field(default_factory=list)
-    # Meldung „wieder da“, solange nach dem Boot die Paketverwaltung belegt ist (purge-kernels)
-    # {"chat_id", "message_id", "at", "text"}; der Bot ergänzt sie, sobald die Sperre frei ist
-    maintenance: dict = field(default_factory=dict)
     # Prüflauf spielt gerade ein {"pid", "boot", "at"}; schließt Dienst-Neustarts aus (holder/alive)
     applying: dict = field(default_factory=dict)
     # Fingerabdruck des zuletzt tatsächlich gezeigten Plans; /approve gilt nur für ihn.

@@ -7,12 +7,11 @@ from pathlib import Path
 from unittest import mock
 
 import testlang  # noqa: F401
-from twguard import bot as bot_module, busy, check, ota, restarts, state, zypper
+from twguard import bot as bot_module, busy, check, ota, panel, restarts, state, zypper
 from twguard.bot import Bot, parse_duration
 from twguard.config import Config
 from twguard.i18n import current, set_language
-from twguard.notify import send_due
-from twguard.telegram import TelegramError, keyboard
+from twguard.telegram import TelegramError
 
 from fakes import FakeTelegram
 
@@ -31,6 +30,10 @@ def message(text, chat=GROUP, user=USER, reply_to=None, age=0):
     return msg
 
 
+def actions(buttons):
+    return [b[1] for row in buttons or [] for b in row]
+
+
 class BotTest(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
@@ -44,7 +47,10 @@ class BotTest(unittest.TestCase):
         self.checking = mock.patch.object(busy, "check_running", return_value=False).start()
         # Kein echtes logind in den Tests; einzelne Tests planen einen Neustart über self.logind
         self.logind = mock.patch.object(busy, "shutdown", return_value=busy.Shutdown("none")).start()
-        self.found = mock.patch.object(zypper, "services_needing_restart", return_value=[]).start()
+        # Namen der Dienste aus `zypper ps`; Tests mit übrig gebliebenen Prozessen setzen self.lingering
+        self.found, self.lingering = mock.Mock(return_value=[]), {}
+        mock.patch.object(restarts, "survey", side_effect=lambda: None if (names := self.found()) is None else
+                          restarts.Survey(list(names), dict(self.lingering))).start()
         # Kein echtes zypper in den Tests (fehlt z. B. in der CI). None heißt „unbekannt“ und lässt einen
         # von Hand geöffneten Neustart-Punkt stehen; einzelne Tests ersetzen den Wert
         self.rebooting = mock.patch.object(zypper, "needs_rebooting", return_value=None).start()
@@ -52,15 +58,57 @@ class BotTest(unittest.TestCase):
         self.addCleanup(mock.patch.stopall)
         self.addCleanup(self.tmp.cleanup)
 
+    # --- Hilfen -----------------------------------------------------------
+
+    def st(self) -> state.State:
+        return state.load(self.bot.cfg.state_dir / "state.json")
+
+    def panel_id(self) -> int:
+        return self.st().messages[panel.TOPIC]["message_id"]
+
+    def shown(self) -> tuple[str, list]:
+        """Was die Zustandsnachricht jetzt zeigt (Text, Schaltflächen)."""
+        return self.tg.current[self.panel_id()]
+
     def open_manual(self, approvable=True):
         with state.locked(self.bot.cfg.state_dir) as st:
             st.open_issue("manual", "• kritisches Paket", fingerprint="abc", approvable=approvable)
             st.manual_shown = "abc"
 
+    def open_reboot(self):
+        with state.locked(self.bot.cfg.state_dir) as st:
+            st.open_issue("reboot", "Neustart nötig")
+
+    def offer(self, *names):
+        with state.locked(self.bot.cfg.state_dir) as st:
+            restarts.note(st, restarts.Survey(list(names), {}), self.bot.cfg.services.exclude)
+        self.found.return_value = list(names)
+
+    def press(self, data, user=USER, chat=GROUP, message_id=None):
+        """Schaltfläche drücken, ohne Angabe auf der Zustandsnachricht (die dafür erst entsteht)."""
+        if message_id is None:
+            self.bot.pump()
+            message_id = self.panel_id()
+        self.bot.handle_callback({"id": "cb1", "from": user, "data": data,
+                                  "message": {"message_id": message_id, "chat": chat, "date": int(time.time()),
+                                              "text": "Meldung", "entities": [], "reply_markup": {}}})
+
+    def set_plan(self, count=1):
+        rows = [["to-upgrade", f"paket-{i:03}", "1.0-1", "1.0-2", "repo"] for i in range(count)]
+        with state.locked(self.bot.cfg.state_dir) as st:
+            st.last_plan = {"summary": f"{count} Pakete", "rows": rows, "problems": []}
+
+    def at(self, hour, minute=0):
+        t = time.localtime()
+        return time.mktime((t.tm_year, t.tm_mon, t.tm_mday, hour, minute, 0, 0, 0, -1))
+
+    # --- Befehle: wer antwortet -------------------------------------------
+
     def test_status_broadcast_answered(self):
         self.bot.handle(message("/status"))
         self.assertEqual(len(self.tg.sent), 1)
         self.assertIn("server1", self.tg.sent[0])
+        self.assertEqual(self.panel_id(), self.tg.next_id)
 
     def test_approve_needs_address(self):
         self.open_manual()
@@ -71,7 +119,7 @@ class BotTest(unittest.TestCase):
     def test_approve_by_reply(self):
         self.open_manual()
         self.bot.handle(message("/approve", reply_to=ME))
-        self.start_check.assert_called_once()
+        self.start_check.assert_called_once_with(requested=True)
         with state.locked(self.bot.cfg.state_dir) as st:
             self.assertEqual(st.approved_fingerprint, "abc")
 
@@ -117,260 +165,479 @@ class BotTest(unittest.TestCase):
         self.open_manual()
         for _ in range(3):
             self.bot.handle(message("/later 5d", reply_to=ME))
-        self.assertIn("72 Stunden", self.tg.sent[0])  # auf max_snooze_hours begrenzt
-        self.assertIn("Nicht weiter aufschiebbar", self.tg.sent[2])
+        answers = [t for t in self.tg.sent if t.startswith(("Aufgeschoben", "Nicht weiter"))]
+        self.assertIn("72 Stunden", answers[0])  # auf max_snooze_hours begrenzt
+        self.assertIn("Nicht weiter aufschiebbar", answers[2])
 
-    def press(self, data, user=USER, chat=GROUP):
-        self.bot.handle_callback({"id": "cb1", "from": user, "data": data,
-                                  "message": {"message_id": 5, "chat": chat, "date": int(time.time()),
-                                              "text": "Meldung", "entities": [], "reply_markup": {}}})
+    def test_command_deleted_after_answer(self):
+        self.bot.handle(message("/status"))
+        self.assertEqual(self.tg.deleted, [7])
 
-    def test_button_approve_with_matching_fingerprint(self):
-        self.open_manual()
-        self.press("approve:abc")
-        self.start_check.assert_called_once()
-        # Die Meldung selbst wird zur Wartemeldung, es kommt keine neue Nachricht
-        self.assertEqual(self.tg.sent, [])
-        self.assertEqual(self.tg.edited[0][0], 5)
-        self.assertIn("Freigegeben", self.tg.edited[0][1])
+    def test_missing_delete_right_is_tolerated(self):
+        self.tg.fail_delete = True
+        with self.assertLogs("twguard.bot", "WARNING"):
+            self.bot.handle(message("/status"))
+            self.bot.handle(message("/status"))
+        self.assertTrue(self.bot.delete_warned)
+
+    def test_help_expires(self):
+        self.bot.handle(message("/help@server1_bot"))
         with state.locked(self.bot.cfg.state_dir) as st:
-            self.assertEqual(st.approved_fingerprint, "abc")
-            self.assertEqual(st.check_request["message_id"], 5)
+            self.assertEqual(st.ephemeral[0]["message_id"], 101)
 
-    def test_button_approve_stale_fingerprint(self):
-        self.open_manual()
-        self.press("approve:old")
-        self.start_check.assert_not_called()
-        self.assertIn("älteren Stand", self.tg.answered[0])
-        self.assertEqual(self.tg.edited, [])
-
-    def test_button_approve_observed_routine(self):
-        with state.locked(self.bot.cfg.state_dir) as st:
-            st.observed_fingerprint = "rtn"
-        self.press("approve:rtn")
-        self.start_check.assert_called_once()
-
-    def test_button_unauthorized(self):
-        self.open_manual()
-        self.press("approve:abc", user={"id": 99, "is_bot": False})
-        self.start_check.assert_not_called()
-        self.assertEqual(self.tg.answered, ["Nicht berechtigt."])
+    def test_help_broadcast_silent_without_help_full(self):
+        self.bot.handle(message("/help"))
         self.assertEqual(self.tg.sent, [])
 
-    def test_button_details_toggles_in_place(self):
-        self.press("details")
-        self.assertEqual(self.tg.sent, [])
-        message_id, text, buttons = self.tg.edited[0]
-        self.assertEqual(message_id, 5)
-        self.assertIn("Noch kein Probelauf", text)
-        self.assertEqual(buttons, [[("◀️ Zurück", "back")]])
-        self.press("back")
-        self.assertEqual(self.tg.raw_edits, [(5, "Meldung")])
+    def test_help_addressed_or_help_full_has_list(self):
+        self.bot.handle(message("/help@server1_bot"))
+        self.assertIn("/approve", self.tg.sent[0])
+        self.bot.cfg.help_full = True
+        self.bot.handle(message("/help"))
+        self.assertIn("/approve", self.tg.sent[1])
 
-    def test_double_back_leaves_restored_message(self):
-        self.press("details")
-        self.press("back")
-        edits = len(self.tg.edited)
-        self.press("back")  # zweiter Druck aus der alten Ansicht
-        self.assertEqual(len(self.tg.edited), edits)
-        self.assertEqual(self.tg.raw_edits, [(5, "Meldung")])
-        self.assertEqual(self.tg.answered[-1], "Nicht mehr verfügbar.")
+    def test_parse_duration(self):
+        self.assertEqual(parse_duration("12h"), 12)
+        self.assertEqual(parse_duration("2d"), 48)
+        self.assertEqual(parse_duration("1"), 24)
+        self.assertIsNone(parse_duration("morgen"))
 
-    def set_plan(self, count=1):
-        rows = [["to-upgrade", f"paket-{i:03}", "1.0-1", "1.0-2", "repo"] for i in range(count)]
+    # --- Die Zustandsnachricht ------------------------------------------
+
+    def test_one_state_message_with_all_buttons(self):
+        # Beobachtung auf einem Server: Neustart und Dienste offen; jede Übersicht muss beide Knöpfe zeigen
+        self.open_reboot()
+        self.offer("cron", "sshd")
+        self.open_manual()
+        self.bot.pump()
+        text, buttons = self.shown()
+        for title in ("Update braucht Freigabe", "Neustart ausstehend", "Dienste nutzen alte Dateien"):
+            self.assertIn(title, text)
+        data = actions(buttons)
+        for action in ("approve:abc", "reboot", "restart:cron", "restart:sshd", "check", "later:24"):
+            self.assertIn(action, data)
+        self.assertEqual(data.count("check"), 1)
+        self.assertIn("Stand ", text)
+
+    def test_state_message_is_the_only_one_with_buttons(self):
+        self.open_reboot()
+        self.offer("postfix")
+        self.bot.pump()
+        with mock.patch.object(restarts, "start", return_value={}):
+            self.press("restart:postfix")
+        self.found.return_value = []
+        with mock.patch.object(restarts, "pending", return_value=[]), \
+                mock.patch.object(restarts, "states", return_value={"postfix": "active"}):
+            self.bot.watch_restart()
+        # Das Ereignis ohne Knöpfe, darunter wieder die Zustandsnachricht mit dem Neustart-Knopf
+        with_buttons = [mid for mid, (_, b) in self.tg.current.items() if b]
+        self.assertEqual(with_buttons, [self.panel_id()])
+        self.assertIn("reboot", actions(self.shown()[1]))
+        event = self.tg.sent[-2]
+        self.assertIn("neu gestartet: postfix", event)
+        self.assertIsNone(self.tg.buttons[-2])
+
+    def test_unchanged_state_is_not_edited_again(self):
+        self.bot.pump()
+        self.bot.pump()
+        self.assertEqual((len(self.tg.sent), self.tg.edited), (1, []))
+        # Eine Änderung ohne fällige Erinnerung bearbeitet die Nachricht an ihrem Platz
         with state.locked(self.bot.cfg.state_dir) as st:
-            st.last_plan = {"summary": f"{count} Pakete", "rows": rows, "problems": []}
+            st.pending_text = "3 Pakete"
+        self.bot.pump()
+        self.assertEqual(len(self.tg.sent), 1)
+        self.assertEqual(self.tg.edited[0][0], self.panel_id())
+        self.assertIn("Ausstehend: 3 Pakete", self.tg.edited[0][1])
 
-    def test_details_switch_view_keeps_back(self):
-        self.set_plan()
-        self.press("details")
-        _, text, buttons = self.tg.edited[-1]
-        self.assertIn("paket-000\n", text)
-        self.assertEqual(buttons, [[("🔢 Nach Version", "details:version:1"), ("📄 Als Datei", "file")],
-                                   [("◀️ Zurück", "back")]])
-        self.press("details:version:1")
-        _, text, buttons = self.tg.edited[-1]
-        self.assertIn("nur neu gebaut", text)
-        self.assertEqual(buttons[0][0], ("🔤 Nach Name", "details:name:1"))
-        # Umschalten darf den gemerkten Inhalt nicht überschreiben
-        self.press("back")
-        self.assertEqual(self.tg.raw_edits, [(5, "Meldung")])
-
-    def test_details_pages(self):
-        self.set_plan(300)
-        self.press("details")
-        nav = self.tg.edited[-1][2][1]
-        self.assertEqual(nav[-1], ("➡️", "details:name:2"))
-        self.assertEqual(len(nav), 2)
-        self.press("details:name:2")
-        nav = self.tg.edited[-1][2][1]
-        self.assertEqual(nav[0], ("⬅️", "details:name:1"))
-        # Der Plan kann inzwischen kürzer sein
-        self.press("details:name:99")
-        self.assertIn("paket-", self.tg.edited[-1][1])
-
-    def test_details_command_has_no_back(self):
-        self.set_plan()
-        self.bot.handle(message("/details@" + self.bot.me["username"]))
-        self.assertEqual(self.tg.buttons[-1], [[("🔢 Nach Version", "details:version:1"), ("📄 Als Datei", "file")]])
-
-    def test_file_button_sends_document_and_replaces_previous(self):
-        self.set_plan()
-        self.press("file")
-        name, content, caption = self.tg.documents[0]
-        self.assertTrue(name.endswith(".html"))
-        self.assertIn(b"paket-000", content)
-        self.assertIn("1 Pakete", caption)
-        with state.locked(self.bot.cfg.state_dir) as st:
-            first = st.messages["file"]["message_id"]
-        self.press("file")
-        self.assertEqual(len(self.tg.documents), 2)
+    def test_edit_failure_sends_new_state_message(self):
+        self.bot.pump()
+        first = self.panel_id()
+        self.open_reboot()
+        self.tg.fail_edit = True
+        self.bot.pump()
+        self.assertNotEqual(self.panel_id(), first)
         self.assertIn(first, self.tg.deleted)
 
-    def test_file_button_without_plan(self):
-        self.press("file")
-        self.assertEqual(self.tg.documents, [])
-        self.assertEqual(self.tg.answered, ["Keine Paketliste vorhanden."])
-
-    def test_status_has_buttons(self):
+    def test_status_brings_state_message_down(self):
+        self.bot.pump()
+        first = self.panel_id()
         self.bot.handle(message("/status"))
-        self.assertIn(("🔄 Jetzt prüfen", "check"), self.tg.buttons[0][0])
-        self.assertIn("Beobachtungsmodus", self.tg.sent[0])
+        self.assertEqual(len(self.tg.sent), 2)
+        self.assertIn(first, self.tg.deleted)
+        self.assertTrue(self.tg.silent[-1])  # wer fragt, schaut hin
 
-    def open_reboot(self):
+    def test_replaced_message_too_old_is_shortened(self):
+        self.bot.pump()
         with state.locked(self.bot.cfg.state_dir) as st:
-            st.open_issue("reboot", "Neustart nötig")
+            st.messages[panel.TOPIC]["at"] = time.time() - 50 * 3600
+            first = st.messages[panel.TOPIC]["message_id"]
+        self.bot.pump(resend=True)
+        self.assertNotIn(first, self.tg.deleted)
+        self.assertEqual(self.tg.current[first], (self.tg.edited[-1][1], None))
+        self.assertIn("veraltet", self.tg.current[first][0])
 
-    def status_data(self, buttons):
-        return [b[1] for row in buttons for b in row]
+    def test_unremovable_message_is_retried(self):
+        self.bot.pump()
+        first = self.panel_id()
+        self.tg.fail_delete = self.tg.fail_edit = True
+        self.bot.pump(resend=True)
+        self.assertEqual([m["message_id"] for m in self.st().stale_messages], [first])
+        self.tg.fail_delete = self.tg.fail_edit = False
+        self.bot.retry_stale()
+        self.assertIn(first, self.tg.deleted)
+        self.assertEqual(self.st().stale_messages, [])
 
-    def test_status_offers_buttons_of_open_items(self):
-        self.open_reboot()
-        self.bot.handle(message("/status"))
-        data = self.status_data(self.tg.buttons[0])
-        self.assertIn("reboot", data)
-        self.assertNotIn("details", data)  # ohne Paketliste gibt es nichts zu zeigen
-        self.assertEqual(data.count("check"), 1)
-
-    def test_status_shows_details_only_with_packages(self):
+    def test_too_many_requests_while_cleaning_up_spends_no_tries(self):
+        # F24-Rest: 429 ist kein Löschfehler; unversuchte Nachrichten behalten ihren Zähler
+        now = time.time()
         with state.locked(self.bot.cfg.state_dir) as st:
-            st.last_plan = {"summary": "1 Paket", "rows": [["to-upgrade", "bash", "5.3.2-1.1", "5.3.3-1.1", "repo"]],
-                            "problems": []}
-        self.assertIn("details", self.status_data(self.bot.status_view()[1]))
+            st.stale_messages = [{"chat_id": -100, "message_id": 10, "at": now},
+                                 {"chat_id": -100, "message_id": 11, "at": now}]
+        for _ in range(4):
+            self.tg.blocked_until = 0
+            self.tg.limit["deleteMessage"] = 30
+            self.bot.retry_stale()
+        self.assertEqual([(m["message_id"], m.get("tries", 0)) for m in self.st().stale_messages], [(10, 0), (11, 0)])
+        self.assertEqual(self.tg.calls, [])  # nichts hat Telegram erreicht
+        self.tg.blocked_until = 0
+        self.bot.retry_stale()
+        self.assertEqual(self.tg.deleted, [10, 11])
+        self.assertEqual(self.st().stale_messages, [])
+
+    def test_unremovable_message_is_given_up_after_three_tries(self):
+        with state.locked(self.bot.cfg.state_dir) as st:
+            st.stale_messages = [{"chat_id": -100, "message_id": 10, "at": time.time()}]
+        self.tg.fail_delete = self.tg.fail_edit = True
+        for tries in (1, 2):
+            self.bot.retry_stale()
+            self.assertEqual(self.st().stale_messages[0]["tries"], tries)
+        self.bot.retry_stale()
+        self.assertEqual(self.st().stale_messages, [])
+
+    def test_send_failure_keeps_previous_state_message(self):
+        self.bot.pump()
+        first = self.panel_id()
+        self.tg.fail_send = True
+        self.assertFalse(self.bot.pump(resend=True))
+        self.assertEqual(self.panel_id(), first)
+        self.assertEqual(self.tg.deleted, [])
+
+    def test_too_many_requests_pauses_sending(self):
+        send = self.tg.send
+        self.tg.send = mock.Mock(side_effect=TelegramError("sendMessage: Too Many Requests", retry_after=30))
+        self.assertFalse(self.bot.pump())
+        self.assertGreater(self.tg.blocked_until, time.time() + 25)
+        self.tg.send = send
+        self.assertFalse(self.bot.pump())  # noch in der Pause
+        self.assertEqual(self.tg.sent, [])
+        self.tg.blocked_until = 0
+        self.assertTrue(self.bot.pump())
+
+    def big_events(self, n=4, size=1400):
+        with state.locked(self.bot.cfg.state_dir) as st:
+            for i in range(n):
+                panel.event(st, f"event-{i} " + "x" * size, loud=True)
+
+    def test_large_outbox_sent_completely_in_several_messages(self):
+        # F22: nichts geht durch Kürzen verloren
+        self.big_events()
+        self.assertTrue(self.bot.send_events(time.time()))
+        joined = "\n".join(self.tg.sent)
+        for i in range(4):
+            self.assertIn(f"event-{i} ", joined)
+        self.assertTrue(all(len(text) <= panel.TEXT_LIMIT for text in self.tg.sent))
+        self.assertGreater(len(self.tg.sent), 1)
+        self.assertEqual(self.st().outbox, [])
+
+    def test_send_failure_keeps_undelivered_events(self):
+        self.big_events()
+        send, calls = self.tg.send, []
+
+        def second_fails(*args, **kwargs):
+            calls.append(1)
+            if len(calls) == 2:
+                raise TelegramError("sendMessage: Bad Gateway")
+            return send(*args, **kwargs)
+
+        self.tg.send = second_fails
+        self.bot.send_events(time.time())
+        delivered = "\n".join(self.tg.sent)
+        pending = [e["text"] for e in self.st().outbox]
+        for i in range(4):
+            # Jedes Ereignis ist entweder angekommen oder steht noch aus, nie beides oder keins
+            self.assertNotEqual(f"event-{i} " in delivered, any(t.startswith(f"event-{i} ") for t in pending))
+        self.assertTrue(pending)
+
+    def test_oversized_event_is_shortened_as_plain_text(self):
+        with state.locked(self.bot.cfg.state_dir) as st:
+            panel.event(st, "<b>Fehler</b>\n<pre>" + "a &lt; b\n" * 1000 + "</pre>", loud=True)
+        text = self.st().outbox[0]["text"]
+        self.assertLessEqual(len(text), panel.TEXT_LIMIT)
+        self.assertNotIn("<pre>", text)
+        self.assertIn("a &lt; b", text)
+
+    def test_too_many_requests_on_event_stops_the_cycle(self):
+        # F24: nach 429 beim Ereignis kein weiterer Aufruf im selben Durchgang, das Ereignis bleibt
+        with state.locked(self.bot.cfg.state_dir) as st:
+            panel.event(st, "Ereignis")
+        self.tg.limit["sendMessage"] = 30
+        self.assertFalse(self.bot.pump())
+        self.assertEqual(self.tg.calls, [])
+        with state.locked(self.bot.cfg.state_dir) as st:
+            self.assertEqual(len(st.outbox), 1)
+
+    def test_too_many_requests_on_edit_does_not_send_instead(self):
+        self.bot.pump()
+        with state.locked(self.bot.cfg.state_dir) as st:
+            st.zypp_holder = "zypper (PID 4711)"  # ändert die Nachricht, ohne Erinnerung: wird bearbeitet
+        calls = len(self.tg.calls)
+        self.tg.limit["editMessageText"] = 30
+        self.assertFalse(self.bot.pump())
+        self.assertEqual(len(self.tg.calls), calls)
+
+    def test_nothing_open(self):
+        self.bot.pump()
+        text, buttons = self.shown()
+        self.assertTrue(text.startswith("✅ <b>server1</b>: nichts offen"))
+        self.assertEqual(buttons, [[("🔄 Jetzt prüfen", "check")]])
+        self.assertIn("Beobachtungsmodus", text)
+
+    def test_details_button_only_with_packages(self):
+        self.bot.pump()
+        self.assertNotIn("details", actions(self.shown()[1]))
+        self.set_plan()
+        self.bot.pump()
+        self.assertIn("details", actions(self.shown()[1]))
 
     def test_status_asks_zypper_for_pending_reboot(self):
         # Nicht erst beim nächsten Takt (alle 30 min): Der Status zeigt den Neustart gleich mit Knopf
         self.rebooting.return_value = True
         self.bot.handle(message("/status"))
-        self.assertIn("reboot", self.status_data(self.tg.buttons[0]))
-        with state.locked(self.bot.cfg.state_dir) as st:
-            issue = st.issues["reboot"]
-            # Gilt als erste Benachrichtigung, der Takt schickt danach keine zweite Meldung
-            self.assertTrue(issue.last_notified)
-            self.assertEqual(issue.notify_count, 1)
-            send_due(self.bot.cfg, st, self.tg)
-        self.assertEqual(len(self.tg.sent), 1)
+        self.assertIn("reboot", actions(self.shown()[1]))
 
     def test_status_closes_reboot_no_longer_needed(self):
         self.open_reboot()
         self.rebooting.return_value = False
         self.bot.handle(message("/status"))
-        self.assertNotIn("reboot", self.status_data(self.tg.buttons[-1]))
-        with state.locked(self.bot.cfg.state_dir) as st:
-            self.assertNotIn("reboot", st.issues)
+        self.assertNotIn("reboot", actions(self.shown()[1]))
+        self.assertNotIn("reboot", self.st().issues)
 
-    def test_start_check_asks_zypper_for_pending_reboot(self):
-        # Das Ergebnis eines Prüflaufs ohne Updates zeigt offene Punkte; der Neustart soll dabei sein
+    def test_start_check_asks_zypper_and_marks_running(self):
         self.rebooting.return_value = True
         with mock.patch.object(subprocess, "run") as run:
-            REAL_START_CHECK(self.bot)
+            REAL_START_CHECK(self.bot, requested=True)
         run.assert_called_once()
-        with state.locked(self.bot.cfg.state_dir) as st:
-            self.assertIn("reboot", st.issues)
-            self.assertFalse(st.issues["reboot"].last_notified)
+        st = self.st()
+        self.assertIn("reboot", st.issues)
+        self.assertEqual(st.activity["check"]["phase"], "queued")
+        self.assertTrue(st.check_request)
+        self.bot.pump()
+        self.assertIn("Prüfung startet", self.shown()[0])
 
-    def status_message(self):
+    def test_start_check_keeps_running_check(self):
+        with state.locked(self.bot.cfg.state_dir) as st:
+            st.activity["check"] = {**state.holder(), "phase": "apply", "detail": "3 Pakete"}
+        with mock.patch.object(subprocess, "run"):
+            REAL_START_CHECK(self.bot)
+        self.assertEqual(self.st().activity["check"]["phase"], "apply")
+
+    def test_check_that_never_started_is_not_shown_forever(self):
+        with state.locked(self.bot.cfg.state_dir) as st:
+            st.activity["check"] = {"phase": "queued", "detail": "", "at": time.time() - bot_module.QUEUED_MAX - 1}
+            st.activity["other"] = {}
+        self.bot.pump()
+        self.assertNotIn("check", self.st().activity)
+        with state.locked(self.bot.cfg.state_dir) as st:
+            # Ein abgestürzter Prüflauf (Prozess weg) ebenso
+            st.activity["check"] = {"pid": 2**22 + 1, "boot": state.boot_id(), "at": time.time(), "phase": "apply"}
+        self.bot.pump()
+        self.assertNotIn("check", self.st().activity)
+
+    def test_running_phase_and_lock_holder_shown(self):
+        with state.locked(self.bot.cfg.state_dir) as st:
+            st.activity["check"] = {**state.holder(), "phase": "wait-zypp",
+                                    "detail": "purge-kernels.service (zypper, PID 707)"}
+            st.zypp_holder = "purge-kernels.service (zypper, PID 707)"
+        self.bot.pump()
+        text = self.shown()[0]
+        self.assertIn("Prüfung wartet auf die Paketverwaltung: purge-kernels.service", text)
+        self.assertNotIn("🔒", text)  # der Besitzer steht schon in der Prüfung
+
+    def test_status_names_lock_holder(self):
+        self.holder.return_value = "purge-kernels.service (zypper, PID 707)"
         self.bot.handle(message("/status"))
+        self.assertIn("🔒 Paketverwaltung belegt: purge-kernels.service (zypper, PID 707)", self.shown()[0])
+
+    def test_status_shows_pending_instead_of_nothing_open(self):
         with state.locked(self.bot.cfg.state_dir) as st:
-            return st.messages["status"]["message_id"]
+            st.pending_text = "24 Pakete, Download 12 MB"
+            st.observed_fingerprint = "rtn"
+        self.bot.pump()
+        text, buttons = self.shown()
+        self.assertIn("Ausstehend: 24 Pakete", text)
+        self.assertNotIn("nichts offen", text)
+        self.assertEqual(buttons[0][0], ("▶️ Diesmal einspielen", "approve:rtn"))
 
-    def press_on(self, message_id, data, buttons):
-        self.bot.handle_callback({"id": "cb1", "from": USER, "data": data,
-                                  "message": {"message_id": message_id, "chat": GROUP, "date": int(time.time()),
-                                              "text": "Status", "entities": [], "reply_markup": keyboard(buttons)}})
+    # --- Ereignisse -------------------------------------------------------
 
-    def test_reboot_from_status_keeps_other_items(self):
+    def event(self, text, loud=False, at=None):
+        with state.locked(self.bot.cfg.state_dir) as st:
+            panel.event(st, text, loud=loud, now=at)
+
+    def test_events_come_together_and_state_message_follows(self):
+        self.bot.pump()
+        first = self.panel_id()
+        self.event("🔄 a")
+        self.event("✅ b")
+        self.bot.pump()
+        self.assertEqual(self.tg.sent[1], "🔄 a\n✅ b")
+        self.assertIsNone(self.tg.buttons[1])
+        self.assertTrue(self.tg.silent[1])
+        # Die Zustandsnachricht steht danach wieder unten, still
+        self.assertNotEqual(self.panel_id(), first)
+        self.assertTrue(self.tg.silent[2])
+        self.assertEqual(self.st().outbox, [])
+
+    def test_events_wait_for_running_action(self):
+        self.event("✅ eingespielt")
+        with state.locked(self.bot.cfg.state_dir) as st:
+            st.restart_request = {"at": time.time(), "services": ["postfix"]}
+        self.bot.pump()
+        self.assertFalse([t for t in self.tg.sent if "eingespielt" in t])
+        # Höchstens EVENT_HOLD
+        with state.locked(self.bot.cfg.state_dir) as st:
+            st.outbox[0]["at"] -= bot_module.EVENT_HOLD + 1
+        self.bot.pump()
+        self.assertIn("✅ eingespielt", self.tg.sent)
+
+    def test_loud_event_goes_at_once(self):
+        with state.locked(self.bot.cfg.state_dir) as st:
+            st.restart_request = {"at": time.time(), "services": ["postfix"]}
+        self.event("🔴 kaputt", loud=True)
+        self.bot.pump()
+        self.assertEqual(self.tg.sent[0], "🔴 kaputt")
+        self.assertFalse(self.tg.silent[0])
+
+    def test_event_survives_telegram_outage(self):
+        self.event("✅ x")
+        self.tg.fail_send = True
+        self.bot.pump()
+        self.assertEqual(len(self.st().outbox), 1)
+        self.tg.fail_send = False
+        self.bot.pump()
+        self.assertIn("✅ x", self.tg.sent)
+        self.assertEqual(self.st().outbox, [])
+
+    def test_event_from_old_version_retires_its_waiting_message(self):
+        with state.locked(self.bot.cfg.state_dir) as st:
+            st.outbox = [{"chat_id": -100, "message_id": 55, "at": time.time(), "text": "✅ alt", "loud": False}]
+        self.bot.pump()
+        self.assertIn("✅ alt", self.tg.sent)
+        self.assertIn(55, self.tg.deleted)
+
+    # --- Erinnerungen und Briefing --------------------------------------
+
+    def test_due_reminder_resends_with_sound_and_counts_after_delivery(self):
+        self.bot.pump()
+        first = self.panel_id()
+        with state.locked(self.bot.cfg.state_dir) as st:
+            st.open_issue("reboot", "Kernel", now=time.time() - 100 * 3600)
+        self.tg.fail_send = True
+        self.bot.pump()
+        self.assertEqual(self.st().issues["reboot"].notify_count, 0)  # nicht angekommen, nicht erinnert
+        self.tg.fail_send = False
+        self.bot.pump()
+        self.assertFalse(self.tg.silent[-1])
+        self.assertIn("🔔 Erinnerung: Neustart ausstehend", self.tg.sent[-1])
+        self.assertIn(first, self.tg.deleted)
+        issue = self.st().issues["reboot"]
+        self.assertEqual(issue.notify_count, 1)
+        # Bis zur nächsten Stufe nicht wieder; danach nur bearbeiten
+        self.bot.pump()
+        self.assertEqual(len(self.tg.sent), 2)
+
+    def test_bringing_down_does_not_count_as_reminder(self):
+        with state.locked(self.bot.cfg.state_dir) as st:
+            st.open_issue("reboot", "Kernel")
+            st.issues["reboot"].last_notified = time.time()
+            st.issues["reboot"].notify_count = 1
+        self.bot.handle(message("/status"))
+        self.assertEqual(self.st().issues["reboot"].notify_count, 1)
+        self.assertNotIn("🔔", self.tg.sent[-1])
+
+    def test_reminder_counts_as_shown(self):
+        with state.locked(self.bot.cfg.state_dir) as st:
+            st.open_issue("manual", "x", fingerprint="abc", approvable=True)
+        self.bot.pump()
+        self.assertEqual(self.st().manual_shown, "abc")
+
+    def swap_plan_during(self, method):
+        """F21: Während `method` läuft, ersetzt ein Prüflauf Plan A (abc) durch B."""
+        original = getattr(self.tg, method)
+
+        def swapping(*args, **kwargs):
+            with state.locked(self.bot.cfg.state_dir) as st:
+                st.open_issue("manual", "NEVER SHOWN PLAN B", fingerprint="unseen-B", approvable=True)
+            setattr(self.tg, method, original)
+            return original(*args, **kwargs)
+
+        setattr(self.tg, method, swapping)
+
+    def test_plan_changed_while_sending_reminder_is_not_shown(self):
+        with state.locked(self.bot.cfg.state_dir) as st:
+            st.open_issue("manual", "Plan A", fingerprint="abc", approvable=True, now=time.time() - 100 * 3600)
+        self.swap_plan_during("send")
+        self.bot.pump()
+        self.assertIn("Plan A", self.tg.sent[0])
+        st = self.st()
+        self.assertEqual(st.manual_shown, "abc")  # gezeigt war A, nicht B
+        self.assertEqual(st.issues["manual"].notify_count, 0)  # B gilt nicht als erinnert
+        # /approve ohne Fingerabdruck gibt B nicht frei, solange B nicht zu sehen war
+        self.assertIn("geändert", self.bot.approve())
+        self.assertEqual(self.st().approved_fingerprint, "")
+        # Der nächste Durchgang zeigt B und erinnert daran
+        self.bot.pump()
+        self.assertIn("NEVER SHOWN PLAN B", self.tg.sent[-1])
+        self.assertFalse(self.tg.silent[-1])
+        self.assertEqual(self.st().manual_shown, "unseen-B")
+        self.assertEqual(self.st().issues["manual"].notify_count, 1)
+
+    def test_plan_changed_while_editing_is_not_shown(self):
+        with state.locked(self.bot.cfg.state_dir) as st:
+            st.open_issue("manual", "Plan A", fingerprint="abc", approvable=True)
+            st.issues["manual"].last_notified = time.time()
+        self.bot.pump()
+        with state.locked(self.bot.cfg.state_dir) as st:
+            st.zypp_holder = "zypper (PID 4711)"  # nur bearbeiten, keine Erinnerung
+        self.swap_plan_during("edit")
+        self.bot.pump()
+        self.assertIn("Plan A", self.tg.edited[-1][1])
+        self.assertEqual(self.st().manual_shown, "abc")
+        self.assertIn("geändert", self.bot.approve())
+
+    def test_recreated_issue_of_same_kind_is_not_reminded(self):
+        with state.locked(self.bot.cfg.state_dir) as st:
+            st.open_issue("reboot", "alt", now=time.time() - 100 * 3600)
+        original = self.tg.send
+
+        def recreate(*args, **kwargs):
+            with state.locked(self.bot.cfg.state_dir) as st:
+                st.resolve("reboot")
+                st.open_issue("reboot", "neu")
+            self.tg.send = original
+            return original(*args, **kwargs)
+
+        self.tg.send = recreate
+        self.bot.pump()
+        self.assertEqual(self.st().issues["reboot"].notify_count, 0)
+
+    def test_no_reminder_in_quiet_hours(self):
+        self.bot.cfg.escalation.quiet_hours = "00:00-23:59"
         self.open_reboot()
-        self.open_manual()
-        status = self.status_message()
-        with mock.patch.object(Bot, "reboot", return_value=""):
-            self.press_on(status, "reboot", self.tg.buttons[0])
-        self.assertIn("startet in 1 Minute neu", self.tg.sent[-1])
-        (message_id, markup), = self.tg.markup_edits
-        self.assertEqual(message_id, status)
-        data = [b["callback_data"] for row in markup["inline_keyboard"] for b in row]
-        self.assertNotIn("reboot", data)
-        self.assertIn("approve:abc", data)
-
-    def test_back_on_status_rebuilds_status(self):
-        # Auch ohne gespeicherten Inhalt: Der Status wird neu aufgebaut, mit seinen Schaltflächen
-        self.open_reboot()
-        status = self.status_message()
-        self.press_on(status, "back", [[("◀️ Zurück", "back")]])
-        message_id, text, buttons = self.tg.edited[-1]
-        self.assertEqual(message_id, status)
-        self.assertIn("Neustart", text)
-        self.assertIn("reboot", self.status_data(buttons))
-
-    def test_update_offer_and_go(self):
-        pending = ota.Pending("a" * 40, "b" * 40, ["bbbbbbb Neue Funktion"], "9.9.9")
-        with mock.patch.object(ota, "check_remote", return_value=pending), \
-             mock.patch.object(ota, "version_of", return_value="9.9.9"), \
-             mock.patch.object(ota, "start", return_value="") as start:
-            self.bot.handle(message("/update"))  # ohne @botname: alle Server antworten
-            self.assertIn("Neue Funktion", self.tg.sent[0])
-            # Version statt langer Hashes, für Ziel und laufenden Stand
-            self.assertIn("twguard v9.9.9 (bbbbbbbb)", self.tg.sent[0])
-            self.assertIn(f"läuft mit {ota.running()}", self.tg.sent[0])
-            self.assertEqual(self.tg.buttons[0][0][0], ("⬆️ Einspielen", "update:" + "b" * 40))
-            self.press("update:" + "b" * 40)
-            start.assert_called_once_with("b" * 40)
-        self.assertIn("Update auf v9.9.9 (bbbbbbbb) läuft", self.tg.edited[-1][1])
-        # Die Frist bis zum Zurückrollen steht dabei, sonst wirkt der stumme Bot tot
-        # Die Frist gilt erst nach Tests und Installation, nicht ab dem Knopfdruck
-        self.assertIn(f"danach wartet twguard bis zu {ota.START_TIMEOUT} s auf den neuen Bot", self.tg.edited[-1][1])
-        self.assertNotIn("spätestens", self.tg.edited[-1][1])
-        with state.locked(self.bot.cfg.state_dir) as st:
-            self.assertEqual(st.update_request["commit"], "b" * 40)
-            self.assertEqual(st.update_request["message_id"], 5)
-
-    def test_update_refuses_changed_target(self):
-        pending = ota.Pending("a" * 40, "c" * 40, ["ccccccc Noch neuer"])
-        with mock.patch.object(ota, "check_remote", return_value=pending), \
-             mock.patch.object(ota, "start") as start:
-            self.press("update:" + "b" * 40)
-            start.assert_not_called()
-        self.assertIn("anderen Stand", self.tg.answered[0])
-
-    def test_check_sends_waiting_message_and_registers_request(self):
-        self.bot.handle(message("/check@server1_bot"))
-        self.start_check.assert_called_once()
-        self.assertEqual(self.tg.typed, [-100])
-        self.assertEqual(len(self.tg.sent), 1)
-        self.assertIn("Prüfung läuft", self.tg.sent[0])
-        with state.locked(self.bot.cfg.state_dir) as st:
-            self.assertEqual(st.check_request["message_id"], 101)
-
-    def test_approve_registers_request(self):
-        self.open_manual()
-        self.bot.handle(message("/approve", reply_to=ME))
-        self.assertIn("Freigegeben", self.tg.sent[0])
-        with state.locked(self.bot.cfg.state_dir) as st:
-            self.assertTrue(st.check_request)
-
-    def at(self, hour, minute=0):
-        t = time.localtime()
-        return time.mktime((t.tm_year, t.tm_mon, t.tm_mday, hour, minute, 0, 0, 0, -1))
+        self.bot.pump()
+        self.assertTrue(self.tg.silent[0])
+        self.assertNotIn("🔔", self.tg.sent[0])
+        self.assertEqual(self.st().issues["reboot"].notify_count, 0)
 
     def test_briefing_once_per_day(self):
         self.bot.maybe_briefing(self.at(7, 59))
@@ -383,9 +650,11 @@ class BotTest(unittest.TestCase):
 
     def test_briefing_with_issue_not_silent(self):
         self.open_manual()
+        with state.locked(self.bot.cfg.state_dir) as st:
+            st.issues["manual"].last_notified = self.at(9, 0)
         self.bot.maybe_briefing(self.at(10, 0))
-        self.assertIn("1 offener Punkt", self.tg.sent[0])
-        self.assertFalse(self.tg.silent[0])
+        self.assertIn("☀️ <b>server1</b>: 1 offener Punkt", self.tg.sent[-1])
+        self.assertFalse(self.tg.silent[-1])
 
     def test_briefing_not_caught_up_too_late(self):
         self.bot.maybe_briefing(self.at(15, 0))
@@ -396,275 +665,345 @@ class BotTest(unittest.TestCase):
         self.bot.maybe_briefing(self.at(8, 0))
         self.assertEqual(self.tg.sent, [])
 
-    def overdue_manual(self, now):
-        """Freigabe offen seit 30 h, letzte Erinnerung vor 25 h: Die nächste ist fällig."""
+    def test_briefing_takes_due_reminder(self):
+        now = self.at(8, 0)
         self.open_manual()
         with state.locked(self.bot.cfg.state_dir) as st:
             issue = st.issues["manual"]
             issue.since, issue.last_notified, issue.notify_count = now - 30 * 3600, now - 25 * 3600, 1
-            st.messages["issue:manual"] = {"chat_id": -100, "message_id": 30, "at": now - 25 * 3600}
-
-    def test_briefing_takes_due_reminder(self):
-        now = self.at(8, 0)
-        self.overdue_manual(now)
         self.bot.maybe_briefing(now)
-        with state.locked(self.bot.cfg.state_dir) as st:
-            send_due(self.bot.cfg, st, self.tg, now)
-            issue = st.issues["manual"]
-            self.assertEqual((issue.last_notified, issue.notify_count), (now, 2))
-            self.assertNotIn("issue:manual", st.messages)
+        self.bot.pump(now=now)
         self.assertEqual(len(self.tg.sent), 1)  # keine Erinnerung als zweite Nachricht
         self.assertIn("🔔", self.tg.sent[0])
-        self.assertIn("kritisches Paket", self.tg.sent[0])
-        self.assertFalse(self.tg.silent[0])
-        callbacks = [b[1] for row in self.tg.buttons[0] for b in row]
-        self.assertIn("approve:abc", callbacks)
-        self.assertIn("status", callbacks)
-        self.assertIn(30, self.tg.deleted)  # die vorige Erinnerung wird ersetzt
+        self.assertIn("approve:abc", actions(self.tg.buttons[0]))
+        issue = self.st().issues["manual"]
+        self.assertEqual((issue.last_notified, issue.notify_count), (now, 2))
 
-    def test_briefing_without_due_reminder_only_lists(self):
-        now = self.at(8, 0)
-        self.overdue_manual(now)
-        with state.locked(self.bot.cfg.state_dir) as st:
-            st.issues["manual"].last_notified = now - 3600
-        self.bot.maybe_briefing(now)
-        self.assertNotIn("🔔", self.tg.sent[0])
-        self.assertNotIn("approve:abc", [b[1] for row in self.tg.buttons[0] for b in row])
-        with state.locked(self.bot.cfg.state_dir) as st:
-            self.assertEqual(st.issues["manual"].notify_count, 1)
-            self.assertIn("issue:manual", st.messages)
+    def test_briefing_replaces_previous_state_message(self):
+        self.bot.pump()
+        first = self.panel_id()
+        self.bot.maybe_briefing(self.at(8, 0))
+        self.assertIn(first, self.tg.deleted)
+        self.assertEqual(self.st().last_briefing_day, time.strftime("%Y-%m-%d", time.localtime(self.at(8, 0))))
 
-    def test_reminder_inside_quiet_hours_stays_separate(self):
-        # Briefing absichtlich in der Ruhezeit: Die Erinnerung kommt wie eingestellt danach
-        self.bot.cfg.briefing.at = "07:00"
-        self.bot.cfg.escalation.quiet_hours = "22:00-08:00"
-        now = self.at(7, 0)
-        self.overdue_manual(now)
-        self.bot.maybe_briefing(now)
-        self.assertNotIn("🔔", self.tg.sent[0])
-        with state.locked(self.bot.cfg.state_dir) as st:
-            self.assertEqual(st.issues["manual"].notify_count, 1)
-
-    def briefing_with(self, kind, now):
-        """Briefing mit zwei fälligen Punkten: Freigabe und `kind`."""
-        self.overdue_manual(now)
-        if kind == "services":
-            self.offer("postfix")
-        with state.locked(self.bot.cfg.state_dir) as st:
-            if kind != "services":
-                st.open_issue(kind, "Fehler beim Einspielen")
-            issue = st.issues[kind]
-            issue.since, issue.last_notified, issue.notify_count = now - 30 * 3600, now - 25 * 3600, 1
-        self.bot.maybe_briefing(now)
-        self.assertIn("approve:abc", self.briefing_data())
-        with state.locked(self.bot.cfg.state_dir) as st:
-            return st.messages["briefing"]["message_id"]
-
-    def briefing_data(self, markup=None):
-        rows = markup["inline_keyboard"] if markup else keyboard(self.tg.buttons[0])["inline_keyboard"]
-        return [b["callback_data"] for row in rows for b in row]
-
-    def press_briefing(self, briefing, data):
-        self.bot.handle_callback({"id": "cb1", "from": USER, "data": data,
-                                  "message": {"message_id": briefing, "chat": GROUP, "date": int(time.time()),
-                                              "text": "Briefing", "entities": [],
-                                              "reply_markup": keyboard(self.tg.buttons[0])}})
-
-    def assert_briefing_kept(self, briefing, gone, kept):
-        """Die Aktion kam in eine eigene Nachricht; im Briefing fehlen nur die Schaltflächen ihres Punkts."""
-        self.assertNotIn(briefing, [m for m, *_ in self.tg.edited])
-        (message_id, markup), = self.tg.markup_edits
-        self.assertEqual(message_id, briefing)
-        data = self.briefing_data(markup)
-        self.assertFalse([d for d in data if d.startswith(gone)])
-        for d in [*kept, "status", "check"]:
-            self.assertIn(d, data)
-        with state.locked(self.bot.cfg.state_dir) as st:
-            self.assertEqual(st.messages["briefing"]["message_id"], briefing)
-
-    def test_approve_in_briefing_keeps_restart_buttons(self):
-        briefing = self.briefing_with("services", self.at(8, 0))
-        self.press_briefing(briefing, "approve:abc")
-        self.start_check.assert_called_once()
-        self.assertIn("Freigegeben", self.tg.sent[-1])
-        self.assert_briefing_kept(briefing, "approve", ["restart:postfix"])
-        with state.locked(self.bot.cfg.state_dir) as st:
-            self.assertEqual(st.check_request["message_id"], self.tg.next_id)
-
-    def assert_briefing_untouched(self, briefing):
-        self.assertNotIn(briefing, [m for m, *_ in self.tg.edited])
-        self.assertEqual(self.tg.markup_edits, [])
-        with state.locked(self.bot.cfg.state_dir) as st:
-            self.assertEqual(st.messages["briefing"]["message_id"], briefing)
-
-    def test_approve_in_briefing_with_send_error_keeps_briefing(self):
-        briefing = self.briefing_with("services", self.at(8, 0))
+    def test_briefing_not_counted_when_not_delivered(self):
         self.tg.fail_send = True
-        self.press_briefing(briefing, "approve:abc")
-        self.start_check.assert_called_once()
-        self.assert_briefing_untouched(briefing)
-        with state.locked(self.bot.cfg.state_dir) as st:
-            self.assertNotIn("message_id", st.check_request)
-            self.assertIn("services", st.issues)
-        # Das Ergebnis des Prüflaufs kommt neu, sobald Telegram wieder annimmt
-        self.tg.fail_send = False
-        self.assertTrue(check.finish(self.bot.cfg, self.tg, "Ergebnis"))
-        self.assertEqual(self.tg.sent[-1], "Ergebnis")
-        self.assert_briefing_untouched(briefing)
+        self.bot.maybe_briefing(self.at(8, 0))
+        self.assertEqual(self.st().last_briefing_day, "")
 
-    def test_restart_in_briefing_with_send_error_reports_later(self):
-        briefing = self.briefing_with("services", self.at(8, 0))
-        self.tg.fail_send = True
-        with mock.patch.object(restarts, "start", return_value={}):
-            self.press_briefing(briefing, "restart:postfix")
-        self.assert_briefing_untouched(briefing)
-        self.tg.fail_send = False
-        self.found.return_value = []
-        with mock.patch.object(restarts, "pending", return_value=[]), \
-                mock.patch.object(restarts, "states", return_value={"postfix": "active"}):
-            self.bot.watch_restart()
-        self.assertIn("postfix", self.tg.sent[-1])
-        self.assert_briefing_untouched(briefing)
+    def test_briefing_names_kernel_and_last_check(self):
         with state.locked(self.bot.cfg.state_dir) as st:
-            self.assertEqual(st.outbox, [])
+            st.last_check_ok = self.at(3, 0)
+        self.bot.maybe_briefing(self.at(8, 0))
+        self.assertIn("Letzte Prüfung", self.tg.sent[0])
+        self.assertIn(f"Kernel {os.uname().release} seit", self.tg.sent[0])
 
-    def test_restart_in_briefing_keeps_approval(self):
-        briefing = self.briefing_with("services", self.at(8, 0))
-        with mock.patch.object(restarts, "start", return_value={}) as start:
-            self.press_briefing(briefing, "restart:postfix")
-        start.assert_called_once_with(["postfix"])
-        self.assertIn("starte neu: postfix", self.tg.sent[-1])
-        self.assert_briefing_kept(briefing, "restart", ["approve:abc", "later:24:manual"])
+    def test_reboot_planned_on_console_does_not_remind(self):
         with state.locked(self.bot.cfg.state_dir) as st:
-            self.assertEqual(st.restart_request["message_id"], self.tg.next_id)
-
-    def test_later_in_briefing_moves_issue_to_own_message(self):
-        briefing = self.briefing_with("services", self.at(8, 0))
-        self.press_briefing(briefing, "later:24:services")
-        # Die Dienste bleiben in der eigenen Nachricht bedienbar, die Freigabe im Briefing
-        self.assertIn("Aufgeschoben bis", self.tg.sent[-1])
-        self.assertIn("restart:postfix", [b[1] for row in self.tg.buttons[-1] for b in row])
-        self.assert_briefing_kept(briefing, "later:24:services", ["approve:abc"])
-        self.assertNotIn("restart:postfix", self.briefing_data(self.tg.markup_edits[0][1]))
-        with state.locked(self.bot.cfg.state_dir) as st:
-            self.assertEqual(st.messages["issue:services"]["message_id"], self.tg.next_id)
-
-    def test_resolved_in_briefing_keeps_approval(self):
-        briefing = self.briefing_with("apply-failed", self.at(8, 0))
-        self.press_briefing(briefing, "resolved:apply-failed")
-        self.assertIn("erledigt", self.tg.sent[-1])
-        self.assert_briefing_kept(briefing, "resolved", ["approve:abc"])
-        with state.locked(self.bot.cfg.state_dir) as st:
-            self.assertNotIn("apply-failed", st.issues)
-
-    def test_reboot_in_briefing_keeps_approval(self):
-        briefing = self.briefing_with("reboot", self.at(8, 0))
-        with mock.patch.object(Bot, "reboot", return_value=""):
-            self.press_briefing(briefing, "reboot")
-        self.assertIn("startet in 1 Minute neu", self.tg.sent[-1])
-        self.assert_briefing_kept(briefing, "reboot", ["approve:abc"])
-        with state.locked(self.bot.cfg.state_dir) as st:
-            self.assertEqual(st.messages["reboot"]["message_id"], self.tg.next_id)
-
-    def test_tick_sends_briefing_before_reminders(self):
-        now = self.at(8, 0)
-        self.overdue_manual(now)
-        with mock.patch.object(bot_module.time, "time", return_value=now), \
-                mock.patch.object(self.bot, "_rpmdb_mtime", return_value=0.0), \
-                mock.patch.object(self.bot, "check_reboot"), mock.patch.object(self.bot, "deliver_outbox"):
+            st.open_issue("reboot", "Neustart nötig", now=time.time() - 3 * 86400)
+            busy.note_shutdown(st, busy.Shutdown("planned", "reboot", time.time() + 50))
+        self.bot.pump()
+        self.assertNotIn("🔔", self.tg.sent[0])
+        # sudo shutdown -c: logind hat nichts mehr geplant; der Takt gleicht ab und erinnert wieder
+        with mock.patch.object(self.bot, "_rpmdb_mtime", return_value=0.0), \
+                mock.patch.object(self.bot, "check_reboot"), mock.patch.object(self.bot, "maybe_briefing"):
             self.bot.tick()
-        self.assertEqual(len(self.tg.sent), 1)
-        self.assertIn("☀️", self.tg.sent[0])
-        self.assertIn("🔔", self.tg.sent[0])
+        self.bot.pump()
+        self.assertIn("🔔 Erinnerung: Neustart ausstehend", self.tg.sent[-1])
 
-    def test_command_deleted_after_answer(self):
-        self.bot.handle(message("/status"))
-        self.assertEqual(self.tg.deleted, [7])
+    # --- Schaltflächen ----------------------------------------------------
 
-    def test_missing_delete_right_is_tolerated(self):
-        self.tg.fail_delete = True
-        self.bot.handle(message("/status"))
-        self.bot.handle(message("/status"))
-        self.assertEqual(len(self.tg.sent), 2)
-        self.assertTrue(self.bot.delete_warned)
+    def test_button_on_older_message_does_nothing_and_shows_current(self):
+        # Codex: Aktionen nur aus der aktuell registrierten Zustandsnachricht
+        self.open_manual()
+        self.bot.pump()
+        current_id = self.panel_id()
+        self.press("approve:abc", message_id=33)
+        self.start_check.assert_not_called()
+        self.assertIn("veraltet", self.tg.answered[0])
+        self.assertIn(33, self.tg.deleted)
+        self.assertNotEqual(self.panel_id(), current_id)  # der aktuelle Stand steht jetzt unten
+        self.assertEqual(self.st().approved_fingerprint, "")
 
-    def test_status_replaces_previous_status(self):
-        self.bot.handle(message("/status"))
-        self.bot.handle(message("/status"))
-        self.assertIn(101, self.tg.deleted)
+    def test_same_message_id_in_other_chat_is_not_the_state_message(self):
+        self.open_reboot()
+        with mock.patch("subprocess.run") as run:
+            self.press("reboot", chat={"id": 42, "type": "private"}, message_id=None)
+        run.assert_not_called()
+        self.assertIn("veraltet", self.tg.answered[0])
+
+    def test_button_approve_with_matching_fingerprint(self):
+        self.open_manual()
+        self.press("approve:abc")
+        self.start_check.assert_called_once_with(requested=True)
+        self.assertEqual(self.tg.answered, ["Freigegeben"])
+        self.assertEqual(self.st().approved_fingerprint, "abc")
+
+    def test_button_approve_stale_fingerprint(self):
+        self.open_manual()
+        self.press("approve:old")
+        self.start_check.assert_not_called()
+        self.assertIn("älteren Stand", self.tg.answered[0])
+
+    def test_button_approve_observed_routine(self):
         with state.locked(self.bot.cfg.state_dir) as st:
-            self.assertEqual(st.messages["status"]["message_id"], 102)
+            st.observed_fingerprint = "rtn"
+        self.press("approve:rtn")
+        self.start_check.assert_called_once()
+
+    def test_button_unauthorized(self):
+        self.open_manual()
+        self.press("approve:abc", user={"id": 99, "is_bot": False})
+        self.start_check.assert_not_called()
+        self.assertEqual(self.tg.answered, ["Nicht berechtigt."])
+
+    def test_details_in_state_message_and_back(self):
+        self.open_reboot()
+        self.set_plan()
+        self.press("details")
+        text, buttons = self.shown()
+        self.assertIn("paket-000\n", text)
+        # Was offen ist, bleibt über der Paketliste sichtbar
+        self.assertIn("📋 <b>server1</b> · Neustart ausstehend", text)
+        self.assertEqual(buttons, [[("🔢 Nach Version", "details:version:1"), ("📄 Als Datei", "file")],
+                                   [("◀️ Zurück", "back")]])
+        self.press("details:version:1")
+        text, buttons = self.shown()
+        self.assertIn("nur neu gebaut", text)
+        self.assertEqual(buttons[0][0], ("🔤 Nach Name", "details:name:1"))
+        self.press("back")
+        self.assertIn("reboot", actions(self.shown()[1]))
+        # Ein doppeltes „Zurück“ ändert nichts
+        edits = len(self.tg.edited)
+        self.press("back")
+        self.assertEqual(len(self.tg.edited), edits)
+
+    def test_details_stay_until_something_changes(self):
+        self.set_plan()
+        self.press("details")
+        self.bot.pump()
+        self.assertIn("paket-000", self.shown()[0])
+        # Ein neuer Punkt führt zur Übersicht zurück, statt hinter der Paketliste zu verschwinden
+        self.open_reboot()
+        self.bot.pump()
+        self.assertIn("reboot", actions(self.shown()[1]))
+        self.assertNotIn("paket-000", self.shown()[0])
+
+    def test_details_pages(self):
+        self.set_plan(300)
+        self.press("details")
+        nav = self.shown()[1][1]
+        self.assertEqual(nav[-1], ("➡️", "details:name:2"))
+        self.assertEqual(len(nav), 2)
+        self.press("details:name:2")
+        self.assertEqual(self.shown()[1][1][0], ("⬅️", "details:name:1"))
+        # Der Plan kann inzwischen kürzer sein
+        self.press("details:name:99")
+        self.assertIn("paket-", self.shown()[0])
+
+    def test_conflict_details_have_no_list_buttons(self):
+        with state.locked(self.bot.cfg.state_dir) as st:
+            st.last_plan = {"summary": "0 Pakete", "rows": [], "problems": ["Problem: 1: x"]}
+        self.press("details")
+        text, buttons = self.shown()
+        self.assertIn("Problem: 1: x", text)
+        self.assertEqual(buttons, [[("◀️ Zurück", "back")]])
+
+    def test_details_command_brings_list_down(self):
+        self.set_plan()
+        self.bot.handle(message("/details@" + self.bot.me["username"]))
+        self.assertIn("paket-000", self.tg.sent[-1])
+        self.assertEqual(self.panel_id(), self.tg.next_id)
+
+    def test_file_button_sends_document_and_replaces_previous(self):
+        self.set_plan()
+        self.press("file")
+        name, content, caption = self.tg.documents[0]
+        self.assertTrue(name.endswith(".html"))
+        self.assertIn(b"paket-000", content)
+        self.assertIn("1 Pakete", caption)
+        first = self.st().messages["file"]["message_id"]
+        self.press("file", message_id=99)  # auch von einer älteren Nachricht
+        self.assertEqual(len(self.tg.documents), 2)
+        self.assertIn(first, self.tg.deleted)
+
+    def test_file_button_without_plan(self):
+        self.press("file")
+        self.assertEqual(self.tg.documents, [])
+        self.assertEqual(self.tg.answered, ["Keine Paketliste vorhanden."])
+
+    def test_button_later_snoozes_and_shows_it(self):
+        self.open_manual()
+        self.open_reboot()
+        self.press("later:24")
+        st = self.st()
+        self.assertTrue(st.issues["reboot"].snoozed_until)
+        self.assertTrue(st.issues["manual"].snoozed_until)
+        self.assertIn("aufgeschoben bis", self.shown()[0])
+
+    def test_old_later_button_snoozes_only_that_issue(self):
+        self.open_manual()
+        self.open_reboot()
+        self.press("later:24:reboot")
+        st = self.st()
+        self.assertTrue(st.issues["reboot"].snoozed_until)
+        self.assertFalse(st.issues["manual"].snoozed_until)
+
+    def test_button_check_starts_and_shows_it(self):
+        self.press("check")
+        self.start_check.assert_called_once_with(requested=True)
+        self.assertEqual(self.tg.answered, ["Prüfung läuft …"])
+
+    def test_status_button_from_older_message(self):
+        self.bot.pump()
+        first = self.panel_id()
+        self.press("status", message_id=12)
+        self.assertNotEqual(self.panel_id(), first)
+        self.assertEqual(self.tg.answered, [""])
+
+    def test_resolved_button_closes_failed_apply(self):
+        with state.locked(self.bot.cfg.state_dir) as st:
+            st.open_issue("apply-failed", "Skript kaputt")
+        self.bot.pump()
+        self.assertIn("resolved:apply-failed", actions(self.shown()[1]))
+        self.press("resolved:apply-failed")
+        self.assertNotIn("apply-failed", self.st().issues)
+        self.assertIn("als behoben quittiert", self.tg.sent[-2])
+
+    def test_resolved_button_only_for_failed_apply(self):
+        self.open_manual()
+        self.press("resolved:manual")
+        self.assertIn("manual", self.st().issues)
+
+    def test_dismiss_on_old_message_removes_it(self):
+        self.press("dismiss", message_id=60)
+        self.assertIn(60, self.tg.deleted)
+
+    # --- Tastatur ---------------------------------------------------------
 
     def test_keyboard_text_is_broadcast_status(self):
         self.bot.handle(message("📊 Status"))
-        self.assertIn("server1", self.tg.sent[0])
-        self.assertEqual(self.tg.deleted, [7])
+        self.assertEqual(len(self.tg.sent), 1)
 
     def test_keyboard_key_is_broadcast_even_as_reply_to_other_bot(self):
-        # Telegram schickt Tastendrücke als Antwort auf die Tastatur-Nachricht eines Bots
-        self.bot.handle(message("📊 Status", reply_to=OTHER_BOT))
-        self.assertIn("server1", self.tg.sent[0])
-        self.bot.handle(message("❓ Hilfe", reply_to=ME))
-        self.assertEqual(len(self.tg.sent), 1)  # an alle, nicht gezielt: ohne help_full keine Hilfe
+        msg = message("📊 Status", reply_to=OTHER_BOT)
+        self.bot.handle(msg)
+        self.assertEqual(len(self.tg.sent), 1)
 
     def test_keyboard_check_all(self):
         self.bot.handle(message("🔄 Alle prüfen"))
         self.start_check.assert_called_once()
-        self.assertIn("Prüfung läuft", self.tg.sent[0])
 
     def test_keyboard_update_offers_update(self):
-        pending = ota.Pending("a" * 40, "b" * 40, ["bbbbbbb Neue Funktion"])
-        with mock.patch.object(ota, "check_remote", return_value=pending):
-            self.bot.handle(message("⬆️ Update", reply_to=OTHER_BOT))
-        self.assertIn("Neue Funktion", self.tg.sent[0])
+        with mock.patch.object(ota, "check_remote", return_value=ota.Pending("a" * 40, "a" * 40, [])):
+            self.bot.handle(message("⬆️ Update"))
+        self.assertIn("aktuell", self.tg.sent[0])
 
     def test_keyboard_version(self):
         self.bot.handle(message("🏷️ Version"))
-        self.assertIn("server1", self.tg.sent[0])
+        self.assertIn("twguard", self.tg.sent[0])
 
     def test_keyboard_has_two_rows(self):
-        from twguard.bot import keyboard_markup
-        self.assertEqual([len(row) for row in keyboard_markup()["keyboard"]], [2, 3])
+        self.assertEqual([len(row) for row in bot_module.keyboard_markup()["keyboard"]], [2, 3])
 
     def test_keyboard_command_sends_persistent_keyboard(self):
         self.bot.handle(message("/keyboard@server1_bot"))
         self.assertTrue(self.tg.markups[0]["is_persistent"])
-        # Erneut einblenden ersetzt die vorige Tastatur-Nachricht
+        first = self.tg.next_id
         self.bot.handle(message("/keyboard@server1_bot"))
-        self.assertIn(101, self.tg.deleted)
-        # Ausblenden löscht nur die Tastatur-Nachricht (damit verschwinden die Tasten), ohne neue Nachricht
+        self.assertIn(first, self.tg.deleted)
         self.bot.handle(message("/keyboard@server1_bot off"))
-        self.assertIn(102, self.tg.deleted)
-        self.assertEqual(len(self.tg.sent), 2)
+        self.assertIn(self.tg.next_id, self.tg.deleted)
+
+    # --- Update von twguard ----------------------------------------------
+
+    def test_update_offer_and_go(self):
+        pending = ota.Pending("a" * 40, "b" * 40, ["bbbbbbb Neue Funktion"], "9.9.9")
+        with mock.patch.object(ota, "check_remote", return_value=pending), \
+             mock.patch.object(ota, "start", return_value="") as start:
+            self.bot.handle(message("/update"))  # ohne @botname: alle Server antworten
+            text, buttons = self.shown()
+            self.assertIn("Neue Funktion", text)
+            # Version statt langer Hashes, für Ziel und laufenden Stand
+            self.assertIn("twguard v9.9.9 (bbbbbbbb) verfügbar", text)
+            self.assertIn(f"läuft mit {ota.running()}", text)
+            self.assertIn(("⬆️ Einspielen", "update:" + "b" * 40), buttons[0])
+            self.press("update:" + "b" * 40)
+            start.assert_called_once_with("b" * 40)
+        text, buttons = self.shown()
+        self.assertIn("Update von twguard auf v9.9.9 (bbbbbbbb) läuft", text)
+        # Die Frist gilt erst nach Tests und Installation, nicht ab dem Knopfdruck
+        self.assertIn(f"danach wartet twguard bis zu {ota.START_TIMEOUT} s auf den neuen Bot", text)
+        self.assertNotIn("update:", str(buttons))
+        st = self.st()
+        self.assertEqual(st.update_request["commit"], "b" * 40)
+        self.assertEqual(st.update_offer, {})
+
+    def test_update_refuses_changed_target(self):
+        pending = ota.Pending("a" * 40, "c" * 40, ["ccccccc Noch neuer"])
         with state.locked(self.bot.cfg.state_dir) as st:
-            self.assertNotIn("keyboard", st.messages)
-            self.assertEqual(st.ephemeral, [])  # die Tastatur-Nachricht wird nie automatisch gelöscht
+            st.update_offer = {"target": "b" * 40, "label": "b", "running": "a", "commits": [], "at": time.time()}
+        with mock.patch.object(ota, "check_remote", return_value=pending), \
+             mock.patch.object(ota, "start") as start:
+            self.press("update:" + "b" * 40)
+            start.assert_not_called()
+        self.assertIn("anderen Stand", self.tg.answered[0])
 
-    def test_help_broadcast_silent_without_help_full(self):
-        self.bot.handle(message("/help"))
-        self.assertEqual(self.tg.sent, [])
-        self.assertEqual(self.tg.deleted, [7])  # der Befehl verschwindet trotzdem
-
-    def test_help_addressed_or_help_full_has_list(self):
-        self.bot.handle(message("/help@server1_bot"))
-        self.assertIn("/approve", self.tg.sent[0])
-        self.bot.cfg.help_full = True
-        self.bot.handle(message("/help"))
-        self.assertIn("/approve", self.tg.sent[1])
-
-    def offer(self, *names):
+    def test_update_offer_dismissed_and_expires(self):
         with state.locked(self.bot.cfg.state_dir) as st:
-            restarts.note(st, list(names), self.bot.cfg.services.exclude)
-        self.found.return_value = list(names)
+            st.update_offer = {"target": "b" * 40, "label": "b", "running": "a", "commits": [], "at": time.time()}
+        self.press("dismiss")
+        self.assertEqual(self.st().update_offer, {})
+        with state.locked(self.bot.cfg.state_dir) as st:
+            st.update_offer = {"target": "b" * 40, "label": "b", "running": "a", "commits": [],
+                               "at": time.time() - bot_module.OFFER_MAX - 1}
+        self.bot.pump()
+        self.assertEqual(self.st().update_offer, {})
+
+    # --- Prüfen und Freigeben ------------------------------------------
+
+    def test_check_command_starts_and_brings_state_down(self):
+        self.bot.handle(message("/check@server1_bot"))
+        self.start_check.assert_called_once_with(requested=True)
+        self.assertEqual(self.tg.typed, [-100])
+        self.assertEqual(len(self.tg.sent), 1)
+        self.assertEqual(self.panel_id(), self.tg.next_id)
+
+    def test_approve_refuses_plan_not_shown_and_shows_it(self):
+        self.open_manual()
+        with state.locked(self.bot.cfg.state_dir) as st:
+            st.open_issue("manual", "• neuer Plan B", fingerprint="bbb", approvable=True)
+            st.issues["manual"].last_notified = time.time()
+        self.bot.handle(message("/approve", reply_to=ME))
+        self.start_check.assert_not_called()
+        self.assertIn("neuer Plan B", self.shown()[0])
+        self.assertEqual(self.shown()[1][0][0][1], "approve:bbb")
+        st = self.st()
+        self.assertEqual(st.approved_fingerprint, "")
+        self.assertEqual(st.manual_shown, "bbb")
+        # Jetzt ist B gezeigt und gilt
+        self.bot.handle(message("/approve", reply_to=ME))
+        self.start_check.assert_called_once()
+        self.assertEqual(self.st().approved_fingerprint, "bbb")
+
+    def test_manual_shown_only_after_delivery(self):
+        with state.locked(self.bot.cfg.state_dir) as st:
+            st.open_issue("manual", "x", fingerprint="abc", approvable=True)
+        self.tg.fail_send = True
+        self.bot.pump()
+        self.assertEqual(self.st().manual_shown, "")
+
+    # --- Dienst-Neustart --------------------------------------------------
 
     def test_tick_offers_restart_with_buttons(self):
         self.found.return_value = ["postfix", "sshd"]
         with mock.patch.object(zypper, "needs_rebooting", return_value=False):
             self.bot.check_reboot()
             self.bot.tick()
-        data = [b[1] for row in self.tg.buttons[0] for b in row]
-        self.assertEqual(data[:3], ["restart:postfix", "restart:sshd", f"restart:*:{restarts.digest(['postfix', 'sshd'])}"])
-        self.assertIn("later:24:services", data)
+        self.bot.pump()
+        data = actions(self.shown()[1])
+        self.assertEqual(data[:3], ["restart:postfix", "restart:sshd",
+                                    f"restart:*:{restarts.digest(['postfix', 'sshd'])}"])
 
     def test_no_scan_while_check_runs(self):
         self.checking.return_value = True
@@ -676,11 +1015,25 @@ class BotTest(unittest.TestCase):
         with mock.patch.object(restarts, "start", return_value={}) as start:
             self.press("restart:sshd")
         start.assert_called_once_with(["sshd"])
-        self.assertIn("sshd", self.tg.edited[-1][1])
-        self.assertIsNone(self.tg.edited[-1][2])
-        with state.locked(self.bot.cfg.state_dir) as st:
-            self.assertEqual(st.restart_request["services"], ["sshd"])
-            self.assertNotIn("services", st.issues)
+        self.assertIn("Dienste werden neu gestartet: sshd", self.shown()[0])
+        st = self.st()
+        self.assertEqual(st.restart_request["services"], ["sshd"])
+        self.assertNotIn("services", st.issues)
+
+    def test_reboot_button_stays_while_services_restart(self):
+        # Beobachtung auf einem Server: Nach dem Dienst-Neustart war der Neustart-Knopf verschwunden
+        self.open_reboot()
+        self.offer("postfix")
+        with mock.patch.object(restarts, "start", return_value={}):
+            self.press("restart:postfix")
+        text, buttons = self.shown()
+        self.assertIn("reboot", actions(buttons))
+        self.assertIn("Dienste werden neu gestartet", text)
+        # Ein Druck jetzt sagt, warum es gerade nicht geht
+        with mock.patch("subprocess.run") as run:
+            self.press("reboot")
+        run.assert_not_called()
+        self.assertIn("Dienste werden gerade neu gestartet", self.tg.answered[-1])
 
     def test_restart_refused_while_check_applies(self):
         self.offer("postfix")
@@ -690,8 +1043,7 @@ class BotTest(unittest.TestCase):
             self.press("restart:postfix")
         start.assert_not_called()
         self.assertIn("twguard spielt gerade ein", self.tg.answered[-1])
-        with state.locked(self.bot.cfg.state_dir) as st:
-            self.assertEqual(st.restart_request, {})
+        self.assertEqual(self.st().restart_request, {})
 
     def test_restart_refused_while_other_process_applies(self):
         # Reservierung eines anderen lebenden Prozesses (direkter CLI-Prüflauf, kein systemd-Dienst)
@@ -712,13 +1064,14 @@ class BotTest(unittest.TestCase):
             with state.locked(self.bot.cfg.state_dir) as st:
                 st.applying = state.holder()
             return ["postfix"]
+        self.bot.pump()
         self.found.side_effect = check_reserves
         with mock.patch.object(restarts, "start") as start:
             self.press("restart:postfix")
         start.assert_not_called()
-        with state.locked(self.bot.cfg.state_dir) as st:
-            self.assertEqual(st.restart_request, {})
-            self.assertIn("services", st.issues)  # der Punkt bleibt offen
+        st = self.st()
+        self.assertEqual(st.restart_request, {})
+        self.assertIn("services", st.issues)  # der Punkt bleibt offen
 
     def test_stale_reservation_does_not_block_restart(self):
         self.offer("postfix")
@@ -728,30 +1081,26 @@ class BotTest(unittest.TestCase):
             self.press("restart:postfix")
         start.assert_called_once_with(["postfix"])
 
-    def test_restart_reserved_before_message_is_shown(self):
-        self.offer("postfix")
+    def test_restart_reserved_and_shown_before_it_starts(self):
+        # Ist der Bot selbst dabei, wird er gleich beendet: vorher muss alles gespeichert und gezeigt sein
+        self.offer("twguard-bot")
         seen = []
-        original = self.bot._own
 
-        def own(*args, **kwargs):
-            with state.locked(self.bot.cfg.state_dir) as st:
-                seen.append(st.restart_request.get("services"))
-            return original(*args, **kwargs)
-        with mock.patch.object(self.bot, "_own", side_effect=own), \
-                mock.patch.object(restarts, "start", return_value={}):
-            self.press("restart:postfix")
-        self.assertEqual(seen, [["postfix"]])
-        with state.locked(self.bot.cfg.state_dir) as st:
-            self.assertEqual(st.restart_request["message_id"], 5)
+        def start(names):
+            seen.append((self.st().restart_request.get("services"), self.shown()[0]))
+            return {}
+        with mock.patch.object(restarts, "start", side_effect=start):
+            self.press("restart:twguard-bot")
+        self.assertEqual(seen[0][0], ["twguard-bot"])
+        self.assertIn("Dienste werden neu gestartet: twguard-bot", seen[0][1])
 
     def test_bot_restart_keeps_restart_reservation(self):
         self.offer("twguard-bot")
         with mock.patch.object(restarts, "start", return_value={}):
             self.press("restart:twguard-bot")
-        with mock.patch.object(self.bot, "_set_menu"):
+        with mock.patch.object(Bot, "_set_menu"):
             Bot(self.bot.cfg, tg=self.tg, me=ME).startup()
-        with state.locked(self.bot.cfg.state_dir) as st:
-            self.assertEqual(st.restart_request["services"], ["twguard-bot"])
+        self.assertEqual(self.st().restart_request["services"], ["twguard-bot"])
 
     def all_button(self, *names):
         return f"restart:*:{restarts.digest(list(names))}"
@@ -765,13 +1114,13 @@ class BotTest(unittest.TestCase):
 
     def test_old_all_button_does_not_cover_later_service(self):
         self.offer("postfix", "sshd")
-        self.offer("mariadb", "postfix", "sshd")  # erkannt, aber z. B. in der Ruhezeit noch nicht gemeldet
+        self.bot.pump()
+        self.offer("mariadb", "postfix", "sshd")  # erkannt, aber noch nicht gezeigt
         with mock.patch.object(restarts, "start") as start:
             self.press(self.all_button("postfix", "sshd"))
         start.assert_not_called()
-        # Stattdessen zeigt die Nachricht jetzt den aktuellen Stand mit aktuellem Knopf
-        data = [b[1] for row in self.tg.edited[-1][2] for b in row]
-        self.assertIn(self.all_button("mariadb", "postfix", "sshd"), data)
+        # Stattdessen zeigt die Zustandsnachricht jetzt den aktuellen Stand mit aktuellem Knopf
+        self.assertIn(self.all_button("mariadb", "postfix", "sshd"), actions(self.shown()[1]))
 
     def test_used_all_button_cannot_fire_again(self):
         self.offer("sshd", "postfix")
@@ -784,12 +1133,12 @@ class BotTest(unittest.TestCase):
 
     def test_unknown_scan_restarts_nothing(self):
         self.offer("sshd")
+        self.bot.pump()
         self.found.return_value = None
         with mock.patch.object(restarts, "start") as start:
             self.press("restart:sshd")
         start.assert_not_called()
-        with state.locked(self.bot.cfg.state_dir) as st:
-            self.assertIn("services", st.issues)
+        self.assertIn("services", self.st().issues)
 
     def test_no_restart_during_check_or_update(self):
         self.offer("sshd")
@@ -822,24 +1171,32 @@ class BotTest(unittest.TestCase):
             self.press("restart:mariadb")
         start.assert_not_called()
 
-    def test_gone_service_is_not_restarted_rest_offered_here(self):
+    def test_gone_service_is_not_restarted_rest_offered(self):
         self.offer("postfix", "sshd")
+        self.bot.pump()
         self.found.return_value = ["postfix"]
         with mock.patch.object(restarts, "start") as start:
             self.press("restart:sshd")
         start.assert_not_called()
-        self.assertEqual([b[1] for b in self.tg.edited[-1][2][0]], ["restart:postfix"])
-        with state.locked(self.bot.cfg.state_dir) as st:
-            self.assertEqual(st.restart_services, ["postfix"])
-            self.assertEqual(st.messages["issue:services"]["message_id"], 5)
+        self.assertIn("geändert", self.tg.answered[-1])
+        self.assertEqual(self.st().restart_services, ["postfix"])
+        self.assertIn("restart:postfix", actions(self.shown()[1]))
+        self.assertNotIn("restart:sshd", actions(self.shown()[1]))
 
     def test_second_press_while_running_refused(self):
         self.offer("sshd")
         with state.locked(self.bot.cfg.state_dir) as st:
-            st.restart_request = {"services": ["postfix"], "at": time.time(), "chat_id": -100, "message_id": 1}
+            st.restart_request = {"services": ["postfix"], "at": time.time()}
         with mock.patch.object(restarts, "start") as start:
             self.press("restart:sshd")
         start.assert_not_called()
+
+    def running(self, *names):
+        with state.locked(self.bot.cfg.state_dir) as st:
+            st.restart_request = {"at": time.time(), "services": list(names)}
+
+    def outbox(self):
+        return [(e["text"], e["loud"]) for e in self.st().outbox]
 
     def test_partly_rejected_restart_is_still_followed(self):
         self.offer("postfix", "sshd")
@@ -850,42 +1207,55 @@ class BotTest(unittest.TestCase):
                 mock.patch.object(restarts, "states", return_value={"postfix": "active"}):
             self.bot.watch_restart()
         pending.assert_called_once_with(["postfix"])
-        self.assertIn("neu gestartet: postfix", self.tg.sent[0])
-        self.assertIn("Unit &lt;x&gt; masked", self.tg.sent[0])
-        self.assertFalse(self.tg.silent[0])
-        with state.locked(self.bot.cfg.state_dir) as st:
-            self.assertEqual(st.restart_services, ["sshd"])  # wird wieder angeboten
+        event = next(t for t in self.tg.sent if "neu gestartet: postfix" in t)
+        self.assertIn("Unit &lt;x&gt; masked", event)
+        self.assertFalse(self.tg.silent[self.tg.sent.index(event)])
+        self.assertEqual(self.st().restart_services, ["sshd"])  # wird wieder angeboten
 
-    def running(self, *names):
-        with state.locked(self.bot.cfg.state_dir) as st:
-            st.restart_request = {"chat_id": -100, "message_id": 55, "at": time.time(), "services": list(names)}
+    def test_restart_with_left_over_processes_is_done_and_named(self):
+        # KillMode=process: Der Dienst ist erneuert, eine Sitzung hält weiter alte Dateien
+        self.offer("cron", "sshd")
+        with mock.patch.object(restarts, "start", return_value={}):
+            self.press(self.all_button("cron", "sshd"))
+        self.found.return_value, self.lingering = ["cron", "sshd"], {"sshd": [zypper.Proc(6341, "alice", "screen", "sshd")]}
+        with mock.patch.object(restarts, "pending", return_value=[]), \
+                mock.patch.object(restarts, "states", return_value={"cron": "active", "sshd": "active"}):
+            self.bot.watch_restart()
+        result = next(t for t in self.tg.sent if "cron" in t and not t.startswith("⚠️ <b>server1</b>: 1"))
+        self.assertIn("nutzt weiter alte Dateien: cron", result)
+        self.assertIn("Dienst sshd neu gestartet. Prozess screen (PID 6341, alice) nutzt bis zu seinem Ende "
+                      "weiter gelöschte Dateien.", result)
+        self.assertNotIn("✅", result)
+        st = self.st()
+        self.assertEqual(st.restart_services, ["cron"])
+        self.assertEqual(list(st.lingering), ["sshd"])
+        self.assertIn("Prozess screen (PID 6341, alice)", self.shown()[0])
+        self.assertNotIn("restart:sshd", actions(self.shown()[1]))
 
     def test_result_waits_for_jobs(self):
         self.running("sshd")
         with mock.patch.object(restarts, "pending", return_value=["sshd"]):
             self.bot.watch_restart()
-        self.assertEqual(self.tg.edited, [])
+        self.assertEqual(self.outbox(), [])
+        self.assertTrue(self.st().restart_request)
 
-    def test_result_success_edits_message(self):
+    def test_result_success_is_quiet_event(self):
         self.running("sshd")
         self.found.return_value = []
         with mock.patch.object(restarts, "pending", return_value=[]), \
                 mock.patch.object(restarts, "states", return_value={"sshd": "active"}):
             self.bot.watch_restart()
-        self.assertEqual(self.tg.edited[-1][0], 55)
-        self.assertIn("✅", self.tg.edited[-1][1])
-        self.assertEqual(self.tg.sent, [])
-        with state.locked(self.bot.cfg.state_dir) as st:
-            self.assertEqual(st.restart_request, {})
+        self.assertEqual(self.tg.sent[0], "✅ <b>server1</b>: neu gestartet: sshd")
+        self.assertTrue(self.tg.silent[0])
+        self.assertEqual(self.st().restart_request, {})
 
-    def test_result_failure_is_new_message_with_sound(self):
+    def test_result_failure_comes_with_sound(self):
         self.running("sshd")
         with mock.patch.object(restarts, "pending", return_value=[]), \
                 mock.patch.object(restarts, "states", return_value={"sshd": "failed"}):
             self.bot.watch_restart()
         self.assertIn("sshd (failed)", self.tg.sent[0])
         self.assertFalse(self.tg.silent[0])
-        self.assertIn(55, self.tg.deleted)
 
     def test_result_still_old_is_offered_again(self):
         self.running("sshd")
@@ -893,16 +1263,8 @@ class BotTest(unittest.TestCase):
         with mock.patch.object(restarts, "pending", return_value=[]), \
                 mock.patch.object(restarts, "states", return_value={"sshd": "active"}):
             self.bot.watch_restart()
-        self.assertIn("alte Dateien", self.tg.edited[-1][1])
-        self.assertIn("restart:sshd", [b[1] for row in self.tg.buttons[0] for b in row])
-
-    def test_conflict_details_have_no_list_buttons(self):
-        with state.locked(self.bot.cfg.state_dir) as st:
-            st.last_plan = {"summary": "0 Pakete", "rows": [], "problems": ["Problem: 1: x"]}
-        text, buttons = self.bot.details_view()
-        self.assertIn("Problem: 1: x", text)
-        self.assertEqual(buttons, [])
-        self.assertEqual(self.bot.details_view(back=True)[1], [[("◀️ Zurück", "back")]])
+        self.assertIn("alte Dateien", self.tg.sent[0])
+        self.assertIn("restart:sshd", actions(self.shown()[1]))
 
     def test_unknown_scan_after_restart_waits_then_no_green(self):
         self.running("sshd")
@@ -910,7 +1272,7 @@ class BotTest(unittest.TestCase):
         with mock.patch.object(restarts, "pending", return_value=[]), \
                 mock.patch.object(restarts, "states", return_value={"sshd": "active"}):
             self.bot.watch_restart()
-            self.assertEqual(self.tg.sent + self.tg.edited, [])
+            self.assertEqual(self.outbox(), [])
             with state.locked(self.bot.cfg.state_dir) as st:
                 st.restart_request["at"] -= 1000
             self.bot.watch_restart()
@@ -920,27 +1282,19 @@ class BotTest(unittest.TestCase):
     def test_result_survives_telegram_outage(self):
         self.running("sshd")
         self.found.return_value = []
-        send, edit = self.tg.send, self.tg.edit
-        error = TelegramError("Netz weg")
-        self.tg.send = self.tg.edit = mock.Mock(side_effect=error)
-        with mock.patch.object(restarts, "pending", return_value=[]) as pending, \
+        self.tg.fail_send = True
+        with mock.patch.object(restarts, "pending", return_value=[]), \
                 mock.patch.object(restarts, "states", return_value={"sshd": "failed"}):
             self.bot.watch_restart()
-            with state.locked(self.bot.cfg.state_dir) as st:
-                self.assertIn("sshd (failed)", st.outbox[0]["text"])
-            self.assertEqual(self.tg.deleted, [])  # die Wartemeldung bleibt, solange nichts gemeldet ist
-            self.bot.deliver_outbox()
-            self.tg.send, self.tg.edit = send, edit
-            self.bot.deliver_outbox()
+        self.assertIn("sshd (failed)", self.outbox()[0][0])
+        self.tg.fail_send = False
+        self.bot.pump()
         self.assertIn("sshd (failed)", self.tg.sent[0])
-        self.assertIn(55, self.tg.deleted)
-        with state.locked(self.bot.cfg.state_dir) as st:
-            self.assertEqual(st.outbox, [])
+        self.assertEqual(self.outbox(), [])
 
     def test_second_result_during_outage_keeps_first(self):
         self.found.return_value = []
-        send, edit = self.tg.send, self.tg.edit
-        self.tg.send = self.tg.edit = mock.Mock(side_effect=TelegramError("Netz weg"))
+        self.tg.fail_send = True
         with mock.patch.object(restarts, "pending", return_value=[]):
             self.running("sshd")
             with mock.patch.object(restarts, "states", return_value={"sshd": "failed"}):
@@ -948,24 +1302,12 @@ class BotTest(unittest.TestCase):
             self.running("postfix")
             with mock.patch.object(restarts, "states", return_value={"postfix": "active"}):
                 self.bot.watch_restart()
-        with state.locked(self.bot.cfg.state_dir) as st:
-            self.assertEqual(len(st.outbox), 2)
-        self.tg.send, self.tg.edit = send, edit
-        self.bot.deliver_outbox()
+        self.assertEqual(len(self.outbox()), 2)
+        self.tg.fail_send = False
+        self.bot.pump()
         self.assertIn("sshd (failed)", self.tg.sent[0])
-        self.assertIn("neu gestartet: postfix", self.tg.edited[-1][1])
-        with state.locked(self.bot.cfg.state_dir) as st:
-            self.assertEqual(st.outbox, [])
-
-    def test_one_undeliverable_result_does_not_hold_back_others(self):
-        with state.locked(self.bot.cfg.state_dir) as st:
-            st.outbox = [{"chat_id": -100, "at": time.time(), "text": t, "loud": True} for t in ("a", "b")]
-        send = self.tg.send
-        self.tg.send = mock.Mock(side_effect=[TelegramError("x"), {"message_id": 9, "chat": {"id": -100}}])
-        self.bot.deliver_outbox()
-        self.tg.send = send
-        with state.locked(self.bot.cfg.state_dir) as st:
-            self.assertEqual([r["text"] for r in st.outbox], ["a"])
+        self.assertIn("neu gestartet: postfix", self.tg.sent[0])
+        self.assertEqual(self.outbox(), [])
 
     def overdue(self):
         with state.locked(self.bot.cfg.state_dir) as st:
@@ -979,19 +1321,17 @@ class BotTest(unittest.TestCase):
                 mock.patch.object(restarts, "states", return_value={"sshd": "active"}):
             self.bot.watch_restart()
             self.bot.watch_restart()
-        self.assertEqual(len(self.tg.sent), 1)
-        self.assertIn("nicht abgeschlossen", self.tg.sent[0])
-        self.assertNotIn("✅", self.tg.sent[0])
-        self.assertNotIn(55, self.tg.deleted)  # die Wartemeldung bleibt für das Ergebnis
-        with state.locked(self.bot.cfg.state_dir) as st:
-            self.assertTrue(st.restart_request)
+        warnings = [t for t in self.tg.sent if "nicht abgeschlossen" in t]
+        self.assertEqual(len(warnings), 1)
+        self.assertNotIn("✅", warnings[0])
+        self.assertTrue(self.st().restart_request)
+        self.assertIn("dauert ungewöhnlich lange", self.shown()[0])
         # Später endet der Auftrag: Auch ein spätes Scheitern wird gemeldet
         with mock.patch.object(restarts, "pending", return_value=[]), \
                 mock.patch.object(restarts, "states", return_value={"sshd": "failed"}):
             self.bot.watch_restart()
-        self.assertIn("sshd (failed)", self.tg.sent[1])
-        with state.locked(self.bot.cfg.state_dir) as st:
-            self.assertEqual(st.restart_request, {})
+        self.assertTrue(any("sshd (failed)" in t for t in self.tg.sent))
+        self.assertEqual(self.st().restart_request, {})
 
     def test_unknown_jobs_past_limit_are_not_green(self):
         self.running("sshd")
@@ -1003,112 +1343,72 @@ class BotTest(unittest.TestCase):
         self.assertNotIn("✅", self.tg.sent[0])
         self.assertIn("Ergebnis des Neustarts unbekannt", self.tg.sent[0])
         self.assertFalse(self.tg.silent[0])
-        with state.locked(self.bot.cfg.state_dir) as st:
-            self.assertEqual(st.restart_request, {})
+        self.assertEqual(self.st().restart_request, {})
 
     def test_unknown_jobs_within_limit_wait(self):
         self.running("sshd")
         with mock.patch.object(restarts, "pending", return_value=None):
             self.bot.watch_restart()
-        self.assertEqual(self.tg.sent + self.tg.edited, [])
+        self.assertEqual(self.outbox(), [])
 
-    def test_approve_refuses_plan_not_shown_and_shows_it(self):
-        self.open_manual()
-        with state.locked(self.bot.cfg.state_dir) as st:
-            st.open_issue("manual", "• neuer Plan B", fingerprint="bbb", approvable=True)
-        self.bot.handle(message("/approve", reply_to=ME))
-        self.start_check.assert_not_called()
-        self.assertIn("neuer Plan B", self.tg.sent[0])
-        self.assertEqual(self.tg.buttons[0][0][0][1], "approve:bbb")
-        with state.locked(self.bot.cfg.state_dir) as st:
-            self.assertEqual(st.approved_fingerprint, "")
-            self.assertEqual(st.manual_shown, "bbb")
-        # Jetzt ist B gezeigt und gilt
-        self.bot.handle(message("/approve", reply_to=ME))
-        self.start_check.assert_called_once()
-        with state.locked(self.bot.cfg.state_dir) as st:
-            self.assertEqual(st.approved_fingerprint, "bbb")
+    # --- Server-Neustart ----------------------------------------------------
 
-    def test_reminder_counts_as_shown(self):
+    def plan_reboot(self):
+        # So meldet logind einen mit shutdown -r +1 geplanten Neustart
+        self.logind.return_value = busy.Shutdown("planned", "reboot", time.time() + 50)
         with state.locked(self.bot.cfg.state_dir) as st:
-            st.open_issue("manual", "x", fingerprint="abc", approvable=True)
-            self.bot.cfg.escalation.quiet_hours = ""
-            send_due(self.bot.cfg, st, self.tg)
-            self.assertEqual(st.manual_shown, "abc")
+            busy.note_shutdown(st, self.logind.return_value)
 
-    def test_resolved_button_closes_failed_apply(self):
-        with state.locked(self.bot.cfg.state_dir) as st:
-            st.open_issue("apply-failed", "Skript kaputt")
-        self.press("resolved:apply-failed")
-        self.assertIn("erledigt", self.tg.edited[-1][1])
-        with state.locked(self.bot.cfg.state_dir) as st:
-            self.assertNotIn("apply-failed", st.issues)
-
-    def test_resolved_button_only_for_failed_apply(self):
-        self.open_manual()
-        self.press("resolved:manual")
-        with state.locked(self.bot.cfg.state_dir) as st:
-            self.assertIn("manual", st.issues)
-
-    def test_same_message_id_in_other_chat_keeps_topic(self):
-        with state.locked(self.bot.cfg.state_dir) as st:
-            st.messages["issue:reboot"] = {"chat_id": -100, "message_id": 5, "at": time.time()}
-        self.press("dismiss", chat={"id": 42, "type": "private"})
-        with state.locked(self.bot.cfg.state_dir) as st:
-            self.assertIn("issue:reboot", st.messages)
-
-    def test_collapsed_details_are_kept_per_chat(self):
-        with state.locked(self.bot.cfg.state_dir) as st:
-            st.last_plan = {"summary": "0", "rows": [], "problems": []}
-        self.press("details")
-        self.press("details", chat={"id": 42, "type": "private"})
-        with state.locked(self.bot.cfg.state_dir) as st:
-            self.assertEqual(sorted(st.collapsed), ["-100:5", "42:5"])
-
-    def test_help_expires(self):
-        self.bot.handle(message("/help@server1_bot"))
-        with state.locked(self.bot.cfg.state_dir) as st:
-            self.assertEqual(st.ephemeral[0]["message_id"], 101)
-
-    def test_button_later_snoozes_only_that_issue(self):
-        self.open_manual()
-        with state.locked(self.bot.cfg.state_dir) as st:
-            st.open_issue("reboot", "Kernel")
-        self.press("later:24:reboot")
-        with state.locked(self.bot.cfg.state_dir) as st:
-            self.assertTrue(st.issues["reboot"].snoozed_until)
-            self.assertFalse(st.issues["manual"].snoozed_until)
-        message_id, text, buttons = self.tg.edited[0]
-        self.assertIn("Aufgeschoben bis", text)
-        self.assertNotIn("later", str(buttons))
-
-    def test_button_check_on_status_edits_it(self):
-        self.bot.handle(message("/status"))
-        status_id = self.tg.next_id
-        self.bot.handle_callback({"id": "cb", "from": USER, "data": "check",
-                                  "message": {"message_id": status_id, "chat": GROUP, "date": int(time.time())}})
-        self.assertEqual(len(self.tg.sent), 1)
-        self.assertIn("Prüfung läuft", self.tg.edited[0][1])
-        with state.locked(self.bot.cfg.state_dir) as st:
-            self.assertEqual(st.check_request["message_id"], status_id)
-
-    def test_button_reboot_turns_message_into_reboot_notice(self):
-        with mock.patch("subprocess.run", return_value=mock.Mock(returncode=0, stderr="")):
-            self.press("reboot")
-            self.assertIn("startet in 1 Minute", self.tg.edited[0][1])
-            self.bot.handle(message("/cancel@server1_bot"))
-        self.assertIn("abgebrochen", self.tg.edited[1][1])
-        self.assertEqual(self.tg.edited[1][0], 5)
-
-    def test_cancel_offers_reboot_again_while_needed(self):
+    def test_reboot_button_plans_and_offers_cancel(self):
         self.open_reboot()
-        with mock.patch("subprocess.run", return_value=mock.Mock(returncode=0, stderr="")):
+
+        def shutdown(cmd, **kwargs):
+            self.logind.return_value = busy.Shutdown("planned", "reboot", time.time() + 60)
+            return mock.Mock(returncode=0, stderr="")
+        with mock.patch("subprocess.run", side_effect=shutdown) as run:
             self.press("reboot")
+        self.assertEqual(run.call_args.args[0][:3], ["shutdown", "-r", "+1"])
+        self.assertEqual(self.tg.answered, ["Neustart in 1 Minute"])
+        self.assertIn("Neustart per Telegram ausgelöst (Neustart geplant um", self.tg.sent[-2])
+        text, buttons = self.shown()
+        self.assertIn("🔁 Neustart geplant um", text)
+        self.assertNotIn("Neustart ausstehend", text)
+        self.assertIn("cancel", actions(buttons))
+        self.assertNotIn("reboot", actions(buttons))
+        self.assertTrue(self.st().reboot_requested_at)
+
+    def test_cancel_reoffers_reboot_while_needed(self):
+        self.open_reboot()
+        self.plan_reboot()
+        with state.locked(self.bot.cfg.state_dir) as st:
+            st.reboot_requested_at = time.time()
+        self.bot.pump()
+        self.logind.return_value = busy.Shutdown("none")
+        with mock.patch("subprocess.run", return_value=mock.Mock(returncode=0, stderr="")) as run:
             self.press("cancel")
-        message_id, text, buttons = self.tg.edited[-1]
-        self.assertIn("abgebrochen", text)
-        self.assertIn("reboot", self.status_data(buttons))
-        self.assertIn("later:24:reboot", self.status_data(buttons))
+        self.assertEqual(run.call_args.args[0], ["shutdown", "-c"])
+        self.assertIn("Neustart abgebrochen", self.tg.sent[-2])
+        actions_now = actions(self.shown()[1])
+        self.assertIn("reboot", actions_now)
+        self.assertNotIn("cancel", actions_now)
+        st = self.st()
+        self.assertFalse(st.reboot_requested_at)
+        self.assertEqual(st.shutdown, {})
+
+    def test_cancel_that_did_not_work_says_so(self):
+        self.plan_reboot()
+        with state.locked(self.bot.cfg.state_dir) as st:
+            st.reboot_requested_at = time.time()
+        with mock.patch("subprocess.run", return_value=mock.Mock(returncode=0, stderr="")):
+            self.press("cancel")
+        self.assertIn("Abbrechen fehlgeschlagen", self.tg.answered[-1])
+        self.assertIn("cancel", actions(self.shown()[1]))
+        self.assertTrue(self.st().reboot_requested_at)
+
+    def test_cancel_command_without_plan_says_so(self):
+        with mock.patch("subprocess.run", return_value=mock.Mock(returncode=1, stderr="nichts geplant")):
+            self.bot.handle(message("/cancel@server1_bot"))
+        self.assertIn("Abbrechen fehlgeschlagen: nichts geplant", self.tg.sent[-1])
 
     def test_reboot_refused_while_package_management_locked(self):
         # purge-kernels nach dem Boot oder ein zypper per SSH: Ein Neustart würde es mittendrin abbrechen
@@ -1118,8 +1418,7 @@ class BotTest(unittest.TestCase):
             self.press("reboot")
         run.assert_not_called()
         self.assertIn("purge-kernels.service", self.tg.answered[-1])
-        with state.locked(self.bot.cfg.state_dir) as st:
-            self.assertFalse(st.reboot_requested_at)
+        self.assertFalse(self.st().reboot_requested_at)
 
     def test_reboot_refused_while_twguard_applies(self):
         with state.locked(self.bot.cfg.state_dir) as st:
@@ -1128,139 +1427,6 @@ class BotTest(unittest.TestCase):
             self.bot.handle(message("/reboot@server1_bot"))
         run.assert_not_called()
         self.assertIn("twguard spielt gerade ein", self.tg.sent[-1])
-
-    # --- Nach dem Boot -----------------------------------------------------
-
-    def boot(self, **fields):
-        """Bot startet nach einem Boot: eine andere Boot-ID als beim letzten Start."""
-        with state.locked(self.bot.cfg.state_dir) as st:
-            st.boot_id = "vorher"
-            for name, value in fields.items():
-                setattr(st, name, value)
-        with mock.patch.object(self.bot, "_set_menu"):
-            self.bot.startup()
-
-    def test_boot_closes_reboot_and_services_while_zypper_locked(self):
-        # Nach dem Boot sperrte purge-kernels zypper minutenlang; der Status zeigte weiter „Neustart nötig“
-        self.offer("postfix")
-        with state.locked(self.bot.cfg.state_dir) as st:
-            st.open_issue("reboot", "Neustart nötig")
-            st.messages["issue:reboot"] = {"chat_id": -100, "message_id": 77, "at": time.time()}
-        self.rebooting.return_value = self.found.return_value = None
-        self.boot()
-        with state.locked(self.bot.cfg.state_dir) as st:
-            self.assertEqual(st.issues, {})
-            self.assertEqual(st.restart_services, [])
-            self.assertEqual(st.unverified, ["reboot", "services"])
-            self.assertEqual(st.boot_id, state.boot_id())
-        self.assertIn((77, "✅ <b>server1</b>: Neustart ausstehend – erledigt"),
-                      [(m, t.rpartition(" (")[0]) for m, t, _ in self.tg.edited])
-        # Ohne Auskunft von zypper keine Entwarnung
-        self.bot.handle(message("/status"))
-        self.assertTrue(self.tg.sent[-1].startswith("❔"))
-        self.assertIn("noch nicht abgefragt: Neustartbedarf, Dienste mit alten Dateien", self.tg.sent[-1])
-        self.assertNotIn("reboot", self.status_data(self.tg.buttons[-1]))
-
-    def test_unverified_clears_once_zypper_answers(self):
-        self.rebooting.return_value = self.found.return_value = None
-        self.boot()
-        self.rebooting.return_value, self.found.return_value = False, []
-        self.bot.check_reboot()
-        self.bot.handle(message("/status"))
-        self.assertTrue(self.tg.sent[-1].startswith("✅"), self.tg.sent[-1])
-        with state.locked(self.bot.cfg.state_dir) as st:
-            self.assertEqual(st.unverified, [])
-
-    def test_bot_restart_without_boot_keeps_items(self):
-        with state.locked(self.bot.cfg.state_dir) as st:
-            st.boot_id = state.boot_id()
-            st.open_issue("reboot", "Neustart nötig")
-        with mock.patch.object(self.bot, "_set_menu"):
-            self.bot.startup()
-        with state.locked(self.bot.cfg.state_dir) as st:
-            self.assertIn("reboot", st.issues)
-            self.assertEqual(st.unverified, [])
-
-    def test_first_start_after_upgrade_is_no_boot(self):
-        # Bis 0.9.4 stand keine Boot-ID im Zustand; ein Update ist kein Neustart des Servers
-        self.open_reboot()
-        with mock.patch.object(self.bot, "_set_menu"):
-            self.bot.startup()
-        with state.locked(self.bot.cfg.state_dir) as st:
-            self.assertIn("reboot", st.issues)
-            self.assertEqual(st.boot_id, state.boot_id())
-
-    def test_service_restart_interrupted_by_boot_is_reported(self):
-        request = {"chat_id": -100, "message_id": 9, "at": time.time() - 60, "services": ["postfix"]}
-        self.boot(restart_request=request)
-        self.assertIn("durch den Neustart des Servers unterbrochen", self.tg.sent[-1])
-        self.assertIn("postfix", self.tg.sent[-1])
-        with state.locked(self.bot.cfg.state_dir) as st:
-            self.assertEqual(st.restart_request, {})
-            self.assertEqual(st.outbox, [])
-
-    def test_back_after_boot_names_lock_and_completes_when_free(self):
-        self.holder.return_value = "purge-kernels.service (zypper, PID 707)"
-        self.boot(reboot_requested_at=time.time() - 300,
-                  messages={"reboot": {"chat_id": -100, "message_id": 66, "at": time.time() - 300}})
-        message_id, text, _ = self.tg.edited[-1]
-        self.assertEqual(message_id, 66)
-        self.assertIn("ist wieder da", text)
-        self.assertIn("noch belegt: purge-kernels.service", text)
-        # Solange gesperrt, bleibt die Meldung
-        edits = len(self.tg.edited)
-        with mock.patch.object(self.bot, "check_reboot") as check_reboot:
-            self.bot.watch_maintenance(time.time())
-            self.assertEqual(len(self.tg.edited), edits)
-            self.holder.return_value = ""
-            self.bot.watch_maintenance(time.time())
-        check_reboot.assert_called_once()
-        message_id, text, _ = self.tg.edited[-1]
-        self.assertEqual(message_id, 66)
-        self.assertIn("ist wieder da", text)
-        self.assertIn("wieder frei", text)
-        self.assertNotIn("noch belegt", text)
-        with state.locked(self.bot.cfg.state_dir) as st:
-            self.assertEqual(st.maintenance, {})
-            self.assertFalse(st.reboot_requested_at)
-
-    def test_back_after_boot_without_lock_has_no_note(self):
-        self.boot(reboot_requested_at=time.time() - 300)
-        self.assertIn("ist wieder da", self.tg.sent[-1])
-        self.assertNotIn("belegt", self.tg.sent[-1])
-        with state.locked(self.bot.cfg.state_dir) as st:
-            self.assertEqual(st.maintenance, {})
-
-    def test_back_after_boot_survives_telegram_outage(self):
-        self.tg.fail_send = True
-        self.boot(reboot_requested_at=time.time() - 300)
-        with state.locked(self.bot.cfg.state_dir) as st:
-            self.assertEqual(len(st.outbox), 1)
-            self.assertFalse(st.reboot_requested_at)
-        self.tg.fail_send = False
-        self.bot.deliver_outbox()
-        self.assertIn("ist wieder da", self.tg.sent[-1])
-        with state.locked(self.bot.cfg.state_dir) as st:
-            self.assertEqual(st.outbox, [])
-
-    # --- Geplanter Neustart (logind) ----------------------------------------
-
-    def plan_reboot(self):
-        # So meldet logind einen mit shutdown -r +1 geplanten Neustart
-        self.logind.return_value = busy.Shutdown("planned", "reboot", time.time() + 50)
-        with state.locked(self.bot.cfg.state_dir) as st:
-            busy.note_shutdown(st, self.logind.return_value)
-
-    def test_status_shows_planned_reboot_with_cancel_instead_of_reboot(self):
-        self.open_reboot()
-        self.plan_reboot()
-        self.bot.handle(message("/status"))
-        self.assertIn("Neustart geplant um", self.tg.sent[-1])
-        # Bestätigt ist er nicht mehr „ausstehend“
-        self.assertNotIn("Neustart ausstehend", self.tg.sent[-1])
-        data = self.status_data(self.tg.buttons[-1])
-        self.assertNotIn("reboot", data)
-        self.assertIn("cancel", data)
 
     def test_nothing_new_starts_while_reboot_planned(self):
         # Prüflauf, Freigabe, Update und Dienst-Neustart brächen mit dem Neustart ab, ihr Ergebnis käme nie an
@@ -1278,9 +1444,9 @@ class BotTest(unittest.TestCase):
         self.start_check.assert_not_called()
         self.assertEqual(sum("Neustart geplant um" in a for a in self.tg.answered), 3)
         self.assertIn("Neustart geplant um", self.tg.sent[-1])
-        with state.locked(self.bot.cfg.state_dir) as st:
-            self.assertEqual(st.approved_fingerprint, "")
-            self.assertEqual(st.update_request, {})
+        st = self.st()
+        self.assertEqual(st.approved_fingerprint, "")
+        self.assertEqual(st.update_request, {})
 
     def test_reboot_planned_on_console_is_recognised(self):
         # Nicht nur selbst ausgelöste: logind kennt auch shutdown -r +5 auf der Konsole
@@ -1288,23 +1454,9 @@ class BotTest(unittest.TestCase):
         self.bot.handle(message("/check@server1_bot"))
         self.start_check.assert_not_called()
         self.assertIn("Neustart geplant um", self.tg.sent[-1])
-
-    def test_reboot_cancelled_on_console_frees_actions_and_reminders(self):
-        with state.locked(self.bot.cfg.state_dir) as st:
-            st.open_issue("reboot", "Neustart nötig", now=time.time() - 3 * 86400)
-        self.plan_reboot()
-        with state.locked(self.bot.cfg.state_dir) as st:
-            send_due(self.bot.cfg, st, self.tg)
-        self.assertEqual(self.tg.sent, [])
-        # sudo shutdown -c: logind hat nichts mehr geplant; der Takt gleicht ab und erinnert wieder
-        self.logind.return_value = busy.Shutdown("none")
-        with mock.patch.object(self.bot, "_rpmdb_mtime", return_value=0.0), \
-                mock.patch.object(self.bot, "check_reboot"), mock.patch.object(self.bot, "maybe_briefing"):
-            self.bot.tick()
-        self.assertEqual(len(self.tg.sent), 1)
-        self.assertIn("Neustart", self.tg.sent[0])
-        self.bot.handle(message("/check@server1_bot"))
-        self.start_check.assert_called_once()
+        self.bot.tick()
+        self.bot.pump()
+        self.assertIn("cancel", actions(self.shown()[1]))
 
     def test_second_reboot_does_not_postpone_the_first(self):
         self.plan_reboot()
@@ -1320,58 +1472,23 @@ class BotTest(unittest.TestCase):
         def shutdown(cmd, **kwargs):
             cfg = Config(language="de", token="x", chat_id=-100, hostname="server1", mode="auto",
                          state_dir=self.bot.cfg.state_dir)
-            seen.append(check._reserve(cfg, self.tg, "auto", approved=False))
+            seen.append(check._reserve(cfg, "auto", approved=False))
             return mock.Mock(returncode=0, stderr="")
         with mock.patch("subprocess.run", side_effect=shutdown):
             self.assertEqual(self.bot.reboot(), "")
         self.assertEqual(seen, [("busy", {})])
-        with state.locked(self.bot.cfg.state_dir) as st:
-            self.assertEqual(st.applying, {})
-            self.assertEqual(st.reboot_planning, {})
-            self.assertTrue(st.reboot_requested_at)
+        st = self.st()
+        self.assertEqual(st.applying, {})
+        self.assertEqual(st.reboot_planning, {})
+        self.assertTrue(st.reboot_requested_at)
 
     def test_failed_reboot_releases_only_its_planning(self):
         with mock.patch("subprocess.run", return_value=mock.Mock(returncode=1, stderr="kaputt")):
             self.assertIn("Neustart fehlgeschlagen: kaputt", self.bot.reboot())
-        with state.locked(self.bot.cfg.state_dir) as st:
-            self.assertEqual(st.reboot_planning, {})
-            self.assertFalse(st.reboot_requested_at)
-
-    def test_cancel_from_status_updates_reboot_message_and_keeps_other_items(self):
-        self.open_reboot()
-        self.open_manual()
-        with mock.patch("subprocess.run", return_value=mock.Mock(returncode=0, stderr="")):
-            self.bot.handle(message("/reboot@server1_bot"))
-        with state.locked(self.bot.cfg.state_dir) as st:
-            reboot_message = st.messages["reboot"]["message_id"]
-        self.plan_reboot()
-        status = self.status_message()
-        self.logind.return_value = busy.Shutdown("none")
-        with mock.patch("subprocess.run", return_value=mock.Mock(returncode=0, stderr="")) as run:
-            self.press_on(status, "cancel", self.tg.buttons[-1])
-        self.assertEqual(run.call_args.args[0], ["shutdown", "-c"])
-        self.assertIn("Neustart abgebrochen", self.tg.sent[-1])
-        # Die alte Meldung „startet in 1 Minute“ verschwindet, die übrigen Punkte im Status bleiben
-        self.assertIn(reboot_message, self.tg.deleted)
-        (message_id, markup), = self.tg.markup_edits
-        self.assertEqual(message_id, status)
-        data = [b["callback_data"] for row in markup["inline_keyboard"] for b in row]
-        self.assertNotIn("cancel", data)
-        self.assertIn("approve:abc", data)
-        with state.locked(self.bot.cfg.state_dir) as st:
-            self.assertFalse(st.reboot_requested_at)
-            self.assertEqual(st.shutdown, {})
-
-    def test_cancel_that_did_not_work_says_so(self):
-        with mock.patch("subprocess.run", return_value=mock.Mock(returncode=0, stderr="")):
-            self.press("reboot")
-        self.plan_reboot()
-        with mock.patch("subprocess.run", return_value=mock.Mock(returncode=0, stderr="")):
-            self.press("cancel")
-        self.assertIn("Abbrechen fehlgeschlagen", self.tg.edited[-1][1])
-        self.assertIn("cancel", self.status_data(self.tg.edited[-1][2]))
-        with state.locked(self.bot.cfg.state_dir) as st:
-            self.assertTrue(st.reboot_requested_at)
+        st = self.st()
+        self.assertEqual(st.reboot_planning, {})
+        self.assertFalse(st.reboot_requested_at)
+        self.assertEqual(st.outbox, [])
 
     def test_unknown_logind_refuses_consequential_actions_only(self):
         self.offer("postfix")
@@ -1387,36 +1504,156 @@ class BotTest(unittest.TestCase):
         self.bot.handle(message("/check@server1_bot"))
         self.start_check.assert_called_once()
 
-    def test_status_names_lock_holder(self):
-        self.holder.return_value = "purge-kernels.service (zypper, PID 707)"
-        self.bot.handle(message("/status"))
-        self.assertIn("🔒 Paketverwaltung belegt: purge-kernels.service (zypper, PID 707)", self.tg.sent[-1])
+    # --- Nach dem Boot -----------------------------------------------------
 
-    def test_cancel_without_open_reboot_has_no_buttons(self):
-        with mock.patch("subprocess.run", return_value=mock.Mock(returncode=0, stderr="")):
-            self.press("reboot")
-            self.bot.handle(message("/cancel@server1_bot"))
-        self.assertIn("abgebrochen", self.tg.edited[-1][1])
-        self.assertFalse(self.tg.edited[-1][2])
+    def boot(self, **fields):
+        """Bot startet nach einem Boot: eine andere Boot-ID als beim letzten Start."""
+        with state.locked(self.bot.cfg.state_dir) as st:
+            st.boot_id = "vorher"
+            for name, value in fields.items():
+                setattr(st, name, value)
+        with mock.patch.object(self.bot, "_set_menu"):
+            self.bot.startup()
+
+    def test_boot_closes_reboot_and_services_while_zypper_locked(self):
+        # Nach dem Boot sperrte purge-kernels zypper minutenlang; der Status zeigte weiter „Neustart nötig“
+        self.offer("postfix")
+        self.open_reboot()
+        self.rebooting.return_value = self.found.return_value = None
+        self.boot()
+        st = self.st()
+        self.assertEqual(st.issues, {})
+        self.assertEqual(st.restart_services, [])
+        self.assertEqual(st.unverified, ["reboot", "services"])
+        self.assertEqual(st.boot_id, state.boot_id())
+        # Ohne Auskunft von zypper keine Entwarnung
+        text, buttons = self.shown()
+        self.assertTrue(text.startswith("❔"), text)
+        self.assertIn("noch nicht abgefragt: Neustartbedarf, Dienste mit alten Dateien", text)
+        self.assertNotIn("reboot", actions(buttons))
+
+    def test_unverified_clears_once_zypper_answers(self):
+        self.rebooting.return_value = self.found.return_value = None
+        self.boot()
+        self.rebooting.return_value, self.found.return_value = False, []
+        self.bot.check_reboot()
+        self.bot.pump()
+        self.assertTrue(self.shown()[0].startswith("✅"), self.shown()[0])
+        self.assertEqual(self.st().unverified, [])
+
+    def test_lock_freed_after_boot_asks_zypper_at_once(self):
+        self.holder.return_value = "purge-kernels.service (zypper, PID 707)"
+        self.boot(reboot_requested_at=time.time() - 300)
+        self.assertIn("🔒 Paketverwaltung belegt: purge-kernels.service", self.shown()[0])
+        self.holder.return_value = ""
+        with mock.patch.object(self.bot, "check_reboot") as check_reboot, \
+                mock.patch.object(self.bot, "_rpmdb_mtime", return_value=0.0):
+            self.bot.last_reboot_check = time.time()
+            self.bot.tick()
+        check_reboot.assert_called_once()
+        self.bot.pump()
+        self.assertNotIn("🔒", self.shown()[0])
+
+    def test_bot_restart_without_boot_keeps_items(self):
+        with state.locked(self.bot.cfg.state_dir) as st:
+            st.boot_id = state.boot_id()
+            st.open_issue("reboot", "Neustart nötig")
+        with mock.patch.object(self.bot, "_set_menu"):
+            self.bot.startup()
+        st = self.st()
+        self.assertIn("reboot", st.issues)
+        self.assertEqual(st.unverified, [])
+
+    def test_first_start_after_upgrade_is_no_boot(self):
+        # Bis 0.9.4 stand keine Boot-ID im Zustand; ein Update ist kein Neustart des Servers
+        self.open_reboot()
+        with mock.patch.object(self.bot, "_set_menu"):
+            self.bot.startup()
+        st = self.st()
+        self.assertIn("reboot", st.issues)
+        self.assertEqual(st.boot_id, state.boot_id())
+
+    def test_service_restart_interrupted_by_boot_is_reported(self):
+        request = {"at": time.time() - 60, "services": ["postfix"]}
+        self.boot(restart_request=request)
+        event = next(t for t in self.tg.sent if "unterbrochen" in t)
+        self.assertIn("postfix", event)
+        self.assertFalse(self.tg.silent[self.tg.sent.index(event)])
+        st = self.st()
+        self.assertEqual(st.restart_request, {})
+        self.assertEqual(st.outbox, [])
+
+    def test_back_after_boot(self):
+        self.boot(reboot_requested_at=time.time() - 300)
+        self.assertIn("ist wieder da", self.tg.sent[0])
+        self.assertIsNone(self.tg.buttons[0])
+        self.assertFalse(self.st().reboot_requested_at)
+
+    def test_back_after_boot_survives_telegram_outage(self):
+        self.tg.fail_send = True
+        self.boot(reboot_requested_at=time.time() - 300)
+        st = self.st()
+        self.assertEqual(len(st.outbox), 1)
+        self.assertFalse(st.reboot_requested_at)
+        self.tg.fail_send = False
+        self.bot.pump()
+        self.assertIn("ist wieder da", self.tg.sent[0])
+        self.assertEqual(self.st().outbox, [])
+
+    # --- Übergang von 0.9 -------------------------------------------------
+
+    def test_old_topics_removed_once_state_message_stands(self):
+        now = time.time()
+        with state.locked(self.bot.cfg.state_dir) as st:
+            st.messages = {"status": {"chat_id": -100, "message_id": 40, "at": now},
+                           "briefing": {"chat_id": -100, "message_id": 41, "at": now},
+                           "issue:reboot": {"chat_id": -100, "message_id": 42, "at": now - 50 * 3600},
+                           "keyboard": {"chat_id": -100, "message_id": 43, "at": now}}
+            st.restart_request = {"chat_id": -100, "message_id": 44, "at": now, "services": ["postfix"]}
+        self.tg.fail_send = True
+        with mock.patch.object(self.bot, "_set_menu"):
+            self.bot.startup()
+        self.assertEqual(self.tg.deleted, [])  # erst die neue Nachricht, dann abräumen
+        self.assertIn("status", self.st().messages)
+        self.tg.fail_send = False
+        self.bot.pump()
+        self.bot.migrate_legacy()
+        self.assertEqual(sorted(self.tg.deleted), [40, 41, 44])
+        self.assertIn("veraltet", self.tg.current[42][0])  # zu alt zum Löschen
+        st = self.st()
+        self.assertEqual(sorted(st.messages), ["keyboard", panel.TOPIC])
+        # Der laufende Auftrag bleibt, nur seine Wartemeldung ging
+        self.assertEqual(st.restart_request, {"at": now, "services": ["postfix"]})
+        self.bot.migrate_legacy()
+        self.assertEqual(sorted(self.tg.deleted), [40, 41, 44])
+
+    def test_old_state_fields_are_dropped(self):
+        path = self.bot.cfg.state_dir / "state.json"
+        path.write_text('{"reports": [{"at": 1, "packages": 3}], "collapsed": {"x": {}}, "maintenance": {"a": 1},'
+                        ' "restart_reports": [{"text": "x", "loud": true}]}')
+        st = state.load(path)
+        self.assertEqual(st.outbox, [{"text": "x", "loud": True}])
+        self.assertFalse(hasattr(st, "reports"))
+
+    # --- Sprache und Modus -------------------------------------------------
 
     def test_language_switches_at_runtime_and_hints_at_config(self):
         self.addCleanup(set_language, "de")
         self.bot.handle(message("/language en"))
         self.assertEqual(current(), "en")
-        self.assertIn("/etc/twguard/config.toml", self.tg.sent[-1])
-        self.assertIn('language = "en"', self.tg.sent[-1])
-        self.assertIn("until the next restart", self.tg.sent[-1])
+        answer = next(t for t in self.tg.sent if "config.toml" in t)
+        self.assertIn('language = "en"', answer)
+        self.assertIn("until the next restart", answer)
         self.assertIn(("status", "Open issues (all servers)"), self.tg.commands)
-        with state.locked(self.bot.cfg.state_dir) as st:
-            self.assertEqual(st.language_override, "en")
+        self.assertEqual(self.st().language_override, "en")
+        self.assertIn("nothing open", self.shown()[0])
 
     def test_language_back_to_config_clears_override(self):
         self.addCleanup(set_language, "de")
         self.bot.handle(message("/language en"))
         self.bot.handle(message("/language de"))
-        self.assertIn("wie in der Konfiguration", self.tg.sent[-1])
-        with state.locked(self.bot.cfg.state_dir) as st:
-            self.assertEqual(st.language_override, "")
+        self.assertTrue(any("wie in der Konfiguration" in t for t in self.tg.sent))
+        self.assertEqual(self.st().language_override, "")
 
     def test_language_rejects_unknown_and_shows_current(self):
         self.bot.handle(message("/language fr"))
@@ -1431,8 +1668,7 @@ class BotTest(unittest.TestCase):
         restarted = Bot(self.bot.cfg, self.tg, self.bot.me)
         self.assertEqual(current(), "de")
         restarted.startup()
-        with state.locked(self.bot.cfg.state_dir) as st:
-            self.assertEqual(st.language_override, "")
+        self.assertEqual(self.st().language_override, "")
 
     def test_language_renews_keyboard(self):
         self.addCleanup(set_language, "de")
@@ -1445,12 +1681,12 @@ class BotTest(unittest.TestCase):
     def test_mode_switches_at_runtime_and_hints_at_config(self):
         self.bot.handle(message("/mode@server1_bot auto"))
         self.assertEqual(self.bot.cfg.mode, "auto")
-        self.assertIn('mode = "auto"', self.tg.sent[-1])
-        self.assertIn("bis zum nächsten Neustart des Bots", self.tg.sent[-1])
-        self.assertIn("/check", self.tg.sent[-1])
-        with state.locked(self.bot.cfg.state_dir) as st:
-            self.assertEqual(st.mode_override, "auto")
-        self.assertIn("Modus auto bis zum nächsten Neustart", self.bot.status_view()[0])
+        answer = next(t for t in self.tg.sent if "mode = " in t)
+        self.assertIn('mode = "auto"', answer)
+        self.assertIn("bis zum nächsten Neustart des Bots", answer)
+        self.assertIn("/check", answer)
+        self.assertEqual(self.st().mode_override, "auto")
+        self.assertIn("Modus auto bis zum nächsten Neustart", self.shown()[0])
         self.assertIn("automatisch (bis zum Neustart)", self.bot.version_line())
 
     def test_mode_only_when_addressed(self):
@@ -1467,35 +1703,20 @@ class BotTest(unittest.TestCase):
     def test_mode_back_to_config_and_restart_clear_override(self):
         self.bot.handle(message("/mode@server1_bot auto"))
         self.bot.handle(message("/mode@server1_bot observe"))
-        self.assertIn("wie in der Konfiguration", self.tg.sent[-1])
-        with state.locked(self.bot.cfg.state_dir) as st:
-            self.assertEqual(st.mode_override, "")
+        self.assertTrue(any("wie in der Konfiguration" in t for t in self.tg.sent))
+        self.assertEqual(self.st().mode_override, "")
         self.bot.handle(message("/mode@server1_bot auto"))
         restarted = Bot(Config(language="de", token="x", chat_id=-100, allowed_user_ids=[42], hostname="server1",
                                state_dir=self.bot.cfg.state_dir), self.tg, self.bot.me)
         restarted.startup()
         self.assertEqual(restarted.cfg.mode, "observe")
-        with state.locked(self.bot.cfg.state_dir) as st:
-            self.assertEqual(st.mode_override, "")
+        self.assertEqual(self.st().mode_override, "")
 
     def test_mode_rejects_unknown_and_shows_current(self):
         self.bot.handle(message("/mode@server1_bot fast"))
         self.assertIn("Format: /mode", self.tg.sent[-1])
         self.bot.handle(message("/mode@server1_bot"))
         self.assertIn("Modus observe, in der Konfiguration observe", self.tg.sent[-1])
-
-    def test_status_shows_pending_instead_of_nothing_open(self):
-        with state.locked(self.bot.cfg.state_dir) as st:
-            st.pending_text = "24 Pakete, Download 12 MB"
-        text, _ = self.bot.status_view()
-        self.assertIn("ausstehend: 24 Pakete", text)
-        self.assertNotIn("nichts offen", text)
-
-    def test_briefing_shows_pending_only_while_pending(self):
-        with state.locked(self.bot.cfg.state_dir) as st:
-            st.last_plan_text = "24 Pakete, Download 12 MB"
-        self.bot.maybe_briefing(self.at(8, 0))
-        self.assertNotIn("ausstehend", self.tg.sent[-1])
 
     def test_rpmdb_change_rechecks_pending(self):
         with state.locked(self.bot.cfg.state_dir) as st:
@@ -1506,34 +1727,24 @@ class BotTest(unittest.TestCase):
             self.bot.tick()
         start.assert_called_once()
 
-    def test_briefing_replaces_previous_and_folds_reports(self):
-        with state.locked(self.bot.cfg.state_dir) as st:
-            st.reports = [{"chat_id": -100, "message_id": 50, "at": time.time(), "packages": 12},
-                          {"at": time.time(), "packages": 3}]
-            st.messages["briefing"] = {"chat_id": -100, "message_id": 40, "at": time.time() - 86400}
-        self.bot.maybe_briefing(self.at(8, 0))
-        self.assertIn("2× eingespielt, 15 Pakete", self.tg.sent[0])
-        self.assertEqual(sorted(self.tg.deleted), [40, 50])
-        with state.locked(self.bot.cfg.state_dir) as st:
-            self.assertEqual(st.reports, [])
+    # --- Umzug zur Supergruppe ---------------------------------------------
 
     def test_supergroup_migration_from_service_message(self):
-        with state.locked(self.bot.cfg.state_dir) as st:
-            st.messages["status"] = {"chat_id": -100, "message_id": 9, "at": time.time()}
+        self.bot.pump()
         # Erste Nachricht in der neuen Supergruppe nennt die alte ID
         self.bot.handle({"message_id": 1, "date": int(time.time()), "migrate_from_chat_id": -100,
                          "chat": {"id": -1009, "type": "supergroup"}})
         self.assertEqual(self.bot.cfg.chat_id, -1009)
-        self.assertIn("Supergruppe", self.tg.sent[0])
-        with state.locked(self.bot.cfg.state_dir) as st:
-            self.assertEqual(st.chat_migration["to"], -1009)
-            self.assertNotIn("status", st.messages)  # alte Gruppe: nicht mehr bearbeitbar
+        self.assertIn("Supergruppe", self.tg.sent[-1])
+        st = self.st()
+        self.assertEqual(st.chat_migration["to"], -1009)
+        self.assertNotIn(panel.TOPIC, st.messages)  # alte Gruppe: nicht mehr bearbeitbar
         # Befehle aus der neuen Gruppe werden angenommen, der Hinweis kommt nur einmal
         self.bot.handle(message("/status", chat={"id": -1009, "type": "supergroup"}))
         self.bot.handle({"message_id": 2, "date": int(time.time()), "migrate_to_chat_id": -1009,
                          "chat": {"id": -100, "type": "group"}})
-        self.assertEqual(len(self.tg.sent), 2)
-        self.assertIn("server1", self.tg.sent[1])
+        self.assertEqual(sum("Supergruppe" in t for t in self.tg.sent), 1)
+        self.assertIn("server1", self.tg.sent[-1])
 
     def test_migration_noticed_while_sending(self):
         self.tg.migration = (-100, -1009)
@@ -1551,12 +1762,6 @@ class BotTest(unittest.TestCase):
         with self.assertLogs("twguard.bot", "WARNING") as logs:
             self.bot.handle(message("/status", chat={"id": -1009, "type": "supergroup"}))
         self.assertTrue(any("chat_id = -1009" in line for line in logs.output))
-
-    def test_parse_duration(self):
-        self.assertEqual(parse_duration("12h"), 12)
-        self.assertEqual(parse_duration("2d"), 48)
-        self.assertEqual(parse_duration("1"), 24)
-        self.assertIsNone(parse_duration("morgen"))
 
 
 class StateTest(unittest.TestCase):
