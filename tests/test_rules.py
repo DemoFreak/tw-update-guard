@@ -109,6 +109,30 @@ class ClassifyTest(unittest.TestCase):
         self.assertFalse(v.auto)
         self.assertIn("wird entfernt", v.reasons[0])
 
+    def test_watched_removal_beats_routine_removals(self):
+        # php8-lang passt auf php8* (watch) und *-lang (routine_removals)
+        v = classify(plan(to_remove=[pkg("php8-lang", "8.4.1-1.1")]), self.rules)
+        self.assertFalse(v.auto)
+        self.assertEqual(v.reasons, ["überwachtes Paket wird entfernt: php8-lang 8.4.1-1.1"])
+
+    def test_watched_lib_removal(self):
+        rules = Rules(watch=["libvirt*"])
+        v = classify(plan(to_remove=[pkg("libvirt-daemon"), pkg("libfoo2")]), rules)
+        self.assertFalse(v.auto)
+        self.assertEqual(v.reasons, ["überwachtes Paket wird entfernt: libvirt-daemon 1.0-1.1"])
+
+    def test_watched_removal_without_routine_match(self):
+        v = classify(plan(to_remove=[pkg("postfix", "3.11.7-3.1")]), self.rules)
+        self.assertFalse(v.auto)
+        self.assertEqual(v.reasons, ["überwachtes Paket wird entfernt: postfix 3.11.7-3.1"])
+
+    def test_watched_multiversion_replacement_is_routine(self):
+        # Neue Version desselben Pakets ersetzt die alte (mehrfach installierbar)
+        rules = Rules(watch=["kernel-default"], kernel=[])
+        v = classify(plan(to_install=[pkg("kernel-default", "7.3.2-1.1")],
+                          to_remove=[pkg("kernel-default", "7.3.0-1.1")]), rules)
+        self.assertNotIn("überwachtes Paket wird entfernt: kernel-default 7.3.0-1.1", v.reasons)
+
     def test_too_many_removals(self):
         v = classify(plan(to_remove=[pkg(f"lib{i}") for i in range(25)]), self.rules)
         self.assertFalse(v.auto)

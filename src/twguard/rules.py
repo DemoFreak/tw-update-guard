@@ -143,13 +143,13 @@ def classify(plan: Plan, rules: Rules, running_kernel: str | None = None) -> Ver
             reasons.append(tr("neues Paket: {package}", package=s.label()))
 
     # Bei mehrfach installierbaren Paketen (Kernel) ersetzt die neue Version die alte
-    unexpected = [
-        s for s in removals
-        if s.name not in installed_names
-        and not _matches(s.name, rules.routine_removals)
-        and not _matches(s.name, rules.block)
-    ]
-    reasons += [tr("wird entfernt: {package}", package=s.label()) for s in unexpected]
+    replaced = [s for s in removals if s.name not in installed_names and not _matches(s.name, rules.block)]
+    # watch geht vor routine_removals (z. B. php8-lang passt auf php8* und *-lang)
+    for s in replaced:
+        if _watch_depth(s.name, rules.watch):
+            reasons.append(tr("überwachtes Paket wird entfernt: {package}", package=s.label()))
+        elif not _matches(s.name, rules.routine_removals):
+            reasons.append(tr("wird entfernt: {package}", package=s.label()))
     if len(removals) > rules.max_removals:
         reasons.append(tr("{n} Pakete werden entfernt (Grenze {limit})", n=len(removals), limit=rules.max_removals))
     if rules.max_packages and plan.packages_to_change > rules.max_packages:

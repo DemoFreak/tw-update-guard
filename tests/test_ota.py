@@ -49,6 +49,20 @@ class CheckRemoteTest(unittest.TestCase):
         self.assertIn("Neue Funktion", pending.commits[0])
         self.assertEqual(pending.target, git(self.work, "rev-parse", "HEAD"))
 
+    def test_new_commits_carry_target_version(self):
+        package = self.work / "src" / "twguard"
+        package.mkdir(parents=True)
+        (package / "__init__.py").write_text('"""x"""\n\n__version__ = "1.2.3"\n')
+        git(self.work, "add", "src")
+        git(self.work, "commit", "-q", "-m", "Version 1.2.3")
+        git(self.work, "push", "-q", "origin", "HEAD:main")
+        self.assertEqual(ota.check_remote(self.upd).version, "1.2.3")
+
+    def test_version_unknown_without_init(self):
+        self.commit("ohne Paket")
+        git(self.work, "push", "-q", "origin", "HEAD:main")
+        self.assertEqual(ota.check_remote(self.upd).version, "")
+
     def test_local_changes_refused(self):
         (self.server / "datei.txt").write_text("lokal geändert")
         with self.assertRaisesRegex(ota.UpdateError, "lokale Änderungen"):
@@ -185,7 +199,7 @@ class CommandTest(unittest.TestCase):
         rc, out, _ = self.run_command()
         self.assertEqual(rc, 0)
         self.update.assert_called_once_with(self.cfg, "b" * 40)
-        self.assertIn("läuft jetzt mit bbbbbbbbbbbb", out)
+        self.assertIn("läuft jetzt mit bbbbbbbb.", out)
 
     def test_up_to_date_does_nothing(self):
         self.check.return_value = ota.Pending("a" * 40, "a" * 40, [])
@@ -239,10 +253,11 @@ class StartupReportTest(unittest.TestCase):
         self.assertFalse(ota.started_with("abcdef1234567890", ""))
 
     @mock.patch.object(ota, "COMMIT", "abcdef123456")
+    @mock.patch.object(ota, "__version__", "0.9.3")
     def test_success_reported_by_new_bot(self):
         st = state.State(update_request={"commit": "abcdef1234567890", "at": 100.0})
         text, _ = ota.startup_report(self.cfg, st, now=200.0)
-        self.assertIn("läuft jetzt", text)
+        self.assertIn("läuft jetzt mit v0.9.3 (abcdef12)", text)
         self.assertEqual(st.update_request, {})
 
     def test_waits_while_update_runs(self):
@@ -255,6 +270,17 @@ class StartupReportTest(unittest.TestCase):
         text, _ = ota.startup_report(self.cfg, st, now=100.0 + ota.STUCK_AFTER + 1)
         self.assertIn("keine Rückmeldung", text)
         self.assertEqual(st.update_request, {})
+
+
+class LabelTest(unittest.TestCase):
+    def test_version_and_short_hash(self):
+        self.assertEqual(ota.label("abcdef1234567890", "0.9.3"), "v0.9.3 (abcdef12)")
+
+    def test_without_version_only_hash(self):
+        self.assertEqual(ota.label("abcdef1234567890"), "abcdef12")
+
+    def test_local_suffix_kept(self):
+        self.assertEqual(ota.label("abcdef123456+lokal", "0.9.3"), "v0.9.3 (abcdef12+lokal)")
 
 
 if __name__ == "__main__":

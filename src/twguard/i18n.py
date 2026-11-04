@@ -123,6 +123,20 @@ EN = {
     "⏳ <b>{host}</b> spielt das Update ein: {summary}. Das Ergebnis erscheint hier.":
         "⏳ <b>{host}</b> is installing the update: {summary}. The result will appear here.",
     "Danach ist ein Neustart nötig.": "A reboot will be required afterwards.",
+    "Dienste werden neu gestartet, das Einspielen wartet": "services are being restarted, installation is waiting",
+    "⏳ <b>{host}</b>: Dienste werden gerade neu gestartet, das Update wartet darauf.":
+        "⏳ <b>{host}</b>: services are being restarted, the update is waiting for them.",
+    "Neustart von Diensten läuft noch, nichts eingespielt": "service restart still running, nothing installed",
+    "Ein anderer Prüflauf spielt gerade ein, nichts eingespielt": "another check is installing, nothing installed",
+    "Ein anderer Prüflauf spielt gerade ein, dieser spielt nichts ein. Das Ergebnis meldet der "
+    "andere Lauf.":
+        "Another check is installing right now, this one installs nothing. The other run reports the result.",
+    "Der Neustart von Diensten läuft noch, das Update wurde nicht eingespielt. Der nächste Prüflauf "
+    "versucht es erneut (sofort: /check).":
+        "The service restart is still running, the update was not installed. The next check will try "
+        "again (now: /check).",
+    "Ein Update wird gerade eingespielt und läuft noch zu Ende.":
+        "An update is being installed right now and will run to completion.",
     "Nach dem Update ist ein Neustart nötig (Kernel oder Systembibliotheken).":
         "A reboot is required after the update (kernel or system libraries).",
     # zypper
@@ -142,6 +156,7 @@ EN = {
     "Versionssprung: {package}": "version jump: {package}",
     "neues Paket: {package}": "new package: {package}",
     "wird entfernt: {package}": "will be removed: {package}",
+    "überwachtes Paket wird entfernt: {package}": "watched package will be removed: {package}",
     "{n} Pakete werden entfernt (Grenze {limit})": "{n} packages will be removed (limit {limit})",
     "{n} Pakete (Grenze {limit})": "{n} packages (limit {limit})",
     "{n} Paket, Download {mb} MB": "{n} package, download {mb} MB",
@@ -259,8 +274,8 @@ Messages also have buttons for this.""",
     "✖️ <b>{host}</b>: Neustart abgebrochen.": "✖️ <b>{host}</b>: reboot cancelled.",
     "<b>{host}</b>: Ein Update läuft bereits.": "<b>{host}</b>: an update is already running.",
     "<b>{host}</b>: twguard ist aktuell ({commit}).": "<b>{host}</b>: twguard is up to date ({commit}).",
-    "⬆️ <b>{host}</b>: {n} neue Commits für twguard (läuft mit {commit}):\n<pre>{commits}</pre>":
-        "⬆️ <b>{host}</b>: {n} new commits for twguard (running {commit}):\n<pre>{commits}</pre>",
+    "⬆️ <b>{host}</b>: twguard {target} mit {n} neuen Commits (läuft mit {commit}):\n<pre>{commits}</pre>":
+        "⬆️ <b>{host}</b>: twguard {target} with {n} new commits (running {commit}):\n<pre>{commits}</pre>",
     "Inzwischen gibt es einen anderen Stand. Bitte /update erneut.": "There is a different version by now. Please run /update again.",
     "<b>{host}</b>: twguard ist schon aktuell.": "<b>{host}</b>: twguard is already up to date.",
     "Ein Update läuft bereits.": "An update is already running.",
@@ -279,8 +294,8 @@ Messages also have buttons for this.""",
     "\n\n⏰ Aufgeschoben bis {when}": "\n\n⏰ Snoozed until {when}",
     "Prüfung läuft …": "Check running …",
     "Update läuft …": "Update running …",
-    "⏳ <b>{host}</b>: Update auf {commit} läuft, der Bot startet gleich neu und antwortet so lange nicht. Schlägt die Installation des Updates fehl, wird spätestens nach {seconds} s die ursprüngliche Version wiederhergestellt. Das Ergebnis erscheint hier.":
-        "⏳ <b>{host}</b>: updating to {commit}, the bot will restart shortly and not answer meanwhile. If installing the update fails, the original version is restored after {seconds} s at the latest. The result will appear here.",
+    "⏳ <b>{host}</b>: Update auf {commit} läuft, der Bot startet gleich neu und antwortet so lange nicht. Tests und Installation dauern einige Minuten, danach wartet twguard bis zu {seconds} s auf den neuen Bot. Meldet er sich nicht oder schlägt die Installation fehl, wird die ursprüngliche Version wiederhergestellt. Das Ergebnis erscheint hier.":
+        "⏳ <b>{host}</b>: updating to {commit}, the bot will restart shortly and not answer meanwhile. Tests and installation take a few minutes, then twguard waits up to {seconds} s for the new bot. If it does not report back or the installation fails, the original version is restored. The result will appear here.",
     "✖️ verworfen": "✖️ dismissed",
     "↓ ersetzt durch eine neuere Nachricht": "↓ replaced by a newer message",
     # Update über das Netz

@@ -1,3 +1,5 @@
+import multiprocessing
+import os
 import tempfile
 import time
 import unittest
@@ -137,6 +139,198 @@ class CheckTest(unittest.TestCase):
             st.mode_override = "auto"
         check.run(cfg)
         self.apply.assert_called_once()
+
+    def mode_bot(self, configured):
+        """Echter Bot mit eigener Konfiguration und demselben Zustand, wie im Betrieb getrennt vom Prüflauf."""
+        from twguard.bot import Bot
+        bot = Bot(self.cfg(configured), tg=FakeTelegram(), me={"id": 1000, "username": "server1_bot"})
+        return bot
+
+    def switch_during(self, target, configured, mode):
+        """Während `target` (refresh oder dry_run) läuft, per /mode umschalten."""
+        bot = self.mode_bot(configured)
+        original = getattr(self, target).side_effect
+        answers = []
+
+        def switch(*args):
+            answers.append(bot.cmd_mode([mode], addressed=True))
+            return original(*args) if original else []
+        getattr(self, target).side_effect = switch
+        return answers
+
+    def test_mode_observe_during_refresh_stops_apply(self):
+        answers = self.switch_during("refresh", "auto", "observe")
+        cfg = self.cfg("auto")
+        check.run(cfg)
+        self.assertIn("observe", answers[0].text)
+        with state.locked(cfg.state_dir) as st:
+            self.assertEqual(st.mode_override, "observe")
+        self.apply.assert_not_called()
+        self.assertIn("Beobachtungsmodus", self.tg.sent[0])
+
+    def test_mode_auto_during_dry_run_applies(self):
+        self.switch_during("dry_run", "observe", "auto")
+        check.run(self.cfg("observe"))
+        self.apply.assert_called_once()
+
+    def test_mode_back_to_configured_during_refresh(self):
+        cfg = self.cfg("auto")
+        with state.locked(cfg.state_dir) as st:
+            st.mode_override = "observe"
+        # /mode auto bei auto in der Konfiguration leert den Wert: wieder die Konfiguration
+        self.switch_during("refresh", "auto", "auto")
+        check.run(cfg)
+        with state.locked(cfg.state_dir) as st:
+            self.assertEqual(st.mode_override, "")
+        self.apply.assert_called_once()
+
+    def test_bot_restart_during_refresh_returns_to_config(self):
+        cfg = self.cfg("observe")
+        with state.locked(cfg.state_dir) as st:
+            st.mode_override = "auto"
+        bot = self.mode_bot("observe")
+        with mock.patch.object(bot, "_set_menu"):
+            self.refresh.side_effect = lambda: (bot.startup(), [])[1]
+            check.run(cfg)
+        self.apply.assert_not_called()
+
+    def test_approval_still_applies_after_mode_observe(self):
+        cfg = self.cfg("auto")
+        cfg.rules.block = ["bash"]
+        with state.locked(cfg.state_dir) as st:
+            st.approved_fingerprint = routine_plan().fingerprint()
+        self.switch_during("refresh", "auto", "observe")
+        check.run(cfg)
+        self.apply.assert_called_once()
+
+    def test_mode_observe_while_applying_says_it_continues(self):
+        cfg = self.cfg("auto")
+        bot = self.mode_bot("auto")
+        answers = []
+        self.apply.side_effect = lambda args: (answers.append(bot.cmd_mode(["observe"], addressed=True)),
+                                               (0, "", routine_plan()))[1]
+        check.run(cfg)
+        self.assertIn("läuft noch zu Ende", answers[0].text)
+
+    def test_apply_waits_for_service_restart(self):
+        cfg = self.cfg("auto")
+        with state.locked(cfg.state_dir) as st:
+            st.restart_request = {"chat_id": -100, "message_id": 9, "at": time.time(), "services": ["postfix"]}
+
+        def restart_done(seconds):
+            with state.locked(cfg.state_dir) as st:
+                st.restart_request = {}
+        with mock.patch.object(check.time, "sleep", side_effect=restart_done) as sleep:
+            check.run(cfg)
+        sleep.assert_called_once()
+        self.apply.assert_called_once()
+
+    def test_no_apply_while_service_restart_runs(self):
+        cfg = self.cfg("auto")
+        self.request(cfg)
+        fingerprint = routine_plan().fingerprint()
+        with state.locked(cfg.state_dir) as st:
+            st.restart_request = {"chat_id": -100, "message_id": 9, "at": time.time(), "services": ["postfix"]}
+            st.approved_fingerprint = fingerprint
+        with mock.patch.object(check, "RESTART_WAIT", 0), mock.patch.object(check.time, "sleep"):
+            self.assertEqual(check.run(cfg), 0)
+        self.apply.assert_not_called()
+        self.assertIn("nicht eingespielt", self.tg.sent[-1])
+        with state.locked(cfg.state_dir) as st:
+            self.assertEqual(st.approved_fingerprint, fingerprint)  # die Freigabe gilt beim nächsten Lauf
+            self.assertEqual(st.applying, {})
+
+    def test_reservation_held_during_apply_and_released(self):
+        cfg = self.cfg("auto")
+        seen = []
+
+        def apply(args):
+            with state.locked(cfg.state_dir) as st:
+                seen.append(state.alive(st.applying))
+            return 0, "", routine_plan()
+        self.apply.side_effect = apply
+        check.run(cfg)
+        self.assertEqual(seen, [True])
+        with state.locked(cfg.state_dir) as st:
+            self.assertEqual(st.applying, {})
+
+    def test_reservation_released_when_apply_crashes(self):
+        cfg = self.cfg("auto")
+        self.apply.side_effect = OSError("zypper fehlt")
+        with self.assertRaises(OSError):
+            check.run(cfg)
+        with state.locked(cfg.state_dir) as st:
+            self.assertEqual(st.applying, {})
+
+    def start_holder(self, cfg):
+        """Prüflauf A als eigener Prozess, angehalten mitten im Einspielen."""
+        ctx = multiprocessing.get_context("fork")
+        inside, release = ctx.Event(), ctx.Event()
+
+        def apply(args):
+            inside.set()
+            release.wait(30)
+            return 0, "", routine_plan()
+
+        def run_a():
+            self.apply.side_effect = apply
+            os._exit(check.run(cfg))
+        a = ctx.Process(target=run_a)
+        a.start()
+        self.addCleanup(lambda: (release.set(), a.join(10), a.is_alive() and a.kill()))
+        self.assertTrue(inside.wait(10), "A erreicht das Einspielen nicht")
+        return a, release
+
+    def test_second_check_never_takes_over_live_reservation(self):
+        cfg = self.cfg("auto")
+        a, release = self.start_holder(cfg)
+        with state.locked(cfg.state_dir) as st:
+            held = dict(st.applying)
+        self.assertEqual(held["pid"], a.pid)
+        # B kommt mit fertigem Probelauf zur Entscheidung; sein zypper wäre gesperrt (Exit-Code 7)
+        self.apply.side_effect = lambda args: (7, "System management is locked", Plan())
+        self.request(cfg)
+        self.assertEqual(check.run(cfg), 0)
+        self.apply.assert_not_called()
+        self.assertIn("anderer Prüflauf", self.tg.sent[-1])
+        with state.locked(cfg.state_dir) as st:
+            self.assertEqual(st.applying, held)  # weder übernommen noch gelöst
+            self.assertTrue(state.alive(st.applying))
+        release.set()
+        a.join(10)
+        self.assertEqual(a.exitcode, 0)
+        with state.locked(cfg.state_dir) as st:
+            self.assertEqual(st.applying, {})  # A gibt seine Reservierung selbst frei
+
+    def test_second_check_failing_does_not_release_foreign_reservation(self):
+        cfg = self.cfg("auto")
+        a, release = self.start_holder(cfg)
+        with state.locked(cfg.state_dir) as st:
+            held = dict(st.applying)
+        self.refresh.side_effect = OSError("Abbruch in B")
+        with self.assertRaises(OSError):
+            check.run(cfg)
+        with state.locked(cfg.state_dir) as st:
+            self.assertEqual(st.applying, held)
+
+    def test_release_only_by_owner(self):
+        cfg = self.cfg("auto")
+        foreign = {"pid": os.getppid(), "boot": state.holder()["boot"], "at": 1.0}
+        with state.locked(cfg.state_dir) as st:
+            st.applying = foreign
+        check._release(cfg, {**foreign, "pid": os.getpid()})
+        check._release(cfg, {})
+        with state.locked(cfg.state_dir) as st:
+            self.assertEqual(st.applying, foreign)
+
+    def test_orphaned_reservation_is_replaced(self):
+        cfg = self.cfg("auto")
+        with state.locked(cfg.state_dir) as st:
+            st.applying = {**state.holder(), "boot": "vor-dem-reboot"}
+        check.run(cfg)
+        self.apply.assert_called_once()
+        with state.locked(cfg.state_dir) as st:
+            self.assertEqual(st.applying, {})
 
     def test_check_follows_config_without_override(self):
         check.run(self.cfg("observe"))

@@ -75,6 +75,8 @@ class State:
     restart_request: dict = field(default_factory=dict)
     # Ergebnisse, die noch zugestellt werden müssen, je {"chat_id", "message_id", "at", "text", "loud"}
     restart_reports: list = field(default_factory=list)
+    # Prüflauf spielt gerade ein {"pid", "boot", "at"}; schließt Dienst-Neustarts aus (holder/alive)
+    applying: dict = field(default_factory=dict)
     # Fingerabdruck des zuletzt tatsächlich gezeigten Plans; /approve gilt nur für ihn.
     # Nicht in Issue: eine ältere Version scheitert nach dem Zurückrollen an unbekannten Feldern
     manual_shown: str = ""
@@ -92,6 +94,33 @@ class State:
 
     def resolve(self, kind: str) -> Issue | None:
         return self.issues.pop(kind, None)
+
+
+def _boot_id() -> str:
+    try:
+        return Path("/proc/sys/kernel/random/boot_id").read_text().strip()
+    except OSError:
+        return ""
+
+
+def holder() -> dict:
+    """Kennung dieses Prozesses für eine Reservierung im Zustand."""
+    return {"pid": os.getpid(), "boot": _boot_id(), "at": time.time()}
+
+
+def alive(entry: dict) -> bool:
+    """Lebt der Prozess einer Reservierung noch? Nach Absturz oder Reboot gilt sie nicht mehr."""
+    if not entry or entry.get("boot") != _boot_id():
+        return False
+    try:
+        os.kill(int(entry["pid"]), 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        pass
+    except (KeyError, TypeError, ValueError):
+        return False
+    return True
 
 
 def load(path: Path) -> State:

@@ -16,7 +16,7 @@ from dataclasses import dataclass
 from html import escape
 from pathlib import Path
 
-from . import COMMIT, __version__, details, messages, ota, restarts, state, zypper
+from . import COMMIT, details, messages, ota, restarts, state, zypper
 from .config import MODES, Config
 from .i18n import EN, LANGUAGES, current, set_language, tr
 from .notify import (adopt_migration, button_kind, clip, fmt_age, format_briefing, format_issue, format_status,
@@ -676,12 +676,13 @@ class Bot:
         except ota.UpdateError as e:
             return Out(f"<b>{self.host}</b>: {escape(str(e))}", ttl=LONG)
         if not pending.commits:
-            return Out(tr("<b>{host}</b>: twguard ist aktuell ({commit}).", host=self.host, commit=escape(COMMIT)), ttl=SHORT)
+            return Out(tr("<b>{host}</b>: twguard ist aktuell ({commit}).", host=self.host, commit=escape(ota.running())), ttl=SHORT)
         shown = "\n".join(pending.commits[:15])
         if len(pending.commits) > 15:
             shown += "\n" + tr("… und {n} weitere", n=len(pending.commits) - 15)
-        text = tr("⬆️ <b>{host}</b>: {n} neue Commits für twguard (läuft mit {commit}):\n<pre>{commits}</pre>",
-                  host=self.host, n=len(pending.commits), commit=escape(COMMIT), commits=escape(clip(shown, 2500)))
+        text = tr("⬆️ <b>{host}</b>: twguard {target} mit {n} neuen Commits (läuft mit {commit}):\n<pre>{commits}</pre>",
+                  host=self.host, target=escape(ota.label(pending.target, pending.version)), n=len(pending.commits),
+                  commit=escape(ota.running()), commits=escape(clip(shown, 2500)))
         return Out(text, [[(tr("⬆️ Einspielen"), f"update:{pending.target}"), (tr("✖️ Abbrechen"), "dismiss")]],
                    topic="update")
 
@@ -718,8 +719,7 @@ class Bot:
         mode = tr("Beobachtung") if self.cfg.observe else tr("automatisch")
         if self.cfg.mode != self.configured_mode:
             mode += " " + tr("(bis zum Neustart)")
-        return (f"🖥 <b>{self.host}</b> (@{escape(self.me['username'])}) · twguard {escape(__version__)} "
-                f"({escape(COMMIT)}) · {mode}")
+        return f"🖥 <b>{self.host}</b> (@{escape(self.me['username'])}) · twguard {escape(ota.running())} · {mode}"
 
     def cmd_language(self, args: list[str], addressed: bool = False) -> Out:
         """Sprache zur Laufzeit ändern; die Konfiguration bleibt unberührt, ein Neustart gilt wieder sie."""
@@ -763,16 +763,20 @@ class Bot:
         self.cfg.mode = mode
         with state.locked(self.cfg.state_dir) as st:
             st.mode_override = "" if mode == configured else mode
+            # Der Prüflauf entscheidet unter derselben Sperre; was schon eingespielt wird, läuft zu Ende
+            applying = state.alive(st.applying)
+        note = ("\n" + tr("Ein Update wird gerade eingespielt und läuft noch zu Ende.")
+                if applying and mode == "observe" else "")
         if mode == configured:
-            return Out(tr("⚙️ <b>{host}</b>: Modus {mode}, wie in der Konfiguration.", host=self.host, mode=mode),
-                       topic="mode")
+            return Out(tr("⚙️ <b>{host}</b>: Modus {mode}, wie in der Konfiguration.", host=self.host, mode=mode)
+                       + note, topic="mode")
         text = tr("⚙️ <b>{host}</b>: Modus {mode} bis zum nächsten Neustart des Bots (auch durch /update oder "
                   "einen Reboot). Die Konfiguration enthält {configured}. Damit es dauerhaft gilt, in "
                   "/etc/twguard/config.toml unter [general] <code>mode = \"{mode}\"</code> eintragen.",
                   host=self.host, mode=mode, configured=configured)
         if mode == "auto":
             text += "\n" + tr("Routine-Updates spielt der nächste Prüflauf ein, sofort: /check")
-        return Out(text, topic="mode")
+        return Out(text + note, topic="mode")
 
     def cmd_help(self, args: list[str], addressed: bool = False) -> Out | None:
         # An alle antwortet nur der Bot mit help_full, sonst stünde die Liste mehrfach da;
@@ -965,20 +969,24 @@ class Bot:
         self._answer(cq, tr("Update läuft …"))
         # Ohne die Frist wirkt ein Bot, der nicht startet, bis zum Zurückrollen einfach tot
         messages.edit(self.tg, pressed, tr("⏳ <b>{host}</b>: Update auf {commit} läuft, der Bot startet gleich neu und "
-                                           "antwortet so lange nicht. Schlägt die Installation des Updates fehl, wird "
-                                           "spätestens nach {seconds} s die ursprüngliche Version wiederhergestellt. "
+                                           "antwortet so lange nicht. Tests und Installation dauern "
+                                           "einige Minuten, danach wartet twguard bis zu {seconds} s auf den neuen Bot. "
+                                           "Meldet er sich nicht oder schlägt die Installation fehl, wird die "
+                                           "ursprüngliche Version wiederhergestellt. "
                                            "Das Ergebnis erscheint hier.",
-                                           host=self.host, commit=escape(commit[:12]), seconds=ota.START_TIMEOUT))
+                                           host=self.host, seconds=ota.START_TIMEOUT,
+                                           commit=escape(ota.label(commit, ota.version_of(self.cfg.update.repo, commit)))))
 
     def press_restart(self, cq: dict, pressed: dict, arg: str) -> None:
         """Einen Dienst oder (`*:<Kennung>`) genau die gezeigte Liste neu starten."""
         with state.locked(self.cfg.state_dir) as st:
             running, listed = bool(st.restart_request), list(st.restart_services)
             updating = bool(st.update_request)
+            applying = state.alive(st.applying)
         if running or updating:
             self._answer(cq, tr("Ein Neustart läuft bereits.") if running else tr("Ein Update läuft bereits."), alert=True)
             return
-        if self._check_running():
+        if applying or self._check_running():
             self._answer(cq, tr("Gerade läuft ein Prüflauf, nichts neu gestartet. Bitte danach erneut."), alert=True)
             return
         found = zypper.services_needing_restart()
@@ -992,17 +1000,32 @@ class Bot:
         if not names:
             self._offer_current(cq, pressed, found)
             return
+        # Reservieren, bevor etwas angezeigt wird: Ein Prüflauf, der inzwischen einspielt, hat Vorrang.
+        # Unter derselben Sperre prüft der Prüflauf restart_request, einer von beiden gewinnt.
+        with state.locked(self.cfg.state_dir) as st:
+            applying = state.alive(st.applying)
+            if not applying:
+                st.restart_request = {"chat_id": pressed["chat_id"], "message_id": None,
+                                      "at": time.time(), "services": names}
+        if applying:
+            self._answer(cq, tr("Gerade läuft ein Prüflauf, nichts neu gestartet. Bitte danach erneut."), alert=True)
+            return
         # Erst alles anzeigen und festhalten: Ist der Bot selbst dabei, wird er gleich beendet
-        self._answer(cq, tr("Neustart läuft …"))
-        shown = self._own(cq, pressed, "services",
-                          tr("⏳ <b>{host}</b>: starte neu: {services}. Das Ergebnis erscheint hier.",
-                             host=self.host, services=escape(", ".join(names)))) or {"chat_id": pressed["chat_id"]}
+        try:
+            self._answer(cq, tr("Neustart läuft …"))
+            shown = self._own(cq, pressed, "services",
+                              tr("⏳ <b>{host}</b>: starte neu: {services}. Das Ergebnis erscheint hier.",
+                                 host=self.host, services=escape(", ".join(names)))) or {"chat_id": pressed["chat_id"]}
+        except Exception:
+            # Noch nichts gestartet: Die Reservierung darf den Prüflauf nicht aufhalten
+            with state.locked(self.cfg.state_dir) as st:
+                st.restart_request = {}
+            raise
         with state.locked(self.cfg.state_dir) as st:
             st.resolve("services")
             st.restart_services = []
             # Ohne Nachricht (Sendefehler) kommt das Ergebnis später als neue
-            st.restart_request = {"chat_id": shown["chat_id"], "message_id": shown.get("message_id"),
-                                  "at": time.time(), "services": names}
+            st.restart_request.update(chat_id=shown["chat_id"], message_id=shown.get("message_id"))
         # Abgewiesene merken, bevor sich der Bot selbst einreiht: Das kann ihn sofort beenden
         self._note_restart_errors(restarts.start([n for n in names if n != restarts.BOT_SERVICE]))
         if restarts.BOT_SERVICE in names:

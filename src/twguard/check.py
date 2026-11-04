@@ -9,11 +9,11 @@ from html import escape
 from pathlib import Path
 
 from . import details, messages, restarts, state, zypper
-from .config import Config
+from .config import MODES, Config
 from .i18n import tr
 from .notify import (adopt_migration, format_issue, format_observed, format_reasons, format_report, format_status,
                      issue_buttons, observed_buttons, send_due, status_buttons, use_language, use_mode)
-from .rules import classify, describe, plan_summary
+from .rules import Verdict, classify, describe, plan_summary
 from .telegram import Buttons, Telegram, TelegramError
 
 log = logging.getLogger(__name__)
@@ -21,6 +21,9 @@ log = logging.getLogger(__name__)
 KEEP_PLANS = 20
 # Ältere Anfragen von /check oder /approve werden nicht mehr beantwortet
 REQUEST_MAX_AGE = 3600
+# So lange wartet das Einspielen auf einen laufenden Dienst-Neustart (dessen Grenze sind 15 min)
+RESTART_WAIT = 20 * 60
+RESTART_POLL = 10
 
 
 def save_plan(state_dir: Path, plan: zypper.Plan, fingerprint: str, keep: int = KEEP_PLANS) -> Path | None:
@@ -85,16 +88,64 @@ def _fail(cfg: Config, tg: Telegram, kind: str, detail: str) -> int:
 def run(cfg: Config, dry_run: bool = False) -> int:
     tg = Telegram(cfg.token, cfg.chat_id)
     use_language(cfg)
+    configured = cfg.mode
     use_mode(cfg)
     try:
-        return _run(cfg, tg, dry_run)
+        return _run(cfg, tg, dry_run, configured)
     finally:
         if tg.migration and not dry_run:
             with state.locked(cfg.state_dir) as st:
                 adopt_migration(cfg, st, tg, *tg.migration)
 
 
-def _run(cfg: Config, tg: Telegram, dry_run: bool) -> int:
+def _reserve(cfg: Config, tg: Telegram, configured: str, approved: bool) -> tuple[str, dict]:
+    """Unmittelbar vor dem Einspielen entscheiden: "observe", "apply" (mit Reservierung) oder "busy".
+
+    Modus und Reservierung stehen unter derselben Sperre wie /mode und der Neustart-Knopf: Ein
+    bestätigtes /mode observe oder ein schon eingereihter Dienst-Neustart gilt also sicher. Die
+    lebende Reservierung eines anderen Prüflaufs wird nie übernommen, nur eine verwaiste ersetzt.
+    """
+    deadline = time.monotonic() + RESTART_WAIT
+    waiting = False
+    while True:
+        with state.locked(cfg.state_dir) as st:
+            cfg.mode = st.mode_override if st.mode_override in MODES else configured
+            if cfg.observe and not approved:
+                return "observe", {}
+            other = state.alive(st.applying)
+            if not (other or st.restart_request):
+                st.applying = state.holder()
+                return "apply", dict(st.applying)
+        if other:
+            # Er spielt denselben oder einen neueren Stand ein; danach erneut zu warten brächte nichts
+            log.warning(tr("Ein anderer Prüflauf spielt gerade ein, nichts eingespielt"))
+            finish(cfg, tg, f"⏸️ <b>{escape(cfg.hostname)}</b>: " + tr(
+                "Ein anderer Prüflauf spielt gerade ein, dieser spielt nichts ein. Das Ergebnis meldet der "
+                "andere Lauf."), loud=True)
+            return "busy", {}
+        if time.monotonic() >= deadline:
+            break
+        if not waiting:
+            waiting = True
+            log.info(tr("Dienste werden neu gestartet, das Einspielen wartet"))
+            progress(cfg, tg, tr("⏳ <b>{host}</b>: Dienste werden gerade neu gestartet, das Update wartet darauf.",
+                                 host=escape(cfg.hostname)))
+        time.sleep(RESTART_POLL)
+    log.warning(tr("Neustart von Diensten läuft noch, nichts eingespielt"))
+    finish(cfg, tg, f"⏸️ <b>{escape(cfg.hostname)}</b>: " + tr(
+        "Der Neustart von Diensten läuft noch, das Update wurde nicht eingespielt. Der nächste Prüflauf "
+        "versucht es erneut (sofort: /check)."), loud=True)
+    return "busy", {}
+
+
+def _release(cfg: Config, mine: dict) -> None:
+    """Nur die eigene Reservierung lösen, nie die eines anderen Prüflaufs."""
+    with state.locked(cfg.state_dir) as st:
+        if mine and st.applying == mine:
+            st.applying = {}
+
+
+def _run(cfg: Config, tg: Telegram, dry_run: bool, configured: str | None = None) -> int:
 
     errors = zypper.refresh()
     if errors:
@@ -180,24 +231,34 @@ def _run(cfg: Config, tg: Telegram, dry_run: bool) -> int:
             send_due(cfg, st, tg)
         return 0
 
-    if cfg.observe and not approved:
-        log.info(tr("Beobachtungsmodus: würde %d Pakete einspielen"), plan.packages_to_change)
-        text = format_observed(cfg.hostname, plan.packages_to_change, verdict.reboot_expected)
-        answered = finish(cfg, tg, text, observed_buttons(fingerprint), topic="observed")
-        with state.locked(cfg.state_dir) as st:
-            st.resolve("manual")
-            st.pending_text = plan_summary(plan)
-            if answered:
-                st.observed_fingerprint = fingerprint
-            elif st.observed_fingerprint != fingerprint:
-                try:
-                    messages.replace(tg, st, "observed", text, observed_buttons(fingerprint), silent=True)
-                    st.observed_fingerprint = fingerprint
-                except TelegramError as e:
-                    log.warning(tr("Meldung nicht gesendet: %s"), e)
-            send_due(cfg, st, tg)
+    decision, mine = _reserve(cfg, tg, configured or cfg.mode, approved)
+    if decision == "busy":
         return 0
+    if decision == "apply":
+        try:
+            return _apply(cfg, tg, plan, verdict, fingerprint, approved)
+        finally:
+            _release(cfg, mine)
 
+    log.info(tr("Beobachtungsmodus: würde %d Pakete einspielen"), plan.packages_to_change)
+    text = format_observed(cfg.hostname, plan.packages_to_change, verdict.reboot_expected)
+    answered = finish(cfg, tg, text, observed_buttons(fingerprint), topic="observed")
+    with state.locked(cfg.state_dir) as st:
+        st.resolve("manual")
+        st.pending_text = plan_summary(plan)
+        if answered:
+            st.observed_fingerprint = fingerprint
+        elif st.observed_fingerprint != fingerprint:
+            try:
+                messages.replace(tg, st, "observed", text, observed_buttons(fingerprint), silent=True)
+                st.observed_fingerprint = fingerprint
+            except TelegramError as e:
+                log.warning(tr("Meldung nicht gesendet: %s"), e)
+        send_due(cfg, st, tg)
+    return 0
+
+
+def _apply(cfg: Config, tg: Telegram, plan: zypper.Plan, verdict: Verdict, fingerprint: str, approved: bool) -> int:
     log.info(tr("spiele %d Pakete ein (%s)"), plan.packages_to_change, tr("freigegeben") if approved else tr("Routine"))
     # Das Einspielen dauert Minuten; nach /check soll sichtbar sein, dass es läuft und was kommt
     text = tr("⏳ <b>{host}</b> spielt das Update ein: {summary}. Das Ergebnis erscheint hier.",

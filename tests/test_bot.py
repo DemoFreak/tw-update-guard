@@ -1,3 +1,4 @@
+import os
 import subprocess
 import tempfile
 import time
@@ -35,6 +36,8 @@ class BotTest(unittest.TestCase):
         self.tmp = tempfile.TemporaryDirectory()
         cfg = Config(language="de", token="x", chat_id=-100, allowed_user_ids=[42], hostname="server1",
                      state_dir=Path(self.tmp.name))
+        # Sonst hängt das Ergebnis von der Uhrzeit des Testlaufs ab (Vorgabe 22–8 Uhr)
+        cfg.escalation.quiet_hours = ""
         self.tg = FakeTelegram()
         self.bot = Bot(cfg, tg=self.tg, me=ME)
         self.start_check = mock.patch.object(Bot, "start_check").start()
@@ -317,17 +320,23 @@ class BotTest(unittest.TestCase):
         self.assertIn("reboot", self.status_data(buttons))
 
     def test_update_offer_and_go(self):
-        pending = ota.Pending("a" * 40, "b" * 40, ["bbbbbbb Neue Funktion"])
+        pending = ota.Pending("a" * 40, "b" * 40, ["bbbbbbb Neue Funktion"], "9.9.9")
         with mock.patch.object(ota, "check_remote", return_value=pending), \
+             mock.patch.object(ota, "version_of", return_value="9.9.9"), \
              mock.patch.object(ota, "start", return_value="") as start:
             self.bot.handle(message("/update"))  # ohne @botname: alle Server antworten
             self.assertIn("Neue Funktion", self.tg.sent[0])
+            # Version statt langer Hashes, für Ziel und laufenden Stand
+            self.assertIn("twguard v9.9.9 (bbbbbbbb)", self.tg.sent[0])
+            self.assertIn(f"läuft mit {ota.running()}", self.tg.sent[0])
             self.assertEqual(self.tg.buttons[0][0][0], ("⬆️ Einspielen", "update:" + "b" * 40))
             self.press("update:" + "b" * 40)
             start.assert_called_once_with("b" * 40)
-        self.assertIn("Update auf", self.tg.edited[-1][1])
+        self.assertIn("Update auf v9.9.9 (bbbbbbbb) läuft", self.tg.edited[-1][1])
         # Die Frist bis zum Zurückrollen steht dabei, sonst wirkt der stumme Bot tot
-        self.assertIn(f"{ota.START_TIMEOUT} s", self.tg.edited[-1][1])
+        # Die Frist gilt erst nach Tests und Installation, nicht ab dem Knopfdruck
+        self.assertIn(f"danach wartet twguard bis zu {ota.START_TIMEOUT} s auf den neuen Bot", self.tg.edited[-1][1])
+        self.assertNotIn("spätestens", self.tg.edited[-1][1])
         with state.locked(self.bot.cfg.state_dir) as st:
             self.assertEqual(st.update_request["commit"], "b" * 40)
             self.assertEqual(st.update_request["message_id"], 5)
@@ -425,6 +434,7 @@ class BotTest(unittest.TestCase):
     def test_reminder_inside_quiet_hours_stays_separate(self):
         # Briefing absichtlich in der Ruhezeit: Die Erinnerung kommt wie eingestellt danach
         self.bot.cfg.briefing.at = "07:00"
+        self.bot.cfg.escalation.quiet_hours = "22:00-08:00"
         now = self.at(7, 0)
         self.overdue_manual(now)
         self.bot.maybe_briefing(now)
@@ -668,6 +678,77 @@ class BotTest(unittest.TestCase):
         with state.locked(self.bot.cfg.state_dir) as st:
             self.assertEqual(st.restart_request["services"], ["sshd"])
             self.assertNotIn("services", st.issues)
+
+    def test_restart_refused_while_check_applies(self):
+        self.offer("postfix")
+        with state.locked(self.bot.cfg.state_dir) as st:
+            st.applying = state.holder()
+        with mock.patch.object(restarts, "start") as start:
+            self.press("restart:postfix")
+        start.assert_not_called()
+        self.assertIn("Prüflauf", self.tg.answered[-1])
+        with state.locked(self.bot.cfg.state_dir) as st:
+            self.assertEqual(st.restart_request, {})
+
+    def test_restart_refused_while_other_process_applies(self):
+        # Reservierung eines anderen lebenden Prozesses (direkter CLI-Prüflauf, kein systemd-Dienst)
+        self.offer("postfix")
+        with state.locked(self.bot.cfg.state_dir) as st:
+            st.applying = {**state.holder(), "pid": os.getppid()}
+        with mock.patch.object(restarts, "start") as start:
+            self.press("restart:postfix")
+        start.assert_not_called()
+        answer = self.bot.cmd_mode(["observe"], addressed=True)
+        self.assertIn("läuft noch zu Ende", answer.text)
+
+    def test_check_reserving_after_precheck_wins(self):
+        # Der Timer startet nach der Vorprüfung; während zypper ps läuft, reserviert er das Einspielen
+        self.offer("postfix")
+
+        def check_reserves():
+            with state.locked(self.bot.cfg.state_dir) as st:
+                st.applying = state.holder()
+            return ["postfix"]
+        self.found.side_effect = check_reserves
+        with mock.patch.object(restarts, "start") as start:
+            self.press("restart:postfix")
+        start.assert_not_called()
+        with state.locked(self.bot.cfg.state_dir) as st:
+            self.assertEqual(st.restart_request, {})
+            self.assertIn("services", st.issues)  # der Punkt bleibt offen
+
+    def test_stale_reservation_does_not_block_restart(self):
+        self.offer("postfix")
+        with state.locked(self.bot.cfg.state_dir) as st:
+            st.applying = {**state.holder(), "boot": "vor-dem-reboot"}
+        with mock.patch.object(restarts, "start", return_value={}) as start:
+            self.press("restart:postfix")
+        start.assert_called_once_with(["postfix"])
+
+    def test_restart_reserved_before_message_is_shown(self):
+        self.offer("postfix")
+        seen = []
+        original = self.bot._own
+
+        def own(*args, **kwargs):
+            with state.locked(self.bot.cfg.state_dir) as st:
+                seen.append(st.restart_request.get("services"))
+            return original(*args, **kwargs)
+        with mock.patch.object(self.bot, "_own", side_effect=own), \
+                mock.patch.object(restarts, "start", return_value={}):
+            self.press("restart:postfix")
+        self.assertEqual(seen, [["postfix"]])
+        with state.locked(self.bot.cfg.state_dir) as st:
+            self.assertEqual(st.restart_request["message_id"], 5)
+
+    def test_bot_restart_keeps_restart_reservation(self):
+        self.offer("twguard-bot")
+        with mock.patch.object(restarts, "start", return_value={}):
+            self.press("restart:twguard-bot")
+        with mock.patch.object(self.bot, "_set_menu"):
+            Bot(self.bot.cfg, tg=self.tg, me=ME).startup()
+        with state.locked(self.bot.cfg.state_dir) as st:
+            self.assertEqual(st.restart_request["services"], ["twguard-bot"])
 
     def all_button(self, *names):
         return f"restart:*:{restarts.digest(list(names))}"

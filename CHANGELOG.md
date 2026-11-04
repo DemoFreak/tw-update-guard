@@ -4,6 +4,22 @@ Published versions of tw-update-guard. Versions in between were development step
 published version. **Upgrade** notes name what you may have to change by hand; `twguard config-diff` shows which
 values in your `config.toml` differ from the defaults.
 
+## 0.9.4 – 2026-11-04
+
+- Removing a package from `watch` now always needs approval, even if it also matches `routine_removals`
+  (e.g. `php8-lang` with `php8*` and `*-lang`). A newer version of the same package replacing the old one stays
+  routine
+- `/mode observe` also stops a check that is already running, as long as it has not started installing; the
+  mode is read again right before installing. If an install is already running, `/mode` says it will finish
+- Installing and restarting services exclude each other: an install (timer, `/check`, approval) waits up to
+  20 minutes for a running service restart and otherwise installs nothing (an approval stays valid); the restart
+  button is refused while twguard is installing, also if the check got there first. A second check that reaches
+  the install step while another one installs installs nothing and leaves the other run's lock alone
+- The message shown while a self-update runs no longer promises a total deadline: twguard waits up to
+  90 seconds for the new bot after tests and installation
+- Versions are shown as "v0.9.3 (1a658c84)" instead of a 12-digit commit hash: `/version`, `twguard --version`,
+  the update offer (now with the target version), the waiting message and the update results
+
 ## 0.9.3 – 2026-11-03
 
 - The message shown while a self-update runs says that the bot does not answer meanwhile and that the original

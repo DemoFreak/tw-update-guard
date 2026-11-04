@@ -12,6 +12,7 @@ from __future__ import annotations
 import logging
 import os
 import pwd
+import re
 import shutil
 import subprocess
 import sys
@@ -20,7 +21,7 @@ from dataclasses import dataclass
 from html import escape
 from pathlib import Path
 
-from . import COMMIT, messages, state
+from . import COMMIT, __version__, messages, state
 from .i18n import tr
 from .config import Config, Update
 from .notify import clip, use_language
@@ -35,6 +36,8 @@ PREVIOUS = Path("/usr/local/sbin/twguard.prev")
 # install.sh ersetzt auch die Units; eine kaputte neue Unit hielte sonst die alte Version auf
 UNIT_DIR = Path("/etc/systemd/system")
 UNITS = ("twguard-check.service", "twguard-check.timer", "twguard-bot.service")
+# Versionszeile in src/twguard/__init__.py eines anderen Commits
+VERSION_LINE = re.compile(r'^__version__ = "([^"]+)"', re.M)
 # So lange darf der neue Bot zum Starten brauchen, bevor die alte Version zurückkommt
 START_TIMEOUT = 90
 # Ein Update, das so lange keine Rückmeldung gibt, gilt als hängengeblieben
@@ -50,6 +53,7 @@ class Pending:
     head: str
     target: str
     commits: list[str]
+    version: str = ""  # Version des Ziel-Commits, leer wenn nicht lesbar
 
 
 def _env() -> dict[str, str]:
@@ -68,6 +72,27 @@ def _git(repo: str, *args: str, timeout: int = 120) -> str:
     if p.returncode:
         raise UpdateError(f"git {args[0]}: {(p.stderr or p.stdout).strip()}")
     return p.stdout.strip()
+
+
+def label(commit: str, version: str = "") -> str:
+    """Stand für Menschen: „v0.9.3 (1a658c84)“; der Hash auf 8 Stellen, ein Zusatz wie „+lokal“ bleibt."""
+    head, plus, extra = commit.partition("+")
+    short = head[:8] + plus + extra
+    return f"v{version} ({short})" if version else short
+
+
+def running() -> str:
+    """Stand dieses Programms."""
+    return label(COMMIT, __version__)
+
+
+def version_of(repo: str, commit: str) -> str:
+    """Version eines Commits der Arbeitskopie, leer wenn nicht lesbar."""
+    try:
+        match = VERSION_LINE.search(_git(repo, "show", f"{commit}:src/twguard/__init__.py", timeout=30))
+    except UpdateError:
+        return ""
+    return match.group(1) if match else ""
 
 
 def _is_ancestor(repo: str, older: str, newer: str) -> bool:
@@ -89,7 +114,7 @@ def check_remote(upd: Update) -> Pending:
     if not _is_ancestor(upd.repo, head, target):
         raise UpdateError(tr("{repo} ist von origin/{branch} abgewichen, bitte per SSH klären.", repo=upd.repo, branch=upd.branch))
     commits = _git(upd.repo, "log", "--oneline", "--no-decorate", f"{head}..{target}").splitlines()
-    return Pending(head, target, commits)
+    return Pending(head, target, commits, version_of(upd.repo, target))
 
 
 def start(commit: str) -> str:
@@ -145,11 +170,12 @@ def command(cfg: Config, commit: str = "") -> int:
         print(e, file=sys.stderr)
         return 2
     if not commit and not pending.commits:
-        print(tr("twguard ist aktuell ({commit}).", commit=COMMIT))
+        print(tr("twguard ist aktuell ({commit}).", commit=running()))
         return 0
-    print(tr("Aktualisiere auf {commit} …", commit=target[:12]))
+    shown = label(target, version_of(cfg.update.repo, target))
+    print(tr("Aktualisiere auf {commit} …", commit=shown))
     rc = self_update(cfg, target)
-    print(tr("twguard läuft jetzt mit {commit}.", commit=target[:12]) if rc == 0
+    print(tr("twguard läuft jetzt mit {commit}.", commit=shown) if rc == 0
           else tr("Update fehlgeschlagen, siehe die Meldung in Telegram und oben."))
     return rc
 
@@ -180,6 +206,8 @@ def self_update(cfg: Config, commit: str) -> int:
         if not repo:
             raise UpdateError(tr("[update] repo fehlt in der Konfiguration."))
         old = _git(repo, "rev-parse", "HEAD")
+        # Vor dem Einspielen lesen: nach dem Zurückrollen fehlt die Datei in der Arbeitskopie
+        shown = escape(label(commit, version_of(repo, commit)))
     except UpdateError as e:
         report(tr("❌ <b>{host}</b>: Update abgebrochen.\n<pre>{error}</pre>", host=host, error=escape(clip(str(e), 2500))))
         return 1
@@ -200,7 +228,7 @@ def self_update(cfg: Config, commit: str) -> int:
         log.error("%s", e)
         problems = _rollback(cfg, repo, old, installed)
         report(tr("❌ <b>{host}</b>: Update auf {commit} fehlgeschlagen, {result}\n<pre>{error}</pre>", host=host,
-                  commit=escape(commit[:12]), result=_rollback_result(problems), error=escape(clip(str(e), 2500))))
+                  commit=shown, result=_rollback_result(problems), error=escape(clip(str(e), 2500))))
         return 1
 
     deadline = time.time() + START_TIMEOUT
@@ -212,7 +240,7 @@ def self_update(cfg: Config, commit: str) -> int:
     log.error(tr("neuer Bot hat sich nicht gemeldet, spiele alte Version zurück"))
     problems = _rollback(cfg, repo, old, installed)
     report(tr("❌ <b>{host}</b>: Der Bot mit {commit} ist nicht gestartet, {result} Bitte journalctl -u twguard-bot ansehen.",
-              host=host, commit=escape(commit[:12]), result=_rollback_result(problems)))
+              host=host, commit=shown, result=_rollback_result(problems)))
     return 1
 
 
@@ -268,10 +296,10 @@ def startup_report(cfg: Config, st: state.State, now: float | None = None) -> tu
     host = escape(cfg.hostname)
     if started_with(request.get("commit", ""), COMMIT):
         st.update_request = {}
-        return tr("✅ <b>{host}</b>: twguard läuft jetzt mit {commit}.", host=host, commit=escape(COMMIT)), request
+        return tr("✅ <b>{host}</b>: twguard läuft jetzt mit {commit}.", host=host, commit=escape(running())), request
     if (now or time.time()) - request.get("at", 0) > STUCK_AFTER:
         st.update_request = {}
         return tr("⚠️ <b>{host}</b>: Vom Update auf {commit} kam keine Rückmeldung. Läuft weiter mit {running}; "
-                  "siehe journalctl -u {unit}.", host=host, commit=escape(request.get("commit", "")[:12]),
-                  running=escape(COMMIT), unit=UNIT), request
+                  "siehe journalctl -u {unit}.", host=host, commit=escape(label(request.get("commit", ""))),
+                  running=escape(running()), unit=UNIT), request
     return None

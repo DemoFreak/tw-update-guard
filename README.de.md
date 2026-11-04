@@ -122,7 +122,7 @@ journalctl -u twguard-bot | grep 'Fehler in einer Stunde'   # mehr Abruf- und Se
 - Ist der Server ganz aus oder ohne Netz, schweigt auch der Bot. Dafür braucht es eine Überwachung von außen (z. B. Uptime Kuma).
 - Solver-Konflikte lassen sich nicht über Telegram lösen.
 - Schaltflächen gelten für den Plan, den sie zeigen. Ein getipptes `/approve` gibt den zuletzt gezeigten Plan frei, auch als Antwort auf eine ältere Meldung.
-- Paketvorgänge außerhalb von twguard (z. B. `zypper` per SSH) stimmt twguard nicht ab. Dienstneustarts sperrt es nur während des eigenen Prüflaufs; Änderungen zwischen Prüfung und Einspielen werden hinterher gemeldet, nicht verhindert.
+- Paketvorgänge außerhalb von twguard (z. B. `zypper` per SSH) stimmt twguard nicht ab. Eigenes Einspielen und Dienstneustarts schließen sich gegenseitig aus (das Einspielen wartet auf einen laufenden Neustart, der Neustart-Knopf ist während eines Prüflaufs gesperrt); Änderungen zwischen Prüfung und Einspielen werden hinterher gemeldet, nicht verhindert.
 - Werte in der `config.toml` gehen immer vor, auch vor besseren Vorgaben einer späteren Version (siehe die Upgrade-Hinweise in [CHANGELOG.md](CHANGELOG.md) und `twguard config-diff`).
 - Dienste mit alten Bibliotheken startet twguard nie von selbst neu, auch nicht im Modus `auto`: nur auf Knopfdruck, und Dienste aus `[services] exclude` (D-Bus, `systemd-*`, Getty, Display-Manager, Netzwerk u. a.) werden gar nicht angeboten.
 

@@ -11,7 +11,7 @@ import time
 from html import escape
 from pathlib import Path
 
-from . import COMMIT, __version__, config, state
+from . import config, ota, state
 from .i18n import set_language, tr, trn
 from .notify import fmt_age, title
 from .rules import classify, describe
@@ -134,7 +134,7 @@ def main(argv: list[str] | None = None) -> int:
     )
     p.add_argument("--config", help=tr("Konfigurationsdatei (Standard: {path})", path=config.DEFAULT_PATH))
     p.add_argument("-v", "--verbose", action="store_true")
-    p.add_argument("--version", action="version", version=f"{__version__} ({COMMIT})")
+    p.add_argument("--version", action="version", version=ota.running())
     sub = p.add_subparsers(dest="command", required=True)
     c = sub.add_parser("check", help=tr("Repos auffrischen, einstufen, Routine-Updates einspielen (Timer)"))
     c.add_argument("--dry-run", action="store_true", help=tr("nur einstufen und ausgeben; nichts einspielen, nichts senden"))
