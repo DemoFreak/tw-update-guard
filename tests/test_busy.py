@@ -128,3 +128,33 @@ class StateMigrationTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class SeenTest(unittest.TestCase):
+    """Die Anzeige fragt dieselbe Tabelle, aber nach dem beobachteten Stand und ohne Abfragen."""
+
+    def test_seen_queries_nothing(self):
+        st = state.State()
+        st.zypp_holder = "purge-kernels.service (zypper, PID 707)"
+        st.shutdown = {"state": "planned", "mode": "reboot", "at": 0.0}
+        st.activity = {"check": {"phase": "queued", "at": time.time()}}
+        with mock.patch("subprocess.run") as run, mock.patch.object(zypper, "lock_holder") as holder:
+            kinds = {kind for kind, _ in busy.blockers("restart", st, seen=True)}
+        run.assert_not_called()
+        holder.assert_not_called()
+        self.assertEqual(kinds, {busy.SHUTDOWN, busy.ZYPP, busy.CHECK})
+
+    def test_allowed_follows_blockers(self):
+        st = state.State()
+        st.restart_request = {"at": time.time(), "services": ["postfix"]}
+        self.assertFalse(busy.allowed("reboot", st))
+        self.assertFalse(busy.allowed("restart:sshd", st))
+        self.assertFalse(busy.allowed("update:abc", st))
+        self.assertTrue(busy.allowed("approve:abc", st))  # Freigeben ändert nichts, das Einspielen wartet
+        self.assertTrue(busy.allowed("check", st))
+        self.assertTrue(busy.allowed("later:24", st))
+        self.assertTrue(busy.allowed("cancel", st))
+
+    def test_every_button_action_is_in_the_table(self):
+        for action in busy.BUTTON_ACTIONS.values():
+            self.assertIn(action, busy.BLOCKERS)

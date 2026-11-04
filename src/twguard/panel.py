@@ -196,7 +196,9 @@ def _buttons(st: State) -> Buttons:
         general.append(("📋 Details", "details"))
     if st.issues:
         general.append((tr("⏰ 1 Tag später"), "later:24"))
-    return [*rows, general]
+    # Was der Bot gerade abweisen würde, gar nicht erst anbieten; es kommt wieder, sobald es frei ist
+    shown = ([button for button in row if busy.allowed(button[1], st)] for row in [*rows, general])
+    return [row for row in shown if row]
 
 
 def _head(host: str, st: State, now: float, briefing: bool) -> str:

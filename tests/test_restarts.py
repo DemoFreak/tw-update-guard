@@ -204,3 +204,23 @@ class SystemctlTest(unittest.TestCase):
             self.assertEqual(restarts.states(["a", "b"]), {"a": "active", "b": "failed"})
         with mock.patch.object(restarts.subprocess, "run", return_value=done("")):
             self.assertEqual(restarts.states(["a"]), {"a": "unknown"})
+
+    def test_young(self):
+        # Monotone Zeit 1000 s; a ist seit 2 s aktiv, b seit 60 s (systemd trennt die Werte mit Leerzeilen)
+        with mock.patch.object(restarts.time, "monotonic", return_value=1000.0), \
+                mock.patch.object(restarts.subprocess, "run", return_value=done("998000000\n\n940000000\n")) as run:
+            self.assertEqual(restarts.young(["a", "b"]), ["a"])
+        self.assertEqual(run.call_args.args[0], ["systemctl", "show", "--property=ActiveEnterTimestampMonotonic",
+                                                  "--value", "--", "a", "b"])
+
+    def test_young_unknown(self):
+        with mock.patch.object(restarts.subprocess, "run", return_value=done("123\n")):
+            self.assertIsNone(restarts.young(["a", "b"]))
+        # Kein Zahlwert ist keine Auskunft, nicht „lange aktiv“
+        with mock.patch.object(restarts.subprocess, "run", return_value=done("123\n[not set]\n")):
+            self.assertIsNone(restarts.young(["a", "b"]))
+        with mock.patch.object(restarts.subprocess, "run", side_effect=OSError("kaputt")):
+            self.assertIsNone(restarts.young(["a"]))
+        with mock.patch.object(restarts.subprocess, "run") as run:
+            self.assertEqual(restarts.young([]), [])
+        run.assert_not_called()

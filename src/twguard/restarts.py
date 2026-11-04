@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import hashlib
 import subprocess
+import time
 from dataclasses import asdict, dataclass
 from fnmatch import fnmatchcase
 
@@ -13,6 +14,8 @@ from .i18n import tr
 from .state import State
 
 SYSTEMCTL_TIMEOUT = 60
+# So lange muss ein neu gestarteter Dienst aktiv sein, bevor er als erfolgreich gilt
+SETTLE_SECONDS = 10
 BOT_SERVICE = "twguard-bot"
 
 
@@ -140,3 +143,23 @@ def states(names: list[str]) -> dict[str, str]:
     if len(lines) != len(names):
         return dict.fromkeys(names, "unknown")
     return dict(zip(names, lines))
+
+
+def young(names: list[str], seconds: float = SETTLE_SECONDS) -> list[str] | None:
+    """Die Dienste, die erst seit weniger als `seconds` aktiv sind; `None`, wenn systemd keine Auskunft gibt.
+
+    Bei `Type=simple` ist der Startauftrag erledigt, sobald der Prozess erzeugt ist. Scheitert das Programm
+    selbst (z. B. fehlende Datei, 203/EXEC), steht der Dienst einen Augenblick lang trotzdem auf „active“.
+    """
+    if not names:
+        return []
+    try:
+        p = _systemctl("show", "--property=ActiveEnterTimestampMonotonic", "--value", "--", *names)
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    values = p.stdout.split()
+    if p.returncode or len(values) != len(names) or not all(value.isdigit() for value in values):
+        return None
+    # systemd zählt wie time.monotonic() in CLOCK_MONOTONIC, aber in Mikrosekunden
+    now = time.monotonic() * 1_000_000
+    return [name for name, value in zip(names, values) if now - int(value) < seconds * 1_000_000]

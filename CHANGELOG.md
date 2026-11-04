@@ -4,6 +4,27 @@ Published versions of tw-update-guard. Versions in between were development step
 published version. **Upgrade** notes name what you may have to change by hand; `twguard config-diff` shows which
 values in your `config.toml` differ from the defaults.
 
+## 0.10.1 – 2026-11-04
+
+- A service whose program fails right after starting (e.g. its executable is missing, systemd `203/EXEC`) was
+  reported as restarted: for a simple service systemd finishes the start job as soon as the process exists. A
+  restarted service now has to stay active for 10 seconds before it counts as a success; otherwise the result
+  names it as failed, with sound. This also holds when systemd finishes the job only after the 15-minute limit.
+  A service that does not reach these 10 seconds within half a minute (restart loop) or whose start time systemd
+  does not report is named as "result not confirmed", with sound, never as restarted
+- Package changes made outside twguard (e.g. `zypper dup` over SSH) were not noticed on installations whose rpm
+  database uses the ndb format (`Packages.db`, the default on fresh Tumbleweed installations); only
+  `rpmdb.sqlite` was watched. Both are watched now
+- Buttons whose action would be refused right now (e.g. reboot while services restart, service restarts while
+  the package management is busy or a reboot is scheduled) are no longer shown; they come back when the action
+  is possible again. The rule is the same table that refuses a pressed button, so both always agree
+- A button pressed while Telegram was unreachable was answered "outdated" afterwards, because the bot sent a
+  new state message before it fetched the press. After a failed fetch the bot now reads first and sends then
+  (at most 5 minutes, in case only fetching is broken). Several presses fetched at once all count on the message
+  they were made on, even when the first one already brought a new state message
+
+**Upgrade:** none.
+
 ## 0.10.0 – 2026-11-04
 
 - **One state message per server.** Everything that is true right now (open issues with their buttons, a running

@@ -77,6 +77,10 @@ EN = {
     "nach dem Neustart nicht aktiv: {services}": "not active after the restart: {services}",
     "Ergebnis des Neustarts unbekannt, systemd gab keine Auskunft: {services}":
         "restart result unknown, systemd gave no answer: {services}",
+    "aktiv, aber nicht nachweislich {seconds} s am Stück (Neustartschleife oder Startzeit unbekannt), "
+    "Ergebnis nicht bestätigt: {services}":
+        "active, but not shown to have run {seconds} s in a row (restart loop or start time unknown), "
+        "result not confirmed: {services}",
     "Neustart nach {minutes} Minuten nicht abgeschlossen, systemd arbeitet noch daran: {services}. "
     "Das Ergebnis folgt.":
         "restart not finished after {minutes} minutes, systemd is still working on it: {services}. "

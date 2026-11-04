@@ -27,7 +27,8 @@ from .telegram import Buttons, Telegram, TelegramError
 log = logging.getLogger(__name__)
 
 CHECK_UNIT = busy.CHECK_UNIT
-RPMDB_PATHS = (Path("/usr/lib/sysimage/rpm/rpmdb.sqlite"), Path("/var/lib/rpm/rpmdb.sqlite"))
+# Die rpm-Datenbank je nach Format: sqlite (ältere Installationen) oder ndb (Tumbleweed-Vorgabe, Packages.db)
+RPMDB_PATHS = tuple(Path(d, f) for f in ("rpmdb.sqlite", "Packages.db") for d in ("/usr/lib/sysimage/rpm", "/var/lib/rpm"))
 # Ältere Befehle (z. B. nach Ausfall oder Neustart) werden nicht nachgeholt
 MAX_COMMAND_AGE = 600
 TICK_SECONDS = 60
@@ -49,8 +50,12 @@ LEGACY_TOPICS = ("status", "briefing", "reboot", "observed", "update")
 ANYWHERE = ("status", "file", "dismiss")
 # So lange wird höchstens auf das Ende eingereihter Dienst-Neustarts gewartet
 RESTART_TIMEOUT = 900
+# Ein gerade gestarteter Dienst wird so viele Mindestlaufzeiten lang abgewartet (restarts.young)
+SETTLE_ROUNDS = 3
 # Nach einem Fehler bei getUpdates: erst kurz, dann länger warten
 RETRY_SECONDS = (2, 5, 15, 30)
+# Nach einem gescheiterten Abruf erst lesen, dann senden; so lange höchstens, falls nur das Abrufen gestört ist
+UNREAD_MAX = 300
 # Briefing wird nachgeholt, wenn der Bot zur Uhrzeit nicht lief, aber nur in diesem Zeitfenster
 BRIEFING_WINDOW_MINUTES = 6 * 60
 # Lebensdauer kurzlebiger Antworten in Sekunden
@@ -145,6 +150,10 @@ class Bot:
         self.tg = tg or Telegram(cfg.token, cfg.chat_id, cfg.max_errors_per_hour)
         self.me = me
         self.offset = 0
+        self.fetch_failed_since = 0.0
+        self.failures = 0
+        # Die Zustandsnachricht, die beim Abholen des laufenden Abrufs registriert war (siehe _on_panel)
+        self.fetched_panel: dict = {}
         self.last_tick = 0.0
         self.last_reboot_check = 0.0
         self.delete_warned = False
@@ -182,24 +191,48 @@ class Bot:
                 time.sleep(30)
         log.info(tr("angemeldet als @%s"), self.me["username"])
         self.startup()
-        failures = 0
         while True:
-            # Kurzes Long-Polling (10 s): Antworten, die unterwegs verloren gehen, kosten so wenig Zeit,
-            # und was Prüflauf oder Update in den Zustand schreiben, erscheint nach höchstens 10 s
-            try:
-                updates = self.tg.get_updates(self.offset)
-                failures = 0
-            except TelegramError as e:
-                log.debug("getUpdates: %s", e)
-                time.sleep(RETRY_SECONDS[min(failures, len(RETRY_SECONDS) - 1)])
-                failures += 1
-                updates = []
-            for update in updates:
-                self.process(update)
+            self.handle_batch(self.fetch())
             self.watch_restart()
             if time.time() - self.last_tick >= TICK_SECONDS:
                 self.tick()
             self.pump()
+
+    def fetch(self) -> list[dict]:
+        """Kurzes Long-Polling (10 s): Antworten, die unterwegs verloren gehen, kosten so wenig Zeit,
+        und was Prüflauf oder Update in den Zustand schreiben, erscheint nach höchstens 10 s."""
+        try:
+            updates = self.tg.get_updates(self.offset)
+        except TelegramError as e:
+            log.debug("getUpdates: %s", e)
+            self.fetch_failed_since = self.fetch_failed_since or time.time()
+            time.sleep(RETRY_SECONDS[min(self.failures, len(RETRY_SECONDS) - 1)])
+            self.failures += 1
+            return []
+        self.failures, self.fetch_failed_since = 0, 0.0
+        return updates
+
+    def handle_batch(self, updates: list[dict]) -> None:
+        """Alle Updates eines Abrufs. Ihre Knopfdrücke geschahen vor dem Abruf, also auf der Nachricht, die
+        da Zustandsnachricht war; das gilt auch, wenn ein früherer Druck desselben Abrufs sie schon ersetzt hat."""
+        if not updates:
+            return
+        with state.locked(self.cfg.state_dir) as st:
+            self.fetched_panel = dict(st.messages.get(panel.TOPIC) or {})
+        try:
+            for update in updates:
+                self.process(update)
+        finally:
+            self.fetched_panel = {}
+
+    def _unread(self) -> bool:
+        """Der letzte Abruf scheiterte: Knopfdrücke aus der Störung können noch ausstehen.
+
+        Sie gelten der Zustandsnachricht, auf der sie gemacht wurden; eine vorher neu gesendete machte sie
+        „veraltet“. Ist nur das Abrufen gestört (z. B. 409, ein zweiter Bot mit demselben Token), sendet
+        der Bot nach UNREAD_MAX trotzdem wieder.
+        """
+        return bool(self.fetch_failed_since) and time.time() - self.fetch_failed_since < UNREAD_MAX
 
     def startup(self) -> None:
         self._set_menu()
@@ -347,7 +380,7 @@ class Bot:
         ergibt einen anderen Digest und wird beim nächsten Aufruf nachgezogen.
         """
         now = now or time.time()
-        if self._paused():
+        if self._paused() or self._unread():
             return False
         if self.send_events(now):
             resend = True
@@ -571,20 +604,41 @@ class Bot:
         if jobs is None and not timed_out:
             return
         current = restarts.states(waiting) if waiting else {}
+        active = [name for name, s in current.items() if s == "active"]
+        fresh = restarts.young(active)
+        if fresh is None and not timed_out:
+            return  # Startzeit unbekannt: weiter nachfragen, an der Grenze melden, was ist
+        if fresh and self._settling():
+            return  # Gerade erst gestartet: Scheitert das Programm gleich danach, wäre „neu gestartet“ falsch
+        # Am Ende des Wartens: Wer die Mindestlaufzeit nicht nachweislich erreicht hat, gilt nicht als neu gestartet
+        unconfirmed = active if fresh is None else fresh
         found = restarts.survey()
         # Unbekannt ist kein Ergebnis: weiter nachfragen, erst an der Grenze ehrlich melden
         if (found is None or "unknown" in current.values()) and not timed_out:
             return
         # Ohne Auskunft über die Aufträge kann auch ein aktiver Dienst noch auf seinen Neustart warten
         unsettled = waiting if jobs is None else [name for name, s in current.items() if s == "unknown"]
-        current = {name: s for name, s in current.items() if name not in unsettled}
-        text, loud = self.restart_result(current, found, errors, unsettled)
+        unconfirmed = [name for name in unconfirmed if name not in unsettled]
+        current = {name: s for name, s in current.items() if name not in unsettled and name not in unconfirmed}
+        text, loud = self.restart_result(current, found, errors, unsettled, unconfirmed)
         with state.locked(self.cfg.state_dir) as st:
             st.restart_request = {}
             if found is not None:
                 restarts.note(st, found, self.cfg.services.exclude)
             panel.event(st, text, loud=loud)
         self.pump()
+
+    def _settling(self) -> bool:
+        """Junge Dienste abwarten, auch nach RESTART_TIMEOUT (ein Auftrag kann spät enden).
+
+        Höchstens SETTLE_ROUNDS × SETTLE_SECONDS ab dem Ende der Aufträge, im Auftrag gespeichert (übersteht
+        den Neustart des Bots): Ein Dienst in einer Neustartschleife ist bei jeder Abfrage jung.
+        """
+        with state.locked(self.cfg.state_dir) as st:
+            if not st.restart_request:
+                return False
+            since = st.restart_request.setdefault("settling_since", time.time())
+        return time.time() - since < SETTLE_ROUNDS * restarts.SETTLE_SECONDS
 
     def _report_overdue(self, overdue: list[str]) -> None:
         """Einmal warnen und weiter beobachten: Der Auftrag besteht noch und kann auch noch scheitern."""
@@ -598,7 +652,7 @@ class Bot:
         self.pump()
 
     def restart_result(self, current: dict[str, str], found: restarts.Survey | None, errors: dict[str, str],
-                       unsettled: list[str] = ()) -> tuple[str, bool]:
+                       unsettled: list[str] = (), unconfirmed: list[str] = ()) -> tuple[str, bool]:
         """Text des Ergebnisses und ob es mit Ton kommen muss."""
         running = [name for name, s in current.items() if s == "active"]
         stopped = [f"{name} ({s})" for name, s in current.items() if s != "active"]
@@ -632,7 +686,11 @@ class Bot:
         if unsettled:
             lines.append(line("⚠️", tr("Ergebnis des Neustarts unbekannt, systemd gab keine Auskunft: {services}",
                                        services=join(list(unsettled)))))
-        return "\n".join(lines), bool(stopped or rejected or unsettled) or found is None
+        if unconfirmed:
+            lines.append(line("⚠️", tr("aktiv, aber nicht nachweislich {seconds} s am Stück (Neustartschleife oder "
+                                       "Startzeit unbekannt), Ergebnis nicht bestätigt: {services}",
+                                       seconds=restarts.SETTLE_SECONDS, services=join(list(unconfirmed)))))
+        return "\n".join(lines), bool(stopped or rejected or unsettled or unconfirmed) or found is None
 
     def start_check(self, requested: bool = False) -> None:
         """Prüflauf anstoßen; mit `requested` kommt sein Ergebnis als Ereignis, auch wenn nichts zu tun war."""
@@ -1027,6 +1085,9 @@ class Bot:
         handler(cq, pressed, arg)
 
     def _on_panel(self, pressed: dict) -> bool:
+        """Gedrückt auf der Zustandsnachricht, die beim Abholen des Drucks galt (oder auf der jetzigen)."""
+        if self.fetched_panel and messages.same(self.fetched_panel, pressed):
+            return True
         with state.locked(self.cfg.state_dir) as st:
             return messages.same(st.messages.get(panel.TOPIC, {}), pressed)
 

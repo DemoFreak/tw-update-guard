@@ -42,6 +42,11 @@ BLOCKERS = {
     "update": (SHUTDOWN, UNKNOWN, APPLY, RESTART, UPDATE),
 }
 
+# Welche Aktion eine Schaltfläche auslöst, nach dem Anfang ihrer Callback-Daten; die übrigen (Details,
+# Aufschub, Abbrechen …) ändern nichts am System und bleiben immer
+BUTTON_ACTIONS = {"check": "check", "approve": "approve", "reboot": "reboot", "restart": "restart",
+                  "update": "update"}
+
 CHECK_UNIT = "twguard-check.service"
 # So lange gilt ein OTA-Auftrag als laufend; danach meldet der Bot ihn als hängen geblieben
 UPDATE_MAX_AGE = 900
@@ -121,11 +126,12 @@ def update_running(st: State) -> bool:
     return time.time() - request.get("at", 0) < UPDATE_MAX_AGE
 
 
-def blockers(action: str, st: State) -> list[tuple[str, str]]:
+def blockers(action: str, st: State, seen: bool = False) -> list[tuple[str, str]]:
     """Was `action` gerade abweist, je (Vorgang, Begründung); leer heißt frei.
 
     Fragt nur ab, was für die Aktion zählt (logind, Sperrdatei, systemctl). Wer danach reserviert, ruft
-    das unter `state.locked` auf und reserviert im selben Block.
+    das unter `state.locked` auf und reserviert im selben Block. Mit `seen` fragt es nichts ab, sondern
+    nimmt den zuletzt beobachteten Stand aus dem Zustand (für die Anzeige, siehe `allowed`).
     """
     found = []
     kinds = BLOCKERS[action]
@@ -133,12 +139,13 @@ def blockers(action: str, st: State) -> list[tuple[str, str]]:
         if state.alive(st.reboot_planning):
             found.append((SHUTDOWN, tr("Neustart wird gerade geplant")))
         else:
-            sd = shutdown()
-            note_shutdown(st, sd)
+            sd = Shutdown(**st.shutdown) if seen and st.shutdown else Shutdown("none") if seen else shutdown()
+            if not seen:
+                note_shutdown(st, sd)
             if sd.state == "planned" or (sd.state == "unknown" and UNKNOWN in kinds):
                 found.append((SHUTDOWN if sd.state == "planned" else UNKNOWN, planned_text(sd)))
     if ZYPP in kinds:
-        holder = zypper.lock_holder()
+        holder = st.zypp_holder if seen else zypper.lock_holder()
         if holder:
             found.append((ZYPP, tr("Paketverwaltung belegt durch {holder}", holder=holder)))
     if APPLY in kinds and state.alive(st.applying):
@@ -147,9 +154,19 @@ def blockers(action: str, st: State) -> list[tuple[str, str]]:
         found.append((RESTART, tr("Dienste werden gerade neu gestartet")))
     if UPDATE in kinds and update_running(st):
         found.append((UPDATE, tr("ein Update von twguard läuft")))
-    if CHECK in kinds and check_running():
+    if CHECK in kinds and (bool(st.activity.get("check")) if seen else check_running()):
         found.append((CHECK, tr("ein Prüflauf läuft")))
     return found
+
+
+def allowed(data: str, st: State) -> bool:
+    """Darf die Schaltfläche mit diesen Callback-Daten gerade angeboten werden? Nach dem beobachteten Stand.
+
+    Dieselbe Tabelle wie beim Druck: Was der Bot jetzt abweisen würde, zeigt die Zustandsnachricht nicht an.
+    Beim Druck fragt der Bot trotzdem noch einmal selbst nach (`refusal`), der Stand kann sich geändert haben.
+    """
+    action = BUTTON_ACTIONS.get(data.partition(":")[0])
+    return action is None or not blockers(action, st, seen=True)
 
 
 def refusal(action: str, st: State) -> str:

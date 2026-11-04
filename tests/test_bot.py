@@ -51,6 +51,8 @@ class BotTest(unittest.TestCase):
         self.found, self.lingering = mock.Mock(return_value=[]), {}
         mock.patch.object(restarts, "survey", side_effect=lambda: None if (names := self.found()) is None else
                           restarts.Survey(list(names), dict(self.lingering))).start()
+        # Neu gestartete Dienste gelten in den Tests als schon lange aktiv; einzelne Tests ersetzen den Wert
+        self.young = mock.patch.object(restarts, "young", return_value=[]).start()
         # Kein echtes zypper in den Tests (fehlt z. B. in der CI). None heißt „unbekannt“ und lässt einen
         # von Hand geöffneten Neustart-Punkt stehen; einzelne Tests ersetzen den Wert
         self.rebooting = mock.patch.object(zypper, "needs_rebooting", return_value=None).start()
@@ -375,6 +377,79 @@ class BotTest(unittest.TestCase):
         self.assertLessEqual(len(text), panel.TEXT_LIMIT)
         self.assertNotIn("<pre>", text)
         self.assertIn("a &lt; b", text)
+
+    def test_press_during_outage_counts_on_the_message_it_was_made_on(self):
+        # VM-Test: Während der Störung „Jetzt prüfen“ gedrückt; nach der Störung sendete der Bot zuerst eine
+        # neue Zustandsnachricht und wies den Druck danach als veraltet ab
+        self.bot.pump()
+        pressed_on = self.panel_id()
+        self.open_reboot()  # neuer Punkt während der Störung: verlangt eine neue Nachricht mit Ton
+        with mock.patch.object(self.bot.tg, "get_updates", create=True, side_effect=TelegramError("timed out")), \
+                mock.patch("time.sleep"):
+            self.assertEqual(self.bot.fetch(), [])
+        sent = len(self.tg.sent)
+        self.assertFalse(self.bot.pump())
+        self.assertEqual(len(self.tg.sent), sent)  # nichts gesendet, solange nichts gelesen ist
+        update = {"update_id": 5, "callback_query": {
+            "id": "cb1", "from": USER, "data": "check",
+            "message": {"message_id": pressed_on, "chat": GROUP, "date": int(time.time()), "text": "Meldung",
+                        "entities": [], "reply_markup": {}}}}
+        with mock.patch.object(self.bot.tg, "get_updates", create=True, return_value=[update]):
+            self.bot.handle_batch(self.bot.fetch())
+        self.start_check.assert_called_once()
+        self.assertNotIn("veraltet", " ".join(self.tg.answered))
+
+    def test_several_presses_and_events_after_outage(self):
+        # Mehrere Drücke aus der Störung in einem Abruf, dazu ein wartendes Ereignis: alle Drücke gelten
+        self.bot.pump()
+        pressed_on = self.panel_id()
+        self.open_reboot()
+        with state.locked(self.bot.cfg.state_dir) as st:
+            panel.event(st, "✅ <b>server1</b>: Ereignis aus der Störung")
+        with mock.patch.object(self.bot.tg, "get_updates", create=True, side_effect=TelegramError("timed out")), \
+                mock.patch("time.sleep"):
+            self.bot.fetch()
+        sent = len(self.tg.sent)
+        self.assertFalse(self.bot.pump())
+        self.assertEqual(len(self.tg.sent), sent)
+
+        def press(update_id, data):
+            return {"update_id": update_id, "callback_query": {
+                "id": f"cb{update_id}", "from": USER, "data": data,
+                "message": {"message_id": pressed_on, "chat": GROUP, "date": int(time.time()), "text": "Meldung",
+                            "entities": [], "reply_markup": {}}}}
+        with mock.patch.object(self.bot.tg, "get_updates", create=True,
+                               return_value=[press(5, "check"), press(6, "later:24")]):
+            self.bot.handle_batch(self.bot.fetch())
+        self.start_check.assert_called_once()
+        self.assertNotIn("veraltet", " ".join(self.tg.answered))
+        self.assertGreater(self.st().issues["reboot"].snoozed_until, time.time())
+        self.bot.pump()
+        self.assertIn("Ereignis aus der Störung", " ".join(self.tg.sent))
+        self.assertEqual(self.outbox(), [])
+
+    def test_press_on_message_replaced_before_fetch_stays_outdated(self):
+        # Nur die beim Abruf registrierte Nachricht gilt, nicht irgendeine frühere
+        self.bot.pump()
+        old = self.panel_id()
+        self.bot.pump(resend=True)
+        self.assertNotEqual(self.panel_id(), old)
+        update = {"update_id": 7, "callback_query": {
+            "id": "cb7", "from": USER, "data": "check",
+            "message": {"message_id": old, "chat": GROUP, "date": int(time.time()), "text": "Meldung",
+                        "entities": [], "reply_markup": {}}}}
+        self.bot.handle_batch([update])
+        self.start_check.assert_not_called()
+        self.assertIn("veraltet", self.tg.answered[-1])
+
+    def test_only_fetching_broken_sends_again_after_a_while(self):
+        # z. B. 409: ein zweiter Bot mit demselben Token holt die Updates ab, Senden geht weiter
+        self.bot.pump()
+        self.open_reboot()
+        self.bot.fetch_failed_since = time.time() - bot_module.UNREAD_MAX - 1
+        sent = len(self.tg.sent)
+        self.assertTrue(self.bot.pump())
+        self.assertGreater(len(self.tg.sent), sent)
 
     def test_too_many_requests_on_event_stops_the_cycle(self):
         # F24: nach 429 beim Ereignis kein weiterer Aufruf im selben Durchgang, das Ereignis bleibt
@@ -1020,20 +1095,54 @@ class BotTest(unittest.TestCase):
         self.assertEqual(st.restart_request["services"], ["sshd"])
         self.assertNotIn("services", st.issues)
 
-    def test_reboot_button_stays_while_services_restart(self):
-        # Beobachtung auf einem Server: Nach dem Dienst-Neustart war der Neustart-Knopf verschwunden
+    def test_reboot_button_hidden_while_services_restart_then_back(self):
+        # Beobachtung auf einem Server: Nach dem Dienst-Neustart war der Neustart-Knopf verschwunden.
+        # Während des Neustarts würde ein Druck abgewiesen, also kein Knopf; danach kommt er wieder.
         self.open_reboot()
         self.offer("postfix")
         with mock.patch.object(restarts, "start", return_value={}):
             self.press("restart:postfix")
         text, buttons = self.shown()
-        self.assertIn("reboot", actions(buttons))
+        self.assertNotIn("reboot", actions(buttons))
         self.assertIn("Dienste werden neu gestartet", text)
-        # Ein Druck jetzt sagt, warum es gerade nicht geht
+        self.assertIn("Neustart ausstehend", text)  # der Punkt selbst bleibt sichtbar
+        # Ein Druck auf einen noch stehenden Knopf sagt weiterhin, warum es gerade nicht geht
         with mock.patch("subprocess.run") as run:
             self.press("reboot")
         run.assert_not_called()
         self.assertIn("Dienste werden gerade neu gestartet", self.tg.answered[-1])
+        self.found.return_value = []
+        with mock.patch.object(restarts, "pending", return_value=[]), \
+                mock.patch.object(restarts, "states", return_value={"postfix": "active"}):
+            self.bot.watch_restart()
+        self.assertIn("reboot", actions(self.shown()[1]))
+
+    def test_buttons_hidden_by_the_same_table_as_refusals(self):
+        # Eine Regel für alle: was busy.BLOCKERS abweisen würde, bietet die Zustandsnachricht nicht an
+        self.open_reboot()
+        self.offer("postfix")
+        with state.locked(self.bot.cfg.state_dir) as st:
+            st.zypp_holder = "purge-kernels.service (zypper, PID 707)"
+        self.bot.pump()
+        shown = actions(self.shown()[1])
+        self.assertNotIn("reboot", shown)
+        self.assertFalse([a for a in shown if a.startswith("restart:")])
+        self.assertIn("check", shown)  # Prüfen wartet selbst auf die Paketverwaltung
+        with state.locked(self.bot.cfg.state_dir) as st:
+            st.zypp_holder = ""
+            st.shutdown = {"state": "planned", "mode": "reboot", "at": time.time() + 60}
+        self.bot.pump()
+        shown = actions(self.shown()[1])
+        self.assertIn("cancel", shown)
+        self.assertNotIn("check", shown)
+        self.assertFalse([a for a in shown if a.startswith("restart:")])
+        self.assertIn("later:24", shown)
+        with state.locked(self.bot.cfg.state_dir) as st:
+            st.shutdown = {}
+        self.bot.pump()
+        shown = actions(self.shown()[1])
+        self.assertIn("reboot", shown)
+        self.assertIn("restart:postfix", shown)
 
     def test_restart_refused_while_check_applies(self):
         self.offer("postfix")
@@ -1255,6 +1364,107 @@ class BotTest(unittest.TestCase):
                 mock.patch.object(restarts, "states", return_value={"sshd": "failed"}):
             self.bot.watch_restart()
         self.assertIn("sshd (failed)", self.tg.sent[0])
+        self.assertFalse(self.tg.silent[0])
+
+    def test_just_started_service_is_not_yet_success(self):
+        # Type=simple: Auftrag erledigt, das Programm scheitert erst Millisekunden später (203/EXEC)
+        self.running("sshd")
+        self.found.return_value = []
+        self.young.return_value = ["sshd"]
+        with mock.patch.object(restarts, "pending", return_value=[]), \
+                mock.patch.object(restarts, "states", return_value={"sshd": "active"}):
+            self.bot.watch_restart()
+        self.assertEqual(self.outbox(), [])
+        self.assertEqual(self.tg.sent, [])
+        self.assertTrue(self.st().restart_request)
+        self.young.return_value = []
+        with mock.patch.object(restarts, "pending", return_value=[]), \
+                mock.patch.object(restarts, "states", return_value={"sshd": "failed"}):
+            self.bot.watch_restart()
+        self.assertIn("sshd (failed)", self.tg.sent[0])
+        self.assertFalse(self.tg.silent[0])
+
+    def test_late_job_end_still_waits_for_young_service(self):
+        # F25 (Codex): Auftrag endet erst nach RESTART_TIMEOUT; auch dann kein sofortiger Erfolg
+        self.running("sshd")
+        with state.locked(self.bot.cfg.state_dir) as st:
+            st.restart_request["at"] -= bot_module.RESTART_TIMEOUT + 1
+            st.restart_request["overdue"] = True
+        self.found.return_value = []
+        self.young.return_value = ["sshd"]
+        with mock.patch.object(restarts, "pending", return_value=[]), \
+                mock.patch.object(restarts, "states", return_value={"sshd": "active"}):
+            self.bot.watch_restart()
+        self.assertEqual(self.outbox(), [])
+        self.assertEqual(self.tg.sent, [])
+        self.young.return_value = []
+        with mock.patch.object(restarts, "pending", return_value=[]), \
+                mock.patch.object(restarts, "states", return_value={"sshd": "failed"}):
+            self.bot.watch_restart()
+        self.assertIn("sshd (failed)", self.tg.sent[0])
+        self.assertFalse(self.tg.silent[0])
+
+    def test_late_job_end_stable_service_is_success(self):
+        self.running("sshd")
+        with state.locked(self.bot.cfg.state_dir) as st:
+            st.restart_request["at"] -= bot_module.RESTART_TIMEOUT + 1
+        self.found.return_value = []
+        self.young.return_value = ["sshd"]
+        with mock.patch.object(restarts, "pending", return_value=[]), \
+                mock.patch.object(restarts, "states", return_value={"sshd": "active"}):
+            self.bot.watch_restart()
+            self.assertEqual(self.tg.sent, [])
+            self.young.return_value = []
+            self.bot.watch_restart()
+        self.assertEqual(self.tg.sent[0], "✅ <b>server1</b>: neu gestartet: sshd")
+
+    def test_service_in_restart_loop_does_not_hold_result_forever(self):
+        # Ein Dienst in einer Neustartschleife ist bei jeder Abfrage jung: Nach drei Mindestlaufzeiten endet das
+        # Warten, aber er gilt nicht als neu gestartet; der stabile Dienst desselben Auftrags schon
+        self.running("postfix", "sshd")
+        self.found.return_value = []
+        self.young.return_value = ["sshd"]
+        with mock.patch.object(restarts, "pending", return_value=[]), \
+                mock.patch.object(restarts, "states", return_value={"postfix": "active", "sshd": "active"}):
+            self.bot.watch_restart()
+            self.assertEqual(self.tg.sent, [])
+            with state.locked(self.bot.cfg.state_dir) as st:
+                st.restart_request["settling_since"] -= bot_module.SETTLE_ROUNDS * restarts.SETTLE_SECONDS + 1
+            self.bot.watch_restart()
+        self.assertEqual(self.tg.sent[0].splitlines(), [
+            "✅ <b>server1</b>: neu gestartet: postfix",
+            "⚠️ <b>server1</b>: aktiv, aber nicht nachweislich 10 s am Stück (Neustartschleife oder Startzeit "
+            "unbekannt), Ergebnis nicht bestätigt: sshd"])
+        self.assertFalse(self.tg.silent[0])
+        self.assertEqual(self.st().restart_request, {})
+
+    def test_unknown_start_time_waits_then_reports(self):
+        # Ohne Startzeit ist die Mindestlaufzeit nicht nachgewiesen: an der Grenze melden, aber nicht als Erfolg
+        self.running("sshd")
+        self.found.return_value = []
+        self.young.return_value = None
+        with mock.patch.object(restarts, "pending", return_value=[]), \
+                mock.patch.object(restarts, "states", return_value={"sshd": "active"}):
+            self.bot.watch_restart()
+            self.assertEqual(self.tg.sent, [])
+            with state.locked(self.bot.cfg.state_dir) as st:
+                st.restart_request["at"] -= 1000
+            self.bot.watch_restart()
+        self.assertIn("Ergebnis nicht bestätigt: sshd", self.tg.sent[0])
+        self.assertNotIn("✅", self.tg.sent[0])
+        self.assertFalse(self.tg.silent[0])
+
+    def test_late_job_end_with_unknown_start_time_is_not_success(self):
+        self.running("sshd")
+        with state.locked(self.bot.cfg.state_dir) as st:
+            st.restart_request["at"] -= bot_module.RESTART_TIMEOUT + 1
+        self.found.return_value = []
+        self.young.return_value = None
+        with mock.patch.object(restarts, "pending", return_value=[]), \
+                mock.patch.object(restarts, "states", return_value={"sshd": "active"}):
+            self.bot.watch_restart()
+        self.assertNotIn("✅", self.tg.sent[0])
+        self.assertIn("Ergebnis nicht bestätigt: sshd", self.tg.sent[0])
         self.assertFalse(self.tg.silent[0])
 
     def test_result_still_old_is_offered_again(self):
@@ -1726,6 +1936,16 @@ class BotTest(unittest.TestCase):
                 mock.patch.object(self.bot, "check_reboot"), mock.patch.object(self.bot, "start_check") as start:
             self.bot.tick()
         start.assert_called_once()
+
+    def test_rpmdb_mtime_also_from_ndb(self):
+        # Frische Tumbleweed-Installationen haben nur Packages.db (ndb), kein rpmdb.sqlite
+        with tempfile.TemporaryDirectory() as tmp:
+            ndb = Path(tmp, "Packages.db")
+            ndb.write_text("")
+            os.utime(ndb, (5.0, 5.0))
+            with mock.patch("twguard.bot.RPMDB_PATHS", (Path(tmp, "rpmdb.sqlite"), ndb)):
+                self.assertEqual(Bot._rpmdb_mtime(), 5.0)
+        self.assertIn(Path("/usr/lib/sysimage/rpm/Packages.db"), bot_module.RPMDB_PATHS)
 
     # --- Umzug zur Supergruppe ---------------------------------------------
 
