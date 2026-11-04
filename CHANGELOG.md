@@ -4,6 +4,17 @@ Published versions of tw-update-guard. Versions in between were development step
 published version. **Upgrade** notes name what you may have to change by hand; `twguard config-diff` shows which
 values in your `config.toml` differ from the defaults.
 
+## 0.10.3 – 2026-11-04
+
+- The state message always names the mode in its last line, "automatic mode" as well as "observation mode";
+  before, automatic mode was shown nowhere
+- A service without a main process whose leftover process survives a restart (a wrapped init script with
+  `KillMode=process`, e.g. `vboxadd-service`, whose stop script does not end `VBoxService`) was offered for a
+  restart again and again. When all of its processes holding old files are older than the service's last start,
+  it is now shown as a hint about leftover processes, without a restart button
+
+**Upgrade:** none.
+
 ## 0.10.2 – 2026-11-04
 
 - While twguard's own check refreshed the repositories, the state message also said "Package management locked:

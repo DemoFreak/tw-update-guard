@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import hashlib
+import os
 import subprocess
 import time
 from dataclasses import asdict, dataclass
@@ -17,6 +18,8 @@ SYSTEMCTL_TIMEOUT = 60
 # So lange muss ein neu gestarteter Dienst aktiv sein, bevor er als erfolgreich gilt
 SETTLE_SECONDS = 10
 BOT_SERVICE = "twguard-bot"
+# So viel älter als der letzte Start des Dienstes muss ein Prozess sein, um als übrig geblieben zu gelten (µs)
+SURVIVOR_MARGIN = 2_000_000
 
 
 @dataclass(frozen=True)
@@ -40,22 +43,45 @@ def survey() -> Survey | None:
 
 
 def left_over(name: str, procs: list[zypper.Proc]) -> bool:
-    """Halten nur Prozesse neben dem Hauptprozess alte Dateien, die ein Neustart nicht beendet?
+    """Halten nur Prozesse alte Dateien, die ein Neustart nicht beendet?
 
     Bei KillMode=process (oder none) beendet systemd beim Neustart nur den Hauptprozess; was sonst im
     Cgroup des Dienstes läuft, bleibt (z. B. screen in einer SSH-Sitzung bei sshd, ein per Cron gestarteter
-    Server bei cron). Ist der Hauptprozess schon frisch, hilft ein weiterer Neustart nie. Ohne Auskunft
-    oder ohne Hauptprozess wird der Neustart weiter angeboten.
+    Server bei cron). Ist der Hauptprozess schon frisch, hilft ein weiterer Neustart nie. Ohne Hauptprozess
+    (eingebundene Init-Skripte mit RemainAfterExit) entscheidet das Stop-Skript; sind alle Prozesse älter als
+    der letzte Start des Dienstes, hat es sie schon einmal nicht beendet. Ohne Auskunft wird der Neustart
+    weiter angeboten.
     """
     try:
-        p = _systemctl("show", "-p", "MainPID", "-p", "KillMode", "--", name)
+        p = _systemctl("show", "-p", "MainPID", "-p", "KillMode", "-p", "InactiveExitTimestampMonotonic",
+                       "--", name)
     except (OSError, subprocess.TimeoutExpired):
         return False
     props = dict(line.partition("=")[::2] for line in p.stdout.splitlines())
     main = props.get("MainPID", "")
-    if p.returncode or not main.isdigit() or int(main) == 0:
+    if p.returncode or not main.isdigit() or props.get("KillMode") not in ("process", "none"):
         return False
-    return props.get("KillMode") in ("process", "none") and all(proc.pid != int(main) for proc in procs)
+    if int(main):
+        return all(proc.pid != int(main) for proc in procs)
+    started = props.get("InactiveExitTimestampMonotonic", "")
+    if not started.isdigit() or not int(started):
+        return False
+    ages = [_started(proc.pid) for proc in procs]
+    return all(age is not None and age < int(started) - SURVIVOR_MARGIN for age in ages)
+
+
+def _started(pid: int) -> int | None:
+    """Startzeit eines Prozesses in Mikrosekunden seit dem Boot; None, wenn nicht lesbar.
+
+    Der Kernel zählt sie mit der Ruhezeit, systemd ohne (CLOCK_MONOTONIC); nach einem Ruhezustand wirkt ein
+    Prozess dadurch jünger, und der Neustart wird wie bisher angeboten.
+    """
+    try:
+        with open(f"/proc/{pid}/stat", encoding="ascii", errors="replace") as f:
+            fields = f.read().rpartition(")")[2].split()
+        return int(fields[19]) * 1_000_000 // os.sysconf("SC_CLK_TCK")
+    except (OSError, ValueError, IndexError):
+        return None
 
 
 def digest(names: list[str]) -> str:

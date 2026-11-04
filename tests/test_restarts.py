@@ -1,4 +1,5 @@
 import subprocess
+import time
 import unittest
 from pathlib import Path
 from unittest import mock
@@ -68,6 +69,42 @@ class SurveyTest(unittest.TestCase):
     def test_without_main_pid_or_answer_restart_stays(self):
         found = self.run_survey({"sshd": "MainPID=0\nKillMode=process\n", "postfix": ""})
         self.assertEqual(found.lingering, {})
+
+    def run_sysv(self, started, procs_started):
+        """Eingebundenes Init-Skript (vboxadd-service): kein Hauptprozess, KillMode=process."""
+        procs = [zypper.Proc(664, "root", "VBoxService", "vboxadd-service")]
+        show = f"MainPID=0\nKillMode=process\nInactiveExitTimestampMonotonic={started}\n"
+        with mock.patch.object(zypper, "processes_needing_restart", return_value=procs), \
+                mock.patch.object(restarts, "_systemctl", return_value=done(show)), \
+                mock.patch.object(restarts, "_started", return_value=procs_started):
+            return restarts.survey()
+
+    def test_process_older_than_last_start_survived_restart(self):
+        found = self.run_sysv(80_000_000_000, 2_400_000_000)
+        self.assertEqual(list(found.lingering), ["vboxadd-service"])
+
+    def test_process_from_last_start_is_offered(self):
+        self.assertEqual(self.run_sysv(80_000_000_000, 80_000_500_000).lingering, {})
+
+    def test_without_start_times_restart_stays(self):
+        self.assertEqual(self.run_sysv(0, 2_400_000_000).lingering, {})
+        self.assertEqual(self.run_sysv("", 2_400_000_000).lingering, {})
+        self.assertEqual(self.run_sysv(80_000_000_000, None).lingering, {})
+
+    def test_sysv_with_control_group_restart_stays(self):
+        procs = [zypper.Proc(664, "root", "VBoxService", "vboxadd-service")]
+        show = "MainPID=0\nKillMode=control-group\nInactiveExitTimestampMonotonic=80000000000\n"
+        with mock.patch.object(zypper, "processes_needing_restart", return_value=procs), \
+                mock.patch.object(restarts, "_systemctl", return_value=done(show)), \
+                mock.patch.object(restarts, "_started", return_value=1):
+            self.assertEqual(restarts.survey().lingering, {})
+
+    def test_start_time_of_own_process(self):
+        import os
+        own = restarts._started(os.getpid())
+        self.assertIsNotNone(own)
+        self.assertLess(own, time.monotonic() * 1_000_000 + 60_000_000)
+        self.assertIsNone(restarts._started(2**22 + 12345))
 
     def test_zypper_unknown(self):
         with mock.patch.object(zypper, "processes_needing_restart", return_value=None):

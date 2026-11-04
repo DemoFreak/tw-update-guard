@@ -218,8 +218,7 @@ def _footer(cfg: Config, st: State, kernel: str, booted: float) -> str:
     info = [tr("Letzte Prüfung {when}", when=stamp(st.last_check_ok)) if st.last_check_ok else tr("Noch keine Prüfung")]
     if kernel:
         info.append(tr("Kernel {kernel} seit {when}", kernel=escape(kernel), when=stamp(booted)))
-    if cfg.observe:
-        info.append(tr("Beobachtungsmodus"))
+    info.append(tr("Beobachtungsmodus") if cfg.observe else tr("Automatikmodus"))
     return " · ".join(info)
 
 

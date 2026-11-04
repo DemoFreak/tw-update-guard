@@ -477,6 +477,13 @@ class BotTest(unittest.TestCase):
         self.assertEqual(buttons, [[("🔄 Jetzt prüfen", "check")]])
         self.assertIn("Beobachtungsmodus", text)
 
+    def test_auto_mode_is_shown(self):
+        self.bot.cfg.mode = "auto"
+        self.bot.pump()
+        text = self.shown()[0]
+        self.assertIn("Automatikmodus", text)
+        self.assertNotIn("Beobachtungsmodus", text)
+
     def test_details_button_only_with_packages(self):
         self.bot.pump()
         self.assertNotIn("details", actions(self.shown()[1]))

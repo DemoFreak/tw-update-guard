@@ -45,6 +45,7 @@ EN = {
     "{n} offene Punkte": "{n} open issues",
     "alles in Ordnung": "all good",
     "Beobachtungsmodus": "observation mode",
+    "Automatikmodus": "automatic mode",
     "{n} Paket aktualisiert": "{n} package updated",
     "{n} Pakete aktualisiert": "{n} packages updated",
     " (freigegeben)": " (approved)",
