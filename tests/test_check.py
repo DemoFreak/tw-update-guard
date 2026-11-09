@@ -568,8 +568,10 @@ class CheckTest(unittest.TestCase):
         self.assertIn("Freigabe nötig", self.events()[0])
         with state.locked(cfg.state_dir) as st:
             self.assertTrue(st.issues["manual"].approvable)
-            buttons = panel.render(cfg, st, time.time()).buttons
-        self.assertTrue(buttons[0][0][1].startswith("approve:"))
+            shown = panel.render(cfg, st, time.time())
+        self.assertTrue(shown.buttons[0][0][1].startswith("approve:"))
+        # Der Umfang des Plans steht auch bei einer nötigen Freigabe in der Zustandsnachricht
+        self.assertIn("1 Paket, Download 0 MB", shown.text)
 
     def test_expired_approval_is_reported(self):
         cfg = self.cfg("auto")

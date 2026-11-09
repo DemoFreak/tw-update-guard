@@ -240,7 +240,8 @@ def _run(cfg: Config, dry_run: bool, configured: str | None = None, requested: b
         log.info(tr("Freigabe nötig: %s"), "; ".join(verdict.reasons))
         for problem in plan.problems:
             log.info("%s", problem)
-        detail = format_reasons(verdict.reasons)
+        # Umfang zuerst, wie im Beobachtungsmodus; die Gründe nennen nur die heiklen Pakete
+        detail = plan_summary(plan) + "\n" + format_reasons(verdict.reasons)
         if expired:
             detail = tr("Die Freigabe galt einem älteren Stand und ist verfallen.") + "\n\n" + detail
         with state.locked(cfg.state_dir) as st:

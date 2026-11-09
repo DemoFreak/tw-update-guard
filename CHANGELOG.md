@@ -4,6 +4,13 @@ Published versions of tw-update-guard. Versions in between were development step
 published version. **Upgrade** notes name what you may have to change by hand; `twguard config-diff` shows which
 values in your `config.toml` differ from the defaults.
 
+## 0.10.4 – 2026-11-09
+
+- An update that needs approval now shows its size (number of packages, download size) in the state message,
+  as the observation mode already did; before, only the reasons were listed
+
+**Upgrade:** none.
+
 ## 0.10.3 – 2026-11-04
 
 - The state message always names the mode in its last line, "automatic mode" as well as "observation mode";
