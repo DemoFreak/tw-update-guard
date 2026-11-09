@@ -61,15 +61,18 @@ def cmd_status(cfg: config.Config) -> int:
     now = time.time()
     last = tr("vor {age}", age=fmt_age(now - st.last_check_ok)) if st.last_check_ok else tr("nie")
     print(tr("{host}: letzte erfolgreiche Prüfung {last}", host=cfg.hostname, last=last))
-    if not st.issues and not st.pending_text:
+    plan = state.pending_plan(st)
+    if not st.issues and not plan:
         print(tr("Nichts offen."))
     elif not st.issues:
         print(tr("Keine offenen Punkte."))
-    if st.pending_text:
-        print(tr("Ausstehend, nicht eingespielt (Beobachtungsmodus): {plan}", plan=st.pending_text))
+    if plan and not plan.needs_approval:
+        print(tr("Ausstehend, nicht eingespielt (Beobachtungsmodus): {plan}", plan=plan.summary))
     for issue in st.issues.values():
         print(f"\n[{issue.kind}] " + tr("{title}, seit {age}", title=title(issue.kind), age=fmt_age(now - issue.since))
               + ", " + trn("{n} Meldung", "{n} Meldungen", issue.notify_count))
+        if issue.kind == "manual" and plan and plan.summary:
+            print(plan.summary)
         if issue.detail:
             print(issue.detail)
     return 0

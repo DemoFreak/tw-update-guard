@@ -4,6 +4,17 @@ Published versions of tw-update-guard. Versions in between were development step
 published version. **Upgrade** notes name what you may have to change by hand; `twguard config-diff` shows which
 values in your `config.toml` differ from the defaults.
 
+## 0.10.5 – 2026-11-09
+
+- The size of an update that needs approval is shown right after updating twguard, without waiting for the
+  next check; 0.10.4 showed it only for checks made by 0.10.4 itself
+- An update that needs approval and one waiting in observation mode are now one thing internally: state
+  message, buttons, `/approve` and `twguard status` treat both alike. `/approve` without a button now also
+  installs a routine update shown in observation mode once, like "Install this time"
+- "Install this time" on an older message no longer starts a check when nothing is pending any more
+
+**Upgrade:** none.
+
 ## 0.10.4 – 2026-11-09
 
 - An update that needs approval now shows its size (number of packages, download size) in the state message,

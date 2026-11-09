@@ -25,7 +25,7 @@ from . import busy, details
 from .config import Config
 from .i18n import tr, trn
 from .notify import ICONS, UNVERIFIED, clip, ladder_for, level, lingering_line, service_buttons, shutdown_planned, stamp, title
-from .state import Issue, State
+from .state import Issue, PendingPlan, State, pending_plan
 from .telegram import Buttons
 
 TOPIC = "state"
@@ -92,15 +92,33 @@ def _issue_block(st: State, issue: Issue, now: float, cfg: Config) -> list[str]:
     if issue.kind == "services":
         lines.append(escape(clip(", ".join(st.restart_services), 600)))
     elif issue.kind == "manual":
-        lines.append(escape(clip(issue.detail, DETAIL_LIMIT)))
-        if not issue.approvable:
-            lines.append(tr("Bitte per SSH lösen (zypper dup). „Details“ zeigt den Konflikt."))
+        lines += _plan_lines(pending_plan(st))
     elif issue.kind == "apply-failed":
         lines.append(escape(clip(issue.detail, 600)))
         lines.append(tr("Bitte per SSH nachsehen (journalctl -u twguard-check), danach „Behoben“."))
     elif issue.kind in ("error", "stale"):
         lines.append(escape(clip(issue.detail, 600)))
     return lines
+
+
+def _plan_lines(plan: PendingPlan | None) -> list[str]:
+    """Inhalt zu einem ausstehenden Plan, gleich ob er Freigabe braucht oder nur beobachtet wird."""
+    if plan is None:
+        return []
+    lines = [escape(clip(plan.summary, 300))] if plan.summary else []
+    if plan.reasons:
+        lines.append(escape(clip(plan.reasons, DETAIL_LIMIT)))
+    if plan.needs_approval and not plan.approvable:
+        lines.append(tr("Bitte per SSH lösen (zypper dup). „Details“ zeigt den Konflikt."))
+    return lines
+
+
+def _plan_buttons(plan: PendingPlan) -> list[tuple[str, str]]:
+    row = [("📋 Details", "details")]
+    if plan.approvable:
+        label = tr("✅ Freigeben") if plan.needs_approval else tr("▶️ Diesmal einspielen")
+        row.insert(0, (label, f"approve:{plan.fingerprint}"))
+    return row
 
 
 CHECK_PHASES = {
@@ -170,17 +188,9 @@ def _offer_lines(st: State) -> list[str]:
 def _buttons(st: State) -> Buttons:
     """Schaltflächen aller offenen Punkte; jede gehört zu dieser einen Nachricht."""
     rows: Buttons = []
-    details_shown = False
-    manual = st.issues.get("manual")
-    if manual and manual.approvable and manual.fingerprint:
-        rows.append([(tr("✅ Freigeben"), f"approve:{manual.fingerprint}"), ("📋 Details", "details")])
-        details_shown = True
-    elif manual:
-        rows.append([("📋 Details", "details")])
-        details_shown = True
-    elif st.pending_text and st.observed_fingerprint:
-        rows.append([(tr("▶️ Diesmal einspielen"), f"approve:{st.observed_fingerprint}"), ("📋 Details", "details")])
-        details_shown = True
+    plan = pending_plan(st)
+    if plan:
+        rows.append(_plan_buttons(plan))
     if shutdown_planned(st):
         rows.append([(tr("✖️ Neustart abbrechen") if busy.Shutdown(**st.shutdown).reboot
                       else tr("✖️ Herunterfahren abbrechen"), "cancel")])
@@ -193,7 +203,7 @@ def _buttons(st: State) -> Buttons:
     if st.update_offer:
         rows.append([(tr("⬆️ Einspielen"), f"update:{st.update_offer['target']}"), (tr("✖️ Verwerfen"), "dismiss")])
     general = [(tr("🔄 Jetzt prüfen"), "check")]
-    if not details_shown and (st.last_plan.get("rows") or st.last_plan.get("problems")):
+    if not plan and (st.last_plan.get("rows") or st.last_plan.get("problems")):
         general.append(("📋 Details", "details"))
     if st.issues:
         general.append((tr("⏰ 1 Tag später"), "later:24"))
@@ -207,7 +217,7 @@ def _head(host: str, st: State, now: float, briefing: bool) -> str:
     if st.issues:
         count = trn("{n} offener Punkt", "{n} offene Punkte", len(st.issues))
         return f"{'☀️' if briefing else '⚠️'} {host}: {count}"
-    if st.pending_text:
+    if pending_plan(st):  # ohne offene Punkte nur noch der beobachtete Plan
         return f"{'☀️' if briefing else '👀'} {host}: " + tr("Updates ausstehend (Beobachtungsmodus)")
     # Ohne Auskunft von zypper ist „nichts offen“ keine Entwarnung
     icon = "☀️" if briefing else "❔" if st.unverified else "✅"
@@ -236,8 +246,11 @@ def render(cfg: Config, st: State, now: float, configured_mode: str = "", kernel
             continue  # steht als „geplant“ unter dem, was läuft
         full = _issue_block(st, issue, now, cfg)
         blocks.append((full, [full[0], "<i>" + tr("(Text gekürzt, zu viele offene Punkte)") + "</i>"]))
-    if st.pending_text:
-        pending = ["👀 " + tr("Ausstehend: {plan}", plan=escape(clip(st.pending_text, 300)))]
+    plan = pending_plan(st)
+    if plan and not plan.needs_approval:
+        # Ein Plan, der Freigabe braucht, steht schon als offener Punkt da (mit Eskalation)
+        summary, *rest = _plan_lines(plan) or [""]
+        pending = ["👀 " + tr("Ausstehend: {plan}", plan=summary), *rest]
         blocks.append((pending, pending))
     offer = _offer_lines(st)
     if offer:

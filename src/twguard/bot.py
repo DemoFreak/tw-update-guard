@@ -314,7 +314,7 @@ class Bot:
         with state.locked(self.cfg.state_dir) as st:
             rpmdb_changed = bool(st.rpmdb_mtime) and mtime != st.rpmdb_mtime
             st.rpmdb_mtime = mtime
-            pending = bool(st.pending_text) or any(k in st.issues for k in ("manual", "apply-failed"))
+            pending = state.pending_plan(st) is not None or "apply-failed" in st.issues
         if rpmdb_changed:
             # Jemand hat Pakete geändert, z. B. per SSH selbst `zypper dup` ausgeführt
             self.check_reboot()
@@ -405,8 +405,8 @@ class Bot:
                 # Etwas hat sich geändert: zurück zur Übersicht, statt es hinter der Paketliste zu verstecken
                 view, shown = "", self._render(st, now, due, bool(briefing), "")
             loud = bool(due) or bool(briefing) and bool(st.issues or not self.cfg.briefing.silent)
-            manual = st.issues.get("manual")
-            fingerprint = manual.fingerprint if manual and manual.approvable else ""
+            plan = state.pending_plan(st)
+            fingerprint = plan.fingerprint if plan and plan.approvable else ""
         if not fresh and shown.digest == meta.get("digest"):
             return True
         target = old if not fresh and messages.edit(self.tg, old, shown.text, shown.buttons) else None
@@ -783,8 +783,8 @@ class Bot:
         error = self.approve()
         if error:
             with state.locked(self.cfg.state_dir) as st:
-                issue = st.issues.get("manual")
-                unseen = issue is not None and issue.approvable and issue.fingerprint != st.manual_shown
+                plan = state.pending_plan(st)
+                unseen = plan is not None and plan.approvable and plan.fingerprint != st.manual_shown
             if unseen:
                 # Einen noch nicht gezeigten Plan sofort zeigen, auch in der Ruhezeit: es wird gerade gefragt
                 self.pump(resend=True)
@@ -799,21 +799,18 @@ class Bot:
         if refused:
             return refused
         with state.locked(self.cfg.state_dir) as st:
-            issue = st.issues.get("manual")
-            if issue is None and fingerprint and fingerprint == st.observed_fingerprint:
-                # Beobachtungsmodus: einzelnes Routine-Update trotzdem einspielen
-                st.approved_fingerprint = fingerprint
-            elif issue is None:
+            # Freigabe und „Diesmal einspielen“ im Beobachtungsmodus sind derselbe Vorgang
+            plan = state.pending_plan(st)
+            if plan is None:
                 return tr("Es liegt kein Update zur Freigabe vor.")
-            elif not issue.approvable or not issue.fingerprint:
+            if not plan.approvable:
                 return tr("Das lässt sich nicht per Telegram freigeben, bitte per SSH lösen.")
-            elif fingerprint and fingerprint != issue.fingerprint:
+            if fingerprint and fingerprint != plan.fingerprint:
                 return tr("Diese Meldung gilt einem älteren Stand. /status zeigt den aktuellen.")
-            elif not fingerprint and issue.fingerprint != st.manual_shown:
+            if not fingerprint and plan.fingerprint != st.manual_shown:
                 # /approve nennt keinen Stand; er darf nur gelten, was zuletzt zu sehen war
                 return tr("Der Plan hat sich geändert, nichts freigegeben. Bitte die aktuelle Meldung prüfen.")
-            else:
-                st.approved_fingerprint = issue.fingerprint
+            st.approved_fingerprint = plan.fingerprint
         return ""
 
     def cmd_check(self, args: list[str], addressed: bool = False) -> Out | None:

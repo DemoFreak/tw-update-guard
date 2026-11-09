@@ -875,8 +875,42 @@ class BotTest(unittest.TestCase):
     def test_button_approve_observed_routine(self):
         with state.locked(self.bot.cfg.state_dir) as st:
             st.observed_fingerprint = "rtn"
+            st.pending_text = "3 Pakete, Download 1 MB"
         self.press("approve:rtn")
         self.start_check.assert_called_once()
+
+    def test_button_approve_observed_routine_no_longer_pending(self):
+        # Der Fingerabdruck bleibt nach dem Einspielen stehen; ein alter Knopf darf nichts mehr starten
+        with state.locked(self.bot.cfg.state_dir) as st:
+            st.observed_fingerprint = "rtn"
+        self.press("approve:rtn")
+        self.start_check.assert_not_called()
+        self.assertIn("kein Update", self.tg.answered[0])
+
+    def test_manual_shows_plan_summary_from_last_plan(self):
+        # Auch ein von einer älteren Version angelegter Punkt (Text nur mit Gründen) nennt den Umfang
+        self.open_manual()
+        with state.locked(self.bot.cfg.state_dir) as st:
+            st.last_plan = {"summary": "120 Pakete, Download 619 MB", "rows": [], "problems": []}
+        self.bot.pump()
+        text, buttons = self.shown()
+        self.assertIn("120 Pakete, Download 619 MB\n• kritisches Paket", text)
+        self.assertEqual(buttons[0][0], ("✅ Freigeben", "approve:abc"))
+
+    def test_observed_and_manual_show_summary_alike(self):
+        plan = {"summary": "7 Pakete, Download 3 MB", "rows": [], "problems": []}
+        with state.locked(self.bot.cfg.state_dir) as st:
+            st.last_plan, st.pending_text, st.observed_fingerprint = plan, "7 Pakete, Download 3 MB", "rtn"
+        self.bot.pump()
+        observed = self.shown()[0]
+        with state.locked(self.bot.cfg.state_dir) as st:
+            st.pending_text = ""
+        self.open_manual()
+        self.bot.pump()
+        manual = self.shown()[0]
+        self.assertIn("Ausstehend: 7 Pakete, Download 3 MB", observed)
+        self.assertIn("7 Pakete, Download 3 MB", manual)
+        self.assertNotIn("Ausstehend", manual)
 
     def test_button_unauthorized(self):
         self.open_manual()

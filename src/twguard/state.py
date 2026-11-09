@@ -96,7 +96,8 @@ class State:
     outbox: list = field(default_factory=list)
     # Prüflauf spielt gerade ein {"pid", "boot", "at"}; schließt Dienst-Neustarts aus (holder/alive)
     applying: dict = field(default_factory=dict)
-    # Fingerabdruck des zuletzt tatsächlich gezeigten Plans; /approve gilt nur für ihn.
+    # Fingerabdruck des zuletzt tatsächlich gezeigten Plans (pending_plan, Freigabe oder Beobachtung);
+    # /approve ohne Stand gilt nur für ihn.
     # Nicht in Issue: eine ältere Version scheitert nach dem Zurückrollen an unbekannten Feldern
     manual_shown: str = ""
 
@@ -113,6 +114,38 @@ class State:
 
     def resolve(self, kind: str) -> Issue | None:
         return self.issues.pop(kind, None)
+
+
+@dataclass(frozen=True)
+class PendingPlan:
+    """Ein Plan, der noch nicht eingespielt ist: braucht Freigabe oder wartet im Beobachtungsmodus."""
+
+    fingerprint: str
+    # Umfang (rules.plan_summary) aus dem letzten Probelauf
+    summary: str
+    needs_approval: bool
+    # Per Telegram einspielbar (Freigeben bzw. Diesmal einspielen)
+    approvable: bool
+    # Warum Freigabe nötig ist; leer im Beobachtungsmodus
+    reasons: str = ""
+    issue: Issue | None = None
+
+
+def pending_plan(st: State) -> PendingPlan | None:
+    """Der ausstehende Plan, gleich in welchem Modus; die einzige Stelle, die beide Fälle unterscheidet.
+
+    Gespeichert ist er weiter getrennt (offener Punkt `manual` bzw. `pending_text`), damit eine ältere
+    Version nach dem Zurückrollen den Zustand lesen kann.
+    """
+    summary = st.last_plan.get("summary", "")
+    manual = st.issues.get("manual")
+    if manual is not None:
+        return PendingPlan(manual.fingerprint, summary, True, manual.approvable and bool(manual.fingerprint),
+                           manual.detail, manual)
+    if st.pending_text:
+        # pending_text ist dieselbe Zusammenfassung, nur zum selben Zeitpunkt geschrieben
+        return PendingPlan(st.observed_fingerprint, summary or st.pending_text, False, bool(st.observed_fingerprint))
+    return None
 
 
 def boot_id() -> str:
