@@ -1166,6 +1166,85 @@ class BotTest(unittest.TestCase):
         self.assertEqual(data[:3], ["restart:postfix", "restart:sshd",
                                     f"restart:*:{restarts.digest(['postfix', 'sshd'])}"])
 
+    # Was an der Konsole geschah, zeigen „Jetzt prüfen“ und „Status“ sofort (nicht erst nach 30 min)
+    WAYS = {
+        "Knopf Jetzt prüfen": lambda self: self.press("check"),
+        "/check": lambda self: self.bot.handle(message("/check@server1_bot")),
+        "Knopf Status": lambda self: self.press("status"),
+        "/status": lambda self: self.bot.handle(message("/status")),
+    }
+
+    def test_ways_take_over_services_restarted_on_console(self):
+        for name, way in self.WAYS.items():
+            with self.subTest(name):
+                self.offer("postfix")
+                self.found.return_value = []
+                way(self)
+                self.assertNotIn("services", self.st().issues)
+
+    def test_ways_show_new_services_at_once(self):
+        for name, way in self.WAYS.items():
+            with self.subTest(name):
+                self.offer("postfix")
+                self.found.return_value = ["postfix", "sshd"]
+                way(self)
+                self.assertEqual(self.st().restart_services, ["postfix", "sshd"])
+
+    def test_ways_keep_services_when_unknown(self):
+        for name, way in self.WAYS.items():
+            with self.subTest(name):
+                self.offer("postfix")
+                self.found.return_value = None
+                way(self)
+                self.assertEqual(self.st().restart_services, ["postfix"])
+
+    def test_ways_keep_services_during_restart(self):
+        for name, way in self.WAYS.items():
+            with self.subTest(name):
+                self.offer("postfix")
+                with state.locked(self.bot.cfg.state_dir) as st:
+                    st.restart_request = {"at": time.time(), "services": ["postfix"]}
+                self.found.return_value = []
+                way(self)
+                self.assertIn("services", self.st().issues)
+                with state.locked(self.bot.cfg.state_dir) as st:
+                    st.restart_request = {}
+
+    def test_check_while_running_does_not_query(self):
+        # Prüft schon (noop): weder Dienste noch Neustart abfragen; während des Prüflaufs setzt der Abgleich aus
+        self.offer("postfix")
+        self.checking.return_value = True
+        self.found.reset_mock()
+        for way in (self.WAYS["Knopf Jetzt prüfen"], self.WAYS["/check"]):
+            way(self)
+        self.found.assert_not_called()
+        self.rebooting.assert_not_called()
+        self.start_check.assert_not_called()
+
+    def test_check_queries_services_before_check_and_reboot_only_there(self):
+        order = []
+        self.found.side_effect = lambda: order.append("services") or []
+        self.start_check.side_effect = lambda *a, **k: order.append("check")
+        self.press("check")
+        self.assertEqual(order, ["services", "check"])
+        self.rebooting.assert_not_called()  # den Neustart fragt start_check selbst ab
+
+    def test_status_during_check_queries_reboot_not_services(self):
+        self.offer("postfix")
+        self.checking.return_value = True
+        self.found.reset_mock()
+        self.bot.handle(message("/status"))
+        self.found.assert_not_called()
+        self.rebooting.assert_called_once()
+
+    def test_details_queries_only_reboot(self):
+        self.offer("postfix")
+        self.found.reset_mock()
+        self.bot.handle(message("/details@server1_bot"))
+        self.found.assert_not_called()
+        self.rebooting.assert_called_once()
+        self.assertEqual(self.st().restart_services, ["postfix"])
+
     def test_no_scan_while_check_runs(self):
         self.checking.return_value = True
         self.bot.check_services()

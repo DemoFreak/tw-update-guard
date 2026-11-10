@@ -771,9 +771,16 @@ class Bot:
         self.show_current()
 
     def show_current(self, view: str | None = None) -> None:
-        """Zustandsnachricht nach unten holen; vorher abfragen, was der Takt nur alle 30 min fragt."""
+        """Zustandsnachricht nach unten holen; vorher abfragen, was der Takt nur alle 30 min fragt.
+
+        Die Übersicht gleicht auch die Dienste ab (z. B. an der Konsole neu gestartet); die Paketliste
+        braucht das nicht und bleibt bei der kurzen Abfrage des Neustarts.
+        """
         self.observe_system()
-        self.update_reboot()
+        if view == "details":
+            self.update_reboot()
+        else:
+            self.check_reboot()
         self.pump(resend=True, view=view)
 
     def cmd_details(self, args: list[str], addressed: bool = False) -> None:
@@ -819,6 +826,7 @@ class Bot:
             return Out(refused, ttl=SHORT)
         if verdict == "noop":
             return None  # Prüft schon; das steht in der Zustandsnachricht, ein Hinweis wäre nur Rauschen
+        self.check_services()  # vor dem Prüflauf: währenddessen setzt der Abgleich aus
         self.start_check(requested=True)
         self.pump(resend=True)
         return None
@@ -1167,6 +1175,8 @@ class Bot:
             self._answer(cq)  # Prüft schon (Knopf von kurz vorher): nichts tun, wie bei /check
             return
         self._answer(cq, tr("Prüfung läuft …"))
+        # Vor dem Prüflauf, währenddessen setzt der Abgleich aus; den Neustart fragt start_check selbst
+        self.check_services()
         self.start_check(requested=True)
         self.pump()
 

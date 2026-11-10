@@ -4,6 +4,14 @@ Published versions of tw-update-guard. Versions in between were development step
 published version. **Upgrade** notes name what you may have to change by hand; `twguard config-diff` shows which
 values in your `config.toml` differ from the defaults.
 
+## 0.10.6 – 2026-11-10
+
+- "Check now", `/check`, "Status" and `/status` now also ask at once which services still use old files.
+  Services restarted on the console disappeared from the state message only after up to 30 minutes, and new
+  ones appeared just as late. The package list (`/details`) still asks only whether a reboot is needed
+
+**Upgrade:** none.
+
 ## 0.10.5 – 2026-11-09
 
 - The size of an update that needs approval is shown right after updating twguard, without waiting for the
