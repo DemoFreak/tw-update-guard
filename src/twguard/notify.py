@@ -50,6 +50,12 @@ def use_mode(cfg: Config) -> None:
         cfg.mode = override
 
 
+def mode_value(mode: str) -> str:
+    """Moduswert, wie er in config.toml und hinter /mode steht; als Code, damit er nicht wie
+    Fließtext („Beobachtungsmodus“) wirkt."""
+    return f"<code>{escape(mode)}</code>"
+
+
 def title(kind: str) -> str:
     return tr(TITLES[kind]) if kind in TITLES else kind
 

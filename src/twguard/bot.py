@@ -21,7 +21,7 @@ from pathlib import Path
 from . import COMMIT, busy, details, messages, ota, panel, restarts, state, zypper
 from .config import MODES, Config
 from .i18n import EN, LANGUAGES, current, set_language, tr
-from .notify import adopt_migration, clip, due_issues, fmt_age, lingering_line, issue_identity, minutes_of_day, note_reminded, title
+from .notify import adopt_migration, clip, due_issues, fmt_age, lingering_line, issue_identity, minutes_of_day, mode_value, note_reminded, title
 from .telegram import Buttons, Telegram, TelegramError
 
 log = logging.getLogger(__name__)
@@ -1018,8 +1018,8 @@ class Bot:
                        ttl=SHORT)
         if not args:
             return Out(tr("⚙️ <b>{host}</b>: Modus {mode}, in der Konfiguration {configured}. "
-                          "Ändern: /mode auto oder /mode observe", host=self.host, mode=self.cfg.mode,
-                          configured=configured), ttl=LONG)
+                          "Ändern: /mode auto oder /mode observe", host=self.host, mode=mode_value(self.cfg.mode),
+                          configured=mode_value(configured)), ttl=LONG)
         mode = args[0].lower()
         if mode not in MODES:
             return Out(tr("Format: /mode auto oder /mode observe"), ttl=SHORT)
@@ -1032,12 +1032,13 @@ class Bot:
                 if applying and mode == "observe" else "")
         self.pump()
         if mode == configured:
-            return Out(tr("⚙️ <b>{host}</b>: Modus {mode}, wie in der Konfiguration.", host=self.host, mode=mode)
+            return Out(tr("⚙️ <b>{host}</b>: Modus {mode}, wie in der Konfiguration.", host=self.host,
+                          mode=mode_value(mode))
                        + note, topic="mode")
         text = tr("⚙️ <b>{host}</b>: Modus {mode} bis zum nächsten Neustart des Bots (auch durch /update oder "
                   "einen Reboot). Die Konfiguration enthält {configured}. Damit es dauerhaft gilt, in "
-                  "/etc/twguard/config.toml unter [general] <code>mode = \"{mode}\"</code> eintragen.",
-                  host=self.host, mode=mode, configured=configured)
+                  "/etc/twguard/config.toml unter [general] <code>mode = \"{value}\"</code> eintragen.",
+                  host=self.host, mode=mode_value(mode), value=mode, configured=mode_value(configured))
         if mode == "auto":
             text += "\n" + tr("Routine-Updates spielt der nächste Prüflauf ein, sofort: /check")
         return Out(text + note, topic="mode")

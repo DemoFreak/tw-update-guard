@@ -2066,7 +2066,7 @@ class BotTest(unittest.TestCase):
         self.assertIn("bis zum nächsten Neustart des Bots", answer)
         self.assertIn("/check", answer)
         self.assertEqual(self.st().mode_override, "auto")
-        self.assertIn("Modus auto bis zum nächsten Neustart", self.shown()[0])
+        self.assertIn("Modus <code>auto</code> bis zum nächsten Neustart", self.shown()[0])
         self.assertIn("automatisch (bis zum Neustart)", self.bot.version_line())
 
     def test_mode_only_when_addressed(self):
@@ -2096,7 +2096,7 @@ class BotTest(unittest.TestCase):
         self.bot.handle(message("/mode@server1_bot fast"))
         self.assertIn("Format: /mode", self.tg.sent[-1])
         self.bot.handle(message("/mode@server1_bot"))
-        self.assertIn("Modus observe, in der Konfiguration observe", self.tg.sent[-1])
+        self.assertIn("Modus <code>observe</code>, in der Konfiguration <code>observe</code>", self.tg.sent[-1])
 
     def test_rpmdb_change_rechecks_pending(self):
         with state.locked(self.bot.cfg.state_dir) as st:

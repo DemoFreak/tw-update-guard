@@ -24,7 +24,8 @@ from typing import Sequence
 from . import busy, details
 from .config import Config
 from .i18n import tr, trn
-from .notify import ICONS, UNVERIFIED, clip, ladder_for, level, lingering_line, service_buttons, shutdown_planned, stamp, title
+from .notify import (ICONS, UNVERIFIED, clip, ladder_for, level, lingering_line, mode_value, service_buttons,
+                     shutdown_planned, stamp, title)
 from .state import Issue, PendingPlan, State, pending_plan
 from .telegram import Buttons
 
@@ -169,7 +170,7 @@ def _hint_lines(cfg: Config, st: State, configured_mode: str) -> list[str]:
     lines += [lingering_line(name, procs) for name, procs in st.lingering.items()]
     if cfg.mode != configured_mode:
         lines.append("⚙️ " + tr("Modus {mode} bis zum nächsten Neustart des Bots, in der Konfiguration {configured}.",
-                               mode=cfg.mode, configured=configured_mode))
+                               mode=mode_value(cfg.mode), configured=mode_value(configured_mode)))
     return lines
 
 

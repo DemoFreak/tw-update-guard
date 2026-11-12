@@ -105,7 +105,7 @@ class CheckTest(unittest.TestCase):
         with state.locked(cfg.state_dir) as st:
             st.language_override = "en"
         check.run(cfg)
-        self.assertIn("not in observe mode", self.events()[0])
+        self.assertIn("not in observation mode", self.events()[0])
 
     def test_observe_remembers_pending_until_applied(self):
         cfg = self.cfg("observe")

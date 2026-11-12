@@ -159,8 +159,8 @@ EN = {
     "überwachtes Paket wird entfernt: {package}": "watched package will be removed: {package}",
     "{n} Pakete werden entfernt (Grenze {limit})": "{n} packages will be removed (limit {limit})",
     "{n} Pakete (Grenze {limit})": "{n} packages (limit {limit})",
-    "{n} Paket, Download {mb} MB": "{n} package, download {mb} MB",
-    "{n} Pakete, Download {mb} MB": "{n} packages, download {mb} MB",
+    "{n} Paket, Download {mb} MB": "{n} package, download size {mb} MB",
+    "{n} Pakete, Download {mb} MB": "{n} packages, download size {mb} MB",
     "Neu": "New",
     "Aktualisiert": "Updated",
     "Neu installiert": "Reinstalled",
@@ -196,22 +196,22 @@ EN = {
         "To make it permanent, set <code>language = \"{language}\"</code> under [general] in /etc/twguard/config.toml.",
     "Modus bis zum Neustart ändern": "Change the mode until restart",
     "Modus {mode} bis zum nächsten Neustart des Bots, in der Konfiguration {configured}.":
-        "Mode {mode} until the next restart of the bot, in the configuration {configured}.",
+        "Mode {mode} until the next restart of the bot, the configuration file says {configured}.",
     "(bis zum Neustart)": "(until restart)",
     "/mode gilt nur gezielt: mit @botname oder als Antwort auf eine Nachricht des Servers.":
         "/mode only works when addressed: with @botname or as a reply to a message from the server.",
     "⚙️ <b>{host}</b>: Modus {mode}, in der Konfiguration {configured}. Ändern: /mode auto oder /mode observe":
-        "⚙️ <b>{host}</b>: mode {mode}, in the configuration {configured}. To change: /mode auto or /mode observe",
+        "⚙️ <b>{host}</b>: mode {mode}, the configuration file says {configured}. To change: /mode auto or /mode observe",
     "Format: /mode auto oder /mode observe": "Format: /mode auto or /mode observe",
     "⚙️ <b>{host}</b>: Modus {mode}, wie in der Konfiguration.": "⚙️ <b>{host}</b>: mode {mode}, as in the configuration.",
     "⚙️ <b>{host}</b>: Modus {mode} bis zum nächsten Neustart des Bots (auch durch /update oder einen Reboot). "
     "Die Konfiguration enthält {configured}. Damit es dauerhaft gilt, in /etc/twguard/config.toml unter [general] "
-    "<code>mode = \"{mode}\"</code> eintragen.":
+    "<code>mode = \"{value}\"</code> eintragen.":
         "⚙️ <b>{host}</b>: mode {mode} until the next restart of the bot (also through /update or a reboot). "
-        "The configuration says {configured}. To make it permanent, set <code>mode = \"{mode}\"</code> under "
+        "The configuration says {configured}. To make it permanent, set <code>mode = \"{value}\"</code> under "
         "[general] in /etc/twguard/config.toml.",
     "Routine-Updates spielt der nächste Prüflauf ein, sofort: /check":
-        "The next check installs routine updates; right now: /check",
+        "The next check will install routine updates immediately; right now: /check",
     "🟢 <b>{host}</b> ist wieder da (Kernel {kernel}).": "🟢 <b>{host}</b> is back (kernel {kernel}).",
     "Feste Tastatur einblenden": "Show the permanent keyboard",
     "Seit {age} keine erfolgreiche Prüfung. Läuft twguard-check.timer?":
@@ -399,16 +399,16 @@ then write /start@botname in the group again and repeat twguard telegram-ids."""
     '(gekürzt, siehe journalctl)': '(shortened, see journalctl)',
     '(Text gekürzt, zu viele offene Punkte)': '(text shortened, too many open items)',
     '… weitere Angaben passen nicht in die Nachricht': '… more does not fit into the message',
-    'Updates ausstehend (Beobachtungsmodus)': 'updates pending (observe mode)',
+    'Updates ausstehend (Beobachtungsmodus)': 'updates pending (observation mode)',
     'Zustandsnachricht nicht gesendet: %s': 'state message not sent: %s',
     'aufgeschoben bis {when}': 'snoozed until {when}',
     'danach Neustart nötig': 'reboot needed afterwards',
     'nichts offen': 'nothing open',
     'seit {when}': 'since {when}',
     '{n} Paket wäre Routine und würde eingespielt, im Beobachtungsmodus nicht.':
-        '{n} package would be routine and installed, but not in observe mode.',
+        '{n} package would be routine and installed, but not in observation mode.',
     '{n} Pakete wären Routine und würden eingespielt, im Beobachtungsmodus nicht.':
-        '{n} packages would be routine and installed, but not in observe mode.',
+        '{n} packages would be routine and installed, but not in observation mode.',
     '{title}: als behoben quittiert.': '{title}: marked as fixed.',
     '↓ veraltet, der aktuelle Stand steht weiter unten (/status)': '↓ outdated, the current state is further down (/status)',
     '⏳ Einspielen wartet, bis die Dienste neu gestartet sind': '⏳ Installing waits until the services have restarted',

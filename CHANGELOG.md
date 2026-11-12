@@ -4,6 +4,15 @@ Published versions of tw-update-guard. Versions in between were development step
 published version. **Upgrade** notes name what you may have to change by hand; `twguard config-diff` shows which
 values in your `config.toml` differ from the defaults.
 
+## 0.10.7 – 2026-11-12
+
+- English texts: "observation mode" everywhere (some said "observe mode"); the plan size reads
+  "download size 10 MB" instead of "download 10 MB"; `/mode` and the hint in the state message show the mode as
+  the value used in `config.toml` and after `/mode` (`auto`, `observe`), formatted as code, so it is not taken
+  for the prose name ("observation mode")
+
+**Upgrade:** none.
+
 ## 0.10.6 – 2026-11-10
 
 - "Check now", `/check`, "Status" and `/status` now also ask at once which services still use old files.
