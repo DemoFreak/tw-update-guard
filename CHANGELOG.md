@@ -4,6 +4,16 @@ Published versions of tw-update-guard. Versions in between were development step
 published version. **Upgrade** notes name what you may have to change by hand; `twguard config-diff` shows which
 values in your `config.toml` differ from the defaults.
 
+## 0.10.8 – 2026-11-12
+
+- **Approving needs a second tap.** “Approve” and “Install this time” first ask “Install this update now?” with
+  “Cancel” and “Yes, install” side by side; only “Yes” approves, for the plan shown and within one minute. Before,
+  a single tap installed a plan that needed approval: with Telegram responding slowly, the state message changed
+  under the finger and a second tap meant for “Check now” hit “Approve”. A typed `/approve` stays one step
+- Every approval is logged in the journal (user, way, plan) and reported as an event in the group
+
+**Upgrade:** none.
+
 ## 0.10.7 – 2026-11-12
 
 - English texts: "observation mode" everywhere (some said "observe mode"); the plan size reads

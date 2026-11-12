@@ -266,6 +266,10 @@ def render(cfg: Config, st: State, now: float, configured_mode: str = "", kernel
     if view.startswith("details"):
         text, buttons = details_page(cfg.hostname, st, view.partition(":")[2])
         return Panel(f"{text}\n\n<i>{tr('Stand {when}', when=stamp(now))}</i>", buttons, _digest(text, buttons), overview)
+    confirm = confirm_page(cfg.hostname, st, view.partition(":")[2]) if view.startswith("confirm:") else None
+    if confirm:
+        text, buttons = confirm
+        return Panel(f"{text}\n\n<i>{tr('Stand {when}', when=stamp(now))}</i>", buttons, _digest(text, buttons), overview)
     text = f"{body}\n\n<i>{footer} · {tr('Stand {when}', when=stamp(now))}</i>"
     return Panel(text, buttons, overview, overview)
 
@@ -302,6 +306,21 @@ def _fit(head: list[str], blocks: list[tuple[list[str], list[str]]], limit: int)
     while chosen and len(text(chosen, more=True)) > limit:
         chosen.pop()
     return text(chosen, more=True)
+
+
+def confirm_page(host: str, st: State, fingerprint: str) -> tuple[str, Buttons] | None:
+    """Rückfrage vor dem Einspielen; None, wenn der Plan nicht mehr dieser oder nicht einspielbar ist.
+
+    „Ja“ steht rechts neben „Abbrechen“: Ein zweiter Tipp an dieselbe Stelle wie „Freigeben“ bzw. „Diesmal
+    einspielen“ (links oben) bricht ab, und wo vorher „Jetzt prüfen“ stand, steht nichts.
+    """
+    plan = pending_plan(st)
+    if plan is None or not plan.approvable or plan.fingerprint != fingerprint:
+        return None
+    question = tr("Dieses Update jetzt einspielen?") if plan.needs_approval else tr("Diese Updates diesmal einspielen?")
+    lines = [f"❓ <b>{escape(host)}</b>: {question}", "", *_plan_lines(plan)]
+    row = [(tr("✖️ Abbrechen"), "back"), (tr("✅ Ja, einspielen"), f"confirm:{fingerprint}")]
+    return "\n".join(lines), [[button for button in row if busy.allowed(button[1], st)]]
 
 
 def details_page(host: str, st: State, arg: str = "") -> tuple[str, Buttons]:

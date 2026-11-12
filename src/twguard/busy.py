@@ -47,8 +47,8 @@ BLOCKERS = {
 
 # Welche Aktion eine Schaltfläche auslöst, nach dem Anfang ihrer Callback-Daten; die übrigen (Details,
 # Aufschub, Abbrechen …) ändern nichts am System und bleiben immer
-BUTTON_ACTIONS = {"check": "start-check", "approve": "approve", "reboot": "reboot", "restart": "restart",
-                  "update": "update"}
+BUTTON_ACTIONS = {"check": "start-check", "approve": "approve", "confirm": "approve", "reboot": "reboot",
+                  "restart": "restart", "update": "update"}
 
 CHECK_UNIT = "twguard-check.service"
 # Vorgänge, bei denen eine Aktion still nichts tut statt abgewiesen zu werden: Ein zweites Anstoßen während

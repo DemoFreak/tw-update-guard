@@ -38,6 +38,8 @@ REBOOT_CHECK_SECONDS = 1800
 EVENT_HOLD = 300
 # So lange zeigt die Zustandsnachricht Details, danach wieder die Übersicht
 VIEW_MAX = 900
+# So lange gilt die Rückfrage nach „Freigeben“ bzw. „Diesmal einspielen“
+CONFIRM_SECONDS = 60
 # Ein angestoßener Prüflauf, der sich so lange nicht gemeldet hat, ist nicht gestartet
 QUEUED_MAX = 180
 # So lange gilt ein mit /update angebotener Stand
@@ -141,6 +143,13 @@ def plain(html: str) -> str:
     return re.sub(r"<[^>]+>", "", html)
 
 
+def user_name(user: dict) -> str:
+    """Name eines Telegram-Benutzers für Journal und Ereignisse."""
+    if user.get("username"):
+        return "@" + user["username"]
+    return user.get("first_name") or str(user.get("id", "?"))
+
+
 class Bot:
     def __init__(self, cfg: Config, tg: Telegram | None = None, me: dict | None = None):
         set_language(cfg.language)
@@ -154,6 +163,8 @@ class Bot:
         self.failures = 0
         # Die Zustandsnachricht, die beim Abholen des laufenden Abrufs registriert war (siehe _on_panel)
         self.fetched_panel: dict = {}
+        # Absender des gerade bearbeiteten Befehls (für das Protokoll einer Freigabe)
+        self.sender: dict = {}
         self.last_tick = 0.0
         self.last_reboot_check = 0.0
         self.delete_warned = False
@@ -399,7 +410,10 @@ class Bot:
             if due:
                 view = ""  # Eine Erinnerung zeigt die Übersicht
             elif view is None:
-                view = "" if fresh or now - meta.get("view_at", 0) > VIEW_MAX else meta.get("view", "")
+                kept = meta.get("view", "")
+                # Die Rückfrage vor dem Einspielen verschwindet nach ihrer Frist von selbst, nicht erst nach VIEW_MAX
+                limit = CONFIRM_SECONDS if kept.startswith("confirm:") else VIEW_MAX
+                view = "" if fresh or now - meta.get("view_at", 0) > limit else kept
             shown = self._render(st, now, due, bool(briefing), view)
             if view and not explicit and shown.overview != meta.get("overview"):
                 # Etwas hat sich geändert: zurück zur Übersicht, statt es hinter der Paketliste zu verstecken
@@ -763,6 +777,7 @@ class Bot:
         func, needs_address = entry
         if needs_address and not addressed:
             return
+        self.sender = msg.get("from") or {}
         self._typing(chat["id"])
         self._deliver(msg, func(args, addressed))
         self._delete_command(msg)
@@ -787,7 +802,8 @@ class Bot:
         self.show_current(view="details")
 
     def cmd_approve(self, args: list[str], addressed: bool = False) -> Out | None:
-        error = self.approve()
+        # Ohne Rückfrage: /approve tippt man bewusst, es kann nicht unter dem Finger erscheinen
+        error = self.approve(who=self.sender, how="/approve")
         if error:
             with state.locked(self.cfg.state_dir) as st:
                 plan = state.pending_plan(st)
@@ -800,8 +816,12 @@ class Bot:
         self.pump(resend=True)
         return None
 
-    def approve(self, fingerprint: str = "") -> str:
-        """Freigabe erteilen; Rückgabe: Fehlertext oder leer. Mit Fingerabdruck nur für genau diesen Stand."""
+    def approve(self, fingerprint: str = "", who: dict | None = None, how: str = "", dry: bool = False) -> str:
+        """Freigabe erteilen; Rückgabe: Fehlertext oder leer. Mit Fingerabdruck nur für genau diesen Stand.
+
+        Mit `dry` nur prüfen, ob sie jetzt möglich wäre (für die Rückfrage). Jede erteilte Freigabe steht im
+        Journal und als Ereignis in der Gruppe, mit wem und auf welchem Weg.
+        """
         refused = self.refused("approve")
         if refused:
             return refused
@@ -817,7 +837,14 @@ class Bot:
             if not fingerprint and plan.fingerprint != st.manual_shown:
                 # /approve nennt keinen Stand; er darf nur gelten, was zuletzt zu sehen war
                 return tr("Der Plan hat sich geändert, nichts freigegeben. Bitte die aktuelle Meldung prüfen.")
+            if dry:
+                return ""
             st.approved_fingerprint = plan.fingerprint
+            name = user_name(who or {})
+            log.info(tr("Freigabe von %s (%s) über %s für Plan %s"), name, (who or {}).get("id"), how,
+                     plan.fingerprint[:12])
+            panel.event(st, panel.line(self.cfg.hostname, "👍", tr("freigegeben von {name}: {summary}",
+                                                                  name=escape(name), summary=escape(plan.summary))))
         return ""
 
     def cmd_check(self, args: list[str], addressed: bool = False) -> Out | None:
@@ -1086,6 +1113,7 @@ class Bot:
         action, _, arg = (cq.get("data") or "").partition(":")
         handler = {
             "approve": self.press_approve,
+            "confirm": self.press_confirm,
             "details": self.press_details,
             "file": self.press_file,
             "back": self.press_back,
@@ -1124,13 +1152,32 @@ class Bot:
         self.show_current()
 
     def press_approve(self, cq: dict, pressed: dict, fingerprint: str) -> None:
-        error = self.approve(fingerprint)
+        """Erster Schritt: nur die Rückfrage zeigen. Ein Tipp allein spielt nie etwas ein, auch nicht, wenn die
+        Taste bei verzögertem Telegram gerade unter dem Finger erschienen ist."""
+        error = self.approve(fingerprint, dry=True)
         if error:
             self._answer(cq, plain(error), alert=True)
             return
+        self._answer(cq, tr("Bitte bestätigen"))
+        self.pump(view=f"confirm:{fingerprint}")
+
+    def press_confirm(self, cq: dict, pressed: dict, fingerprint: str) -> None:
+        """Zweiter Schritt: gilt nur, solange die Rückfrage für genau diesen Plan steht."""
+        with state.locked(self.cfg.state_dir) as st:
+            shown = st.panel.get("view") == f"confirm:{fingerprint}"
+            fresh = time.time() - st.panel.get("view_at", 0) <= CONFIRM_SECONDS
+        if not (shown and fresh):
+            self._answer(cq, tr("Die Rückfrage ist abgelaufen, nichts freigegeben."), alert=True)
+            self.pump(view="")
+            return
+        error = self.approve(fingerprint, who=cq.get("from") or {}, how=tr("Schaltfläche"))
+        if error:
+            self._answer(cq, plain(error), alert=True)
+            self.pump(view="")
+            return
         self._answer(cq, tr("Freigegeben"))
         self.start_check(requested=True)
-        self.pump()
+        self.pump(view="")
 
     def press_details(self, cq: dict, pressed: dict, arg: str) -> None:
         self._answer(cq)

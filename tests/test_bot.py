@@ -862,9 +862,84 @@ class BotTest(unittest.TestCase):
     def test_button_approve_with_matching_fingerprint(self):
         self.open_manual()
         self.press("approve:abc")
+        self.press("confirm:abc", message_id=self.panel_id())
         self.start_check.assert_called_once_with(requested=True)
-        self.assertEqual(self.tg.answered, ["Freigegeben"])
+        self.assertEqual(self.tg.answered, ["Bitte bestätigen", "Freigegeben"])
         self.assertEqual(self.st().approved_fingerprint, "abc")
+        self.assertEqual(self.st().panel["view"], "")
+
+    # --- Freigabe in zwei Schritten (ein Tipp allein spielt nie etwas ein) ---
+
+    def test_single_press_on_approve_only_asks(self):
+        self.open_manual()
+        self.press("approve:abc")
+        self.start_check.assert_not_called()
+        self.assertEqual(self.st().approved_fingerprint, "")
+        text, buttons = self.shown()
+        self.assertIn("Dieses Update jetzt einspielen?", text)
+        # Ein zweiter Tipp links oben (wo „Freigeben“ stand) bricht ab; „Ja“ steht rechts daneben
+        self.assertEqual(buttons, [[("✖️ Abbrechen", "back"), ("✅ Ja, einspielen", "confirm:abc")]])
+
+    def test_double_tap_on_same_spot_cancels(self):
+        self.open_manual()
+        self.press("approve:abc")
+        first = self.shown()[1][0][0][1]
+        self.press(first, message_id=self.panel_id())
+        self.start_check.assert_not_called()
+        self.assertEqual(self.st().approved_fingerprint, "")
+        self.assertIn("approve:abc", actions(self.shown()[1]))
+
+    def test_confirm_expires(self):
+        self.open_manual()
+        self.press("approve:abc")
+        with state.locked(self.bot.cfg.state_dir) as st:
+            st.panel["view_at"] = time.time() - 61
+        self.press("confirm:abc", message_id=self.panel_id())
+        self.start_check.assert_not_called()
+        self.assertIn("abgelaufen", self.tg.answered[-1])
+        self.assertEqual(self.st().approved_fingerprint, "")
+
+    def test_question_disappears_after_its_time(self):
+        self.open_manual()
+        self.press("approve:abc")
+        with state.locked(self.bot.cfg.state_dir) as st:
+            st.panel["view_at"] = time.time() - 61
+        self.bot.pump()
+        self.assertIn("approve:abc", actions(self.shown()[1]))
+        self.assertNotIn("confirm:abc", actions(self.shown()[1]))
+
+    def test_confirm_without_question_is_refused(self):
+        # Ein „Ja“ ohne stehende Rückfrage (z. B. alter Callback) gibt nichts frei
+        self.open_manual()
+        self.press("confirm:abc")
+        self.start_check.assert_not_called()
+        self.assertEqual(self.st().approved_fingerprint, "")
+
+    def test_plan_change_drops_question(self):
+        self.open_manual()
+        self.press("approve:abc")
+        with state.locked(self.bot.cfg.state_dir) as st:
+            st.open_issue("manual", "• anderes Paket", fingerprint="neu", approvable=True)
+        self.bot.pump()
+        self.assertNotIn("confirm:abc", actions(self.shown()[1]))
+        self.press("confirm:abc", message_id=self.panel_id())
+        self.start_check.assert_not_called()
+        self.assertEqual(self.st().approved_fingerprint, "")
+
+    def test_approval_is_logged_and_reported(self):
+        self.open_manual()
+        self.press("approve:abc")
+        with self.assertLogs("twguard.bot", "INFO") as logs:
+            self.press("confirm:abc", message_id=self.panel_id())
+        self.assertTrue(any("Freigabe von" in line and "abc" in line for line in logs.output))
+        self.assertTrue(any("freigegeben von" in text for text in self.tg.sent))
+
+    def test_text_approve_needs_no_question_but_is_reported(self):
+        self.open_manual()
+        with self.assertLogs("twguard.bot", "INFO") as logs:
+            self.bot.handle(message("/approve@server1_bot"))
+        self.start_check.assert_called_once()
+        self.assertTrue(any("/approve" in line for line in logs.output))
 
     def test_button_approve_stale_fingerprint(self):
         self.open_manual()
@@ -877,6 +952,8 @@ class BotTest(unittest.TestCase):
             st.observed_fingerprint = "rtn"
             st.pending_text = "3 Pakete, Download 1 MB"
         self.press("approve:rtn")
+        self.assertIn("Diese Updates diesmal einspielen?", self.shown()[0])
+        self.press("confirm:rtn", message_id=self.panel_id())
         self.start_check.assert_called_once()
 
     def test_button_approve_observed_routine_no_longer_pending(self):

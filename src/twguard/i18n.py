@@ -428,6 +428,18 @@ then write /start@botname in the group again and repeat twguard telegram-ids."""
         'Commands. In a group as a reply to a message from this bot or with @botname:\n/status – bring the state message to the bottom (without @botname all servers answer)\n/details – package list of the last dry run in the state message\n/approve – approve and install the reported update\n/check – check now\n/later 1d – snooze reminders (e.g. 12h, 2d)\n/reboot – reboot in 1 minute\n/cancel – cancel a scheduled reboot\n/update – fetch the new twguard version (without @botname: all servers)\n/version – version and mode\n/language de – change the language until the next restart of the bot (without @botname: all servers)\n/mode auto – change the mode until the next restart of the bot (auto or observe; only when addressed)\n/help – this help (without @botname only one server answers, when addressed each one does)\n/keyboard – show the permanent keyboard (/keyboard off: hide it)\n\nThe keyboard “📊 Status”, “🔄 Check all”, “⬆️ Update”, “🏷️ Version”, “❓ Help” applies to all servers.\nThe buttons are in the state message, always the newest message with buttons.',
 }
 
+EN.update({
+    "Bitte bestätigen": "Please confirm",
+    "Die Rückfrage ist abgelaufen, nichts freigegeben.": "The confirmation has expired, nothing approved.",
+    "Schaltfläche": "button",
+    "Freigabe von %s (%s) über %s für Plan %s": "approval by %s (%s) via %s for plan %s",
+    "freigegeben von {name}: {summary}": "approved by {name}: {summary}",
+    "Dieses Update jetzt einspielen?": "Install this update now?",
+    "Diese Updates diesmal einspielen?": "Install these updates this time?",
+    "✖️ Abbrechen": "✖️ Cancel",
+    "✅ Ja, einspielen": "✅ Yes, install",
+})
+
 TRANSLATIONS = {"de": {}, "en": EN}
 LANGUAGES = tuple(TRANSLATIONS)
 

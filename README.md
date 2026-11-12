@@ -79,7 +79,7 @@ All commands are also in the menu next to the input line.
 
 **Language:** `language = "en"` (default) or `"de"` in `[general]` sets the language of the Telegram output per server, including buttons, command menu and the HTML file; then run `systemctl restart twguard-bot`. `/language` changes it at runtime and says so; a bot restart (also through `/update` or a reboot) returns to the configuration, so to make a change permanent you enter it there. Every server understands the permanent keyboard in all languages, even if it comes from a bot with a different language. Messages already sent and the reasons of open issues stay in the old language until they are generated again.
 
-Only the state message has buttons (Approve, Details, 1 day later, Reboot, Cancel reboot, Restart service, Check now). A button only reaches the bot that sent the message, and it only acts on that bot's current state message: a button on an older message does nothing, says so and brings the current state down. “Approve” only applies to the state shown.
+Only the state message has buttons (Approve, Details, 1 day later, Reboot, Cancel reboot, Restart service, Check now). A button only reaches the bot that sent the message, and it only acts on that bot's current state message: a button on an older message does nothing, says so and brings the current state down. “Approve” only applies to the state shown and asks first (“Yes, install” to the right of “Cancel”, valid for one minute), as does “Install this time”: a single tap, for instance on a button that just appeared under your finger while Telegram was slow, never installs anything. Every approval is logged with the user in the journal and reported as an event in the group.
 
 ## Updating twguard itself (OTA)
 
