@@ -868,12 +868,13 @@ class Bot:
             verdict, text = busy.decide(action, st)
         return verdict, f"⏸️ <b>{self.host}</b>: {escape(text)}" if text else ""
 
-    def cmd_later(self, args: list[str], addressed: bool = False) -> Out | None:
+    def cmd_later(self, args: list[str], addressed: bool = False) -> Out:
         hours = parse_duration(args[0]) if args else 24
         if hours is None:
             return Out(tr("Format: /later 12h oder /later 2d"), ttl=SHORT)
-        if self.decide("later")[0] != "allow":
-            return None  # während des Einspielens still nichts tun (busy.NOOP); das Laufende steht in der Nachricht
+        refused = self.refused("later")
+        if refused:
+            return Out(refused, ttl=SHORT)
         text = self.snooze(hours)
         self.pump()
         return Out(text, ttl=SHORT)
@@ -1212,8 +1213,9 @@ class Bot:
             messages.delete(self.tg, old)
 
     def press_later(self, cq: dict, pressed: dict, arg: str) -> None:
-        if self.decide("later")[0] != "allow":
-            self._answer(cq)  # während des Einspielens still nichts tun (busy.NOOP)
+        refused = self.refused("later")
+        if refused:
+            self._answer(cq, plain(refused), alert=True)
             return
         hours_text, _, kind = arg.partition(":")
         self._answer(cq, self.snooze(float(hours_text or 24), [kind] if kind else None))

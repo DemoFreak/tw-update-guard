@@ -41,8 +41,9 @@ BLOCKERS = {
     "check": (SHUTDOWN,),
     "start-check": (SHUTDOWN, CHECK),
     "approve": (SHUTDOWN, CHECK, APPLY),
-    # Aufschieben ändert nichts am System; während des Einspielens ist es nur sinnlos (still nichts tun, siehe NOOP)
-    "later": (APPLY,),
+    # Aufschieben ändert nichts am System; während Prüfen und Einspielen ist es nur sinnlos, danach steht der
+    # Punkt neu oder ist erledigt. Ein Druck von einer noch nicht nachgeführten Nachricht bekommt den Grund
+    "later": (CHECK, APPLY),
     "apply": (SHUTDOWN, UNKNOWN, APPLY, UPDATE, RESTART),
     "reboot": (SHUTDOWN, UNKNOWN, ZYPP, APPLY, RESTART, UPDATE),
     "restart": (SHUTDOWN, UNKNOWN, ZYPP, APPLY, CHECK, RESTART, UPDATE),
@@ -57,7 +58,7 @@ BUTTON_ACTIONS = {"check": "start-check", "approve": "approve", "confirm": "appr
 CHECK_UNIT = "twguard-check.service"
 # Vorgänge, bei denen eine Aktion still nichts tut statt abgewiesen zu werden: Ein zweites Anstoßen während
 # eines Prüflaufs ist überflüssig, und die Zustandsnachricht zeigt den laufenden schon
-NOOP = {"start-check": (CHECK,), "later": (APPLY,)}
+NOOP = {"start-check": (CHECK,)}
 # So lange gilt ein OTA-Auftrag als laufend; danach meldet der Bot ihn als hängen geblieben
 UPDATE_MAX_AGE = 900
 QUERY_TIMEOUT = 5

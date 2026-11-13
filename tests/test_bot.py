@@ -1399,10 +1399,26 @@ class BotTest(unittest.TestCase):
         self.press("approve:abc", message_id=self.panel_id())
         self.assertNotIn("Bitte bestätigen", self.tg.answered)
         self.assertNotIn("confirm:abc", actions(self.shown()[1]))
-        # „1 Tag später“ ist während des Einspielens ebenfalls weg und tut still nichts
+        # „1 Tag später“ ist während des Einspielens ebenfalls weg; ein alter Druck bekommt den Grund
         self.assertNotIn("later:24", shown)
         self.press("later:24", message_id=self.panel_id())
         self.assertEqual(self.st().issues["manual"].snoozed_until, 0.0)
+        self.assertIn("spielt gerade ein", self.tg.answered[-1])
+
+    def test_later_hidden_while_checking(self):
+        # Fund vom 2026-11-13: während des Prüflaufs nach „Ja“ stand „1 Tag später“ noch da
+        self.open_manual()
+        with state.locked(self.bot.cfg.state_dir) as st:
+            st.activity = {"check": {"phase": "refresh", "at": time.time()}}
+        self.checking.return_value = True
+        self.bot.pump()
+        shown = actions(self.shown()[1])
+        self.assertNotIn("later:24", shown)
+        self.assertNotIn("approve:abc", shown)
+        self.assertIn("details", shown)
+        self.press("later:24", message_id=self.panel_id())
+        self.assertEqual(self.st().issues["manual"].snoozed_until, 0.0)
+        self.assertIn("Prüf", self.tg.answered[-1])
 
     def test_restart_refused_while_check_applies(self):
         self.offer("postfix")

@@ -88,8 +88,8 @@ class BlockersTest(unittest.TestCase):
         self.assertEqual(self.kinds("check", st), [busy.SHUTDOWN])
         self.assertEqual(self.kinds("start-check", st), [busy.SHUTDOWN, busy.CHECK])
         self.assertEqual(self.kinds("approve", st), [busy.SHUTDOWN, busy.APPLY, busy.CHECK])
-        self.assertEqual(self.kinds("later", st), [busy.APPLY])
-        self.assertEqual(busy.decide("later", st), ("noop", ""))
+        self.assertEqual(self.kinds("later", st), [busy.APPLY, busy.CHECK])
+        self.assertEqual(busy.decide("later", st)[0], "deny")
         self.assertEqual(self.kinds("apply", st), [busy.SHUTDOWN, busy.APPLY, busy.RESTART, busy.UPDATE])
         self.assertEqual(self.kinds("reboot", st), [busy.SHUTDOWN, busy.ZYPP, busy.APPLY, busy.RESTART, busy.UPDATE])
         self.assertEqual(self.kinds("restart", st),
