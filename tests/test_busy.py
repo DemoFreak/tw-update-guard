@@ -87,7 +87,9 @@ class BlockersTest(unittest.TestCase):
         self.sd.return_value = busy.Shutdown("planned", "reboot", time.time() + 60)
         self.assertEqual(self.kinds("check", st), [busy.SHUTDOWN])
         self.assertEqual(self.kinds("start-check", st), [busy.SHUTDOWN, busy.CHECK])
-        self.assertEqual(self.kinds("approve", st), [busy.SHUTDOWN])
+        self.assertEqual(self.kinds("approve", st), [busy.SHUTDOWN, busy.APPLY, busy.CHECK])
+        self.assertEqual(self.kinds("later", st), [busy.APPLY])
+        self.assertEqual(busy.decide("later", st), ("noop", ""))
         self.assertEqual(self.kinds("apply", st), [busy.SHUTDOWN, busy.APPLY, busy.RESTART, busy.UPDATE])
         self.assertEqual(self.kinds("reboot", st), [busy.SHUTDOWN, busy.ZYPP, busy.APPLY, busy.RESTART, busy.UPDATE])
         self.assertEqual(self.kinds("restart", st),
@@ -152,13 +154,20 @@ class SeenTest(unittest.TestCase):
         self.assertFalse(busy.allowed("restart:sshd", st))
         self.assertFalse(busy.allowed("update:abc", st))
         self.assertTrue(busy.allowed("approve:abc", st))  # Freigeben ändert nichts, das Einspielen wartet
+        self.assertTrue(busy.allowed("confirm:abc", st))
         self.assertTrue(busy.allowed("check", st))
         self.assertTrue(busy.allowed("later:24", st))
-        # Während eines Prüflaufs kein zweites „Jetzt prüfen“, Freigeben bleibt
+        # Während eines Prüflaufs kein zweites „Jetzt prüfen“ und kein Freigeben (die Freigabe startet ihn selbst)
         st.activity = {"check": {"phase": "refresh", "at": time.time()}}
         self.assertFalse(busy.allowed("check", st))
-        self.assertTrue(busy.allowed("approve:abc", st))
+        self.assertFalse(busy.allowed("approve:abc", st))
+        self.assertFalse(busy.allowed("confirm:abc", st))
         self.assertTrue(busy.allowed("cancel", st))
+        self.assertTrue(busy.allowed("details", st))
+        # Während des Einspielens ebenso
+        st.activity = {}
+        st.applying = state.holder()
+        self.assertFalse(busy.allowed("approve:abc", st))
 
     def test_decide(self):
         st = state.State()

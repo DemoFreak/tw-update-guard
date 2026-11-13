@@ -1386,6 +1386,24 @@ class BotTest(unittest.TestCase):
         self.assertIn("reboot", shown)
         self.assertIn("restart:postfix", shown)
 
+    def test_approve_hidden_and_refused_while_installing(self):
+        # Fund vom 2026-11-13: „Approve“ stand noch da, während der freigegebene Plan eingespielt wurde
+        self.open_manual()
+        with state.locked(self.bot.cfg.state_dir) as st:
+            st.applying = state.holder()
+            st.activity = {"check": {"phase": "apply", "detail": "1 Paket", "at": time.time()}}
+        self.bot.pump()
+        shown = actions(self.shown()[1])
+        self.assertNotIn("approve:abc", shown)
+        self.assertIn("details", shown)
+        self.press("approve:abc", message_id=self.panel_id())
+        self.assertNotIn("Bitte bestätigen", self.tg.answered)
+        self.assertNotIn("confirm:abc", actions(self.shown()[1]))
+        # „1 Tag später“ ist während des Einspielens ebenfalls weg und tut still nichts
+        self.assertNotIn("later:24", shown)
+        self.press("later:24", message_id=self.panel_id())
+        self.assertEqual(self.st().issues["manual"].snoozed_until, 0.0)
+
     def test_restart_refused_while_check_applies(self):
         self.offer("postfix")
         with state.locked(self.bot.cfg.state_dir) as st:

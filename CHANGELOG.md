@@ -4,6 +4,15 @@ Published versions of tw-update-guard. Versions in between were development step
 published version. **Upgrade** notes name what you may have to change by hand; `twguard config-diff` shows which
 values in your `config.toml` differ from the defaults.
 
+## 0.10.9 – 2026-11-13
+
+- "Approve" (and "Install this time") is hidden and refused while twguard checks or installs: an approval
+  starts the check that installs the plan itself, so a second one meant nothing. Before, "Approve" stayed in the
+  state message next to "Installing: …"
+- "1 day later" is hidden while twguard installs, and `/later` does nothing then
+
+**Upgrade:** none.
+
 ## 0.10.8 – 2026-11-12
 
 - **Approving needs a second tap.** “Approve” and “Install this time” first ask “Install this update now?” with

@@ -32,13 +32,17 @@ UPDATE = "update"      # OTA-Update von twguard läuft
 
 # Welche Vorgänge eine Aktion abweisen. Auf eine belegte Paketverwaltung warten Prüfen und Einspielen
 # selbst (zypper meldet sie mit Exit-Code 7), das Einspielen außerdem auf einen Dienst-Neustart.
-# Prüfen und Freigeben ändern nichts am System; nur ein geplanter Neustart brächte ihr Ergebnis um.
+# Prüfen ändert nichts am System; nur ein geplanter Neustart brächte sein Ergebnis um. Freigeben ist
+# außerdem gesperrt, solange twguard prüft oder einspielt: Eine Freigabe startet selbst den Prüflauf, der den
+# Plan einspielt; während er läuft, ist eine weitere sinnlos (der Plan ist schon freigegeben oder ändert sich).
 # "check" fragt der Prüflauf selbst, "start-check" der Bot vor dem Anstoßen: Ein zweites Anstoßen
 # während eines Prüflaufs bewirkt nichts (systemctl start startet ihn nicht noch einmal).
 BLOCKERS = {
     "check": (SHUTDOWN,),
     "start-check": (SHUTDOWN, CHECK),
-    "approve": (SHUTDOWN,),
+    "approve": (SHUTDOWN, CHECK, APPLY),
+    # Aufschieben ändert nichts am System; während des Einspielens ist es nur sinnlos (still nichts tun, siehe NOOP)
+    "later": (APPLY,),
     "apply": (SHUTDOWN, UNKNOWN, APPLY, UPDATE, RESTART),
     "reboot": (SHUTDOWN, UNKNOWN, ZYPP, APPLY, RESTART, UPDATE),
     "restart": (SHUTDOWN, UNKNOWN, ZYPP, APPLY, CHECK, RESTART, UPDATE),
@@ -47,13 +51,13 @@ BLOCKERS = {
 
 # Welche Aktion eine Schaltfläche auslöst, nach dem Anfang ihrer Callback-Daten; die übrigen (Details,
 # Aufschub, Abbrechen …) ändern nichts am System und bleiben immer
-BUTTON_ACTIONS = {"check": "start-check", "approve": "approve", "confirm": "approve", "reboot": "reboot",
-                  "restart": "restart", "update": "update"}
+BUTTON_ACTIONS = {"check": "start-check", "approve": "approve", "confirm": "approve", "later": "later",
+                  "reboot": "reboot", "restart": "restart", "update": "update"}
 
 CHECK_UNIT = "twguard-check.service"
 # Vorgänge, bei denen eine Aktion still nichts tut statt abgewiesen zu werden: Ein zweites Anstoßen während
 # eines Prüflaufs ist überflüssig, und die Zustandsnachricht zeigt den laufenden schon
-NOOP = {"start-check": (CHECK,)}
+NOOP = {"start-check": (CHECK,), "later": (APPLY,)}
 # So lange gilt ein OTA-Auftrag als laufend; danach meldet der Bot ihn als hängen geblieben
 UPDATE_MAX_AGE = 900
 QUERY_TIMEOUT = 5
