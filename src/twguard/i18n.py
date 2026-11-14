@@ -396,6 +396,9 @@ then write /start@botname in the group again and repeat twguard telegram-ids."""
     'Stand {when}': 'as of {when}',
     'Telegram: zu viele Nachrichten, warte %d s': 'Telegram: too many messages, waiting %d s',
     'Wartezeit nach Too Many Requests, noch {n} s': 'waiting after Too Many Requests, {n} s left',
+    'Sendepause, noch {n} s': 'sending paused, {n} s left',
+    '%s ohne Antwort, womöglich trotzdem zugestellt; %d s Sendepause':
+        '%s got no answer, possibly delivered anyway; sending paused for %d s',
     '(gekürzt, siehe journalctl)': '(shortened, see journalctl)',
     '(Text gekürzt, zu viele offene Punkte)': '(text shortened, too many open items)',
     '… weitere Angaben passen nicht in die Nachricht': '… more does not fit into the message',

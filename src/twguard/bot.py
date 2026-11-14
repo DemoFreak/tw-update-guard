@@ -432,6 +432,14 @@ class Bot:
             except TelegramError as e:
                 self._pause(e)
                 log.debug(tr("Zustandsnachricht nicht gesendet: %s"), e)
+                if e.maybe_sent and (reminded or briefing):
+                    # Womöglich angekommen: als erinnert werten (nächste Stufe der Leiter), statt nach der Sendepause
+                    # dieselbe Erinnerung noch einmal zu schicken (Entscheidung Hannes, F32). Die Nachricht selbst
+                    # kennt der Bot nicht; die bisherige bleibt die Zustandsnachricht und wird weiter bearbeitet
+                    with state.locked(self.cfg.state_dir) as st:
+                        self._note_reminded(st, reminded, now)
+                        if briefing:
+                            st.last_briefing_day = briefing
                 return False
         with state.locked(self.cfg.state_dir) as st:
             st.messages[panel.TOPIC] = target
@@ -440,18 +448,22 @@ class Bot:
             if not view and fingerprint:
                 # /approve gilt nur für den Plan, den eine zugestellte Nachricht gezeigt hat
                 st.manual_shown = fingerprint
-            for kind, identity in reminded:
-                # Erinnert gilt erst, wenn die Nachricht mit Ton angekommen ist, und nur für den Stand,
-                # den sie zeigte; ein inzwischen geänderter Punkt bleibt fällig
-                current = st.issues.get(kind)
-                if current is not None and issue_identity(st, current) == identity:
-                    note_reminded(current, now)
+            self._note_reminded(st, reminded, now)
             if briefing:
                 st.last_briefing_day = briefing
         if old and not messages.same(old, target) and not messages.retire(self.tg, old):
             with state.locked(self.cfg.state_dir) as st:
                 st.stale_messages.append(old)
         return True
+
+    @staticmethod
+    def _note_reminded(st: state.State, reminded: list, now: float) -> None:
+        """Erinnert gilt erst, wenn die Nachricht mit Ton angekommen ist (oder womöglich angekommen, F32), und nur
+        für den Stand, den sie zeigte; ein inzwischen geänderter Punkt bleibt fällig."""
+        for kind, identity in reminded:
+            current = st.issues.get(kind)
+            if current is not None and issue_identity(st, current) == identity:
+                note_reminded(current, now)
 
     def _render(self, st: state.State, now: float, due: list, briefing: bool, view: str) -> panel.Panel:
         return panel.render(self.cfg, st, now, self.configured_mode, os.uname().release, boot_time(), due,
@@ -518,7 +530,8 @@ class Bot:
         return e.get("id") or f"{e.get('at')}:{e.get('text')}"
 
     def _paused(self) -> bool:
-        """Telegram verlangt nach „Too Many Requests“ eine Wartezeit; der Client hält sie fest."""
+        """Telegram verlangt nach „Too Many Requests“ eine Wartezeit; der Client hält sie fest. Die Sendepause nach
+        einer womöglich zugestellten Sendung zählt nicht: Bearbeiten geht dann weiter, nur Senden nicht."""
         return time.time() < self.tg.blocked_until
 
     def _pause(self, e: TelegramError) -> None:
@@ -1372,8 +1385,9 @@ class Bot:
         except KeyError:
             pass
         except TelegramError as e:
-            # Bei Befehlen an alle hat ein anderer Bot ihn vielleicht schon gelöscht
-            if "not found" not in str(e) and not self.delete_warned:
+            # Bei Befehlen an alle hat ein anderer Bot ihn vielleicht schon gelöscht; Netz- und Sperrfehler sagen
+            # nichts über das Recht (F33)
+            if e.api and "not found" not in str(e) and not self.delete_warned:
                 log.warning(tr("Befehle werden nicht gelöscht (Bot braucht das Admin-Recht "
                             "„Nachrichten löschen“): %s"), e)
                 self.delete_warned = True

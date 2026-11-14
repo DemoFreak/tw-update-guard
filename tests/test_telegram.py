@@ -1,4 +1,6 @@
+import http.client
 import socket
+import time
 import unittest
 from unittest import mock
 
@@ -112,6 +114,169 @@ class CallTest(unittest.TestCase):
                 Telegram("x", 0).call("getUpdates", timeout=0)
         self.assertIn("connect 6.0 s", logs.output[0])
         self.assertIn("2001:db8::1", logs.output[0])
+
+
+class MaybeSentTest(unittest.TestCase):
+    """Fund vom 2026-11-14: Telegram nahm Sendungen an, antwortete aber erst nach über 20 s; jeder neue Versuch
+    ergab eine Kopie. Eine unbeantwortete Sendung gilt deshalb als womöglich zugestellt."""
+
+    def unanswered(self, tg, method="sendMessage", **params):
+        """Ein Aufruf, der abgeschickt wird, dessen Antwort aber ausbleibt (Lesezeit abgelaufen)."""
+        def connected(host, port, timeout, phases, prefer=""):
+            phases.update(dns=0.0, connect=0.0, addr="192.0.2.1")
+            return mock.MagicMock()
+
+        with mock.patch.object(telegram, "connect", side_effect=connected), \
+             mock.patch.object(tg._ssl, "wrap_socket", side_effect=lambda sock, **kw: sock), \
+             mock.patch("http.client.HTTPSConnection.getresponse", side_effect=TimeoutError("The read operation timed out")), \
+             self.assertRaises(TelegramError) as ctx:
+            tg.call(method, **params)
+        return ctx.exception
+
+    def test_read_timeout_after_sending_is_maybe_sent(self):
+        tg = Telegram("x", 0)
+        with self.assertLogs("twguard.telegram", "WARNING"):
+            error = self.unanswered(tg, chat_id=1, text="a")
+        self.assertTrue(error.maybe_sent)
+
+    def test_connect_failure_is_not_maybe_sent_and_pauses_nothing(self):
+        tg = Telegram("x", 0)
+        with mock.patch.object(telegram, "connect", side_effect=OSError("keine Adresse erreichbar")), \
+             self.assertRaises(TelegramError) as ctx:
+            tg.call("sendMessage", chat_id=1, text="a")
+        self.assertFalse(ctx.exception.maybe_sent)
+        self.assertEqual((tg.blocked_until, tg.send_paused_until), (0.0, 0.0))
+
+    def test_unanswered_send_pauses_sending_with_growing_steps(self):
+        tg = Telegram("x", 0)
+        pauses = []
+        for _ in range(len(telegram.SEND_BACKOFF) + 1):
+            tg.send_paused_until = 0.0
+            with self.assertLogs("twguard.telegram", "WARNING"):
+                self.unanswered(tg, chat_id=1, text="a")
+            pauses.append(round(tg.send_paused_until - time.time()))
+        self.assertEqual(pauses, [*telegram.SEND_BACKOFF, telegram.SEND_BACKOFF[-1]])
+        self.assertEqual(tg.blocked_until, 0.0)
+        # Während der Pause wird nichts Neues gesendet; Bearbeiten, Löschen, Abrufen und Knopf-Antworten gehen weiter
+        # (F33). Die Sperre trägt kein retry_after, sonst übertrüge der Bot sie auf die allgemeine Sperre
+        with mock.patch.object(tg, "_call") as call:
+            for method in ("sendMessage", "sendDocument"):
+                with self.assertRaises(TelegramError) as ctx:
+                    tg.call(method, chat_id=1, text="b")
+                self.assertEqual(ctx.exception.retry_after, 0)
+            tg.call("editMessageText", chat_id=1, message_id=2, text="b")
+            tg.call("deleteMessage", chat_id=1, message_id=2)
+            tg.call("getUpdates", offset=0, timeout=0)
+            tg.call("answerCallbackQuery", callback_query_id="q")
+        self.assertEqual([c.args[0] for c in call.call_args_list],
+                         ["editMessageText", "deleteMessage", "getUpdates", "answerCallbackQuery"])
+
+    def test_successful_send_resets_the_steps(self):
+        tg = Telegram("x", 0)
+        tg.backoff_step = 3
+        with mock.patch.object(tg, "_call", return_value={"message_id": 1}):
+            tg.call("sendMessage", chat_id=1, text="a")
+        self.assertEqual(tg.backoff_step, 0)
+
+    def test_unanswered_fetch_or_edit_does_not_pause(self):
+        # Abrufen und Bearbeiten erzeugen bei Wiederholung keine Kopie
+        tg = Telegram("x", 0)
+        for method, params in (("getUpdates", {"offset": 0, "timeout": 0}),
+                               ("editMessageText", {"chat_id": 1, "message_id": 2, "text": "a"})):
+            error = self.unanswered(tg, method, **params)
+            self.assertTrue(error.maybe_sent)
+        self.assertEqual((tg.blocked_until, tg.send_paused_until), (0.0, 0.0))
+        self.assertEqual(tg.backoff_step, 0)
+
+    def answer(self, tg, status, body, method="sendMessage"):
+        """Ein Aufruf, der abgeschickt wird und eine Antwort mit diesem Status bekommt."""
+        def connected(host, port, timeout, phases, prefer=""):
+            phases.update(dns=0.0, connect=0.0, addr="192.0.2.1")
+            return mock.MagicMock()
+
+        response = mock.MagicMock(status=status)
+        response.read.return_value = body
+        with mock.patch.object(telegram, "connect", side_effect=connected), \
+             mock.patch.object(tg._ssl, "wrap_socket", side_effect=lambda sock, **kw: sock), \
+             mock.patch("http.client.HTTPSConnection.getresponse", return_value=response), \
+             self.assertRaises(TelegramError) as ctx:
+            tg.call(method, chat_id=1, text="a")
+        return ctx.exception
+
+    def test_server_error_after_sending_is_maybe_sent(self):
+        # F31: ein 5xx (auch vom Vorschaltserver ohne JSON) schließt eine Zustellung nicht aus
+        for status, body in ((502, b"<html>Bad Gateway</html>"), (504, b"<html>Gateway Time-out</html>"),
+                             (500, b'{"ok":false,"error_code":500,"description":"Internal Server Error"}'),
+                             (200, b'{"ok":false,"error_code":502,"description":"Bad Gateway"}')):
+            with self.subTest(status=status):
+                tg = Telegram("x", 0)
+                with self.assertLogs("twguard.telegram", "WARNING"):
+                    error = self.answer(tg, status, body)
+                self.assertTrue(error.maybe_sent)
+                self.assertGreater(tg.send_paused_until, time.time())
+
+    def test_refusal_by_telegram_is_not_maybe_sent(self):
+        tg = Telegram("x", 0)
+        error = self.answer(tg, 400, b'{"ok":false,"error_code":400,"description":"Bad Request: chat not found"}')
+        self.assertFalse(error.maybe_sent)
+        self.assertTrue(error.api)
+        error = self.answer(tg, 429, b'{"ok":false,"error_code":429,"description":"Too Many Requests",'
+                                     b'"parameters":{"retry_after":3}}')
+        self.assertFalse(error.maybe_sent)
+        self.assertEqual(tg.send_paused_until, 0.0)
+
+    def test_abort_while_sending_the_request_is_not_maybe_sent(self):
+        # Kopf oder Rumpf nicht vollständig abgeschickt: Telegram kann die Anfrage nicht ausgeführt haben
+        tg = Telegram("x", 0)
+        sock = mock.MagicMock()
+        sock.sendall.side_effect = BrokenPipeError("Broken pipe")
+
+        def connected(host, port, timeout, phases, prefer=""):
+            phases.update(dns=0.0, connect=0.0, addr="192.0.2.1")
+            return sock
+
+        with mock.patch.object(telegram, "connect", side_effect=connected), \
+             mock.patch.object(tg._ssl, "wrap_socket", side_effect=lambda s, **kw: s), \
+             self.assertRaises(TelegramError) as ctx:
+            tg.call("sendMessage", chat_id=1, text="a")
+        self.assertFalse(ctx.exception.maybe_sent)
+        self.assertEqual(tg.send_paused_until, 0.0)
+
+    def test_abort_while_reading_the_answer_is_maybe_sent(self):
+        tg = Telegram("x", 0)
+        response = mock.MagicMock(status=200)
+        response.read.side_effect = http.client.IncompleteRead(b"{")
+
+        def connected(host, port, timeout, phases, prefer=""):
+            phases.update(dns=0.0, connect=0.0, addr="192.0.2.1")
+            return mock.MagicMock()
+
+        with mock.patch.object(telegram, "connect", side_effect=connected), \
+             mock.patch.object(tg._ssl, "wrap_socket", side_effect=lambda s, **kw: s), \
+             mock.patch("http.client.HTTPSConnection.getresponse", return_value=response), \
+             self.assertLogs("twguard.telegram", "WARNING"), self.assertRaises(TelegramError) as ctx:
+            tg.call("sendMessage", chat_id=1, text="a")
+        self.assertTrue(ctx.exception.maybe_sent)
+
+    def test_send_after_supergroup_migration_also_waits_longer(self):
+        tg = Telegram("x", -100)
+        timeouts = []
+
+        def call(method, http_timeout=20, **params):
+            timeouts.append(http_timeout)
+            if params["chat_id"] == -100:
+                raise TelegramError("upgraded", migrate_to=-1009)
+            return {"message_id": 1}
+
+        with mock.patch.object(tg, "call", side_effect=call):
+            tg.send("hallo")
+        self.assertEqual(timeouts, [telegram.SEND_TIMEOUT, telegram.SEND_TIMEOUT])
+
+    def test_send_waits_longer_for_the_answer(self):
+        tg = Telegram("x", 0)
+        with mock.patch.object(tg, "_call", return_value={"message_id": 1}) as call:
+            tg.send("hallo")
+        self.assertEqual(call.call_args.args[1], telegram.SEND_TIMEOUT)
 
 
 class DocumentTest(unittest.TestCase):

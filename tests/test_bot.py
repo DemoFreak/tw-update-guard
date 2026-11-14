@@ -683,6 +683,50 @@ class BotTest(unittest.TestCase):
         self.bot.pump()
         self.assertEqual(len(self.tg.sent), 2)
 
+    # --- Telegram antwortet zu spät (F30, F32): keine Kopien der Erinnerung ---
+
+    def test_unanswered_reminder_counts_as_reminded_and_is_not_sent_again(self):
+        self.bot.pump()
+        first = self.panel_id()
+        with state.locked(self.bot.cfg.state_dir) as st:
+            st.open_issue("reboot", "Kernel", now=time.time() - 100 * 3600)
+        self.tg.unanswered = {"sendMessage"}
+        with self.assertLogs("twguard.telegram", "WARNING"):
+            self.assertFalse(self.bot.pump())
+        attempts = self.tg.calls.count("sendMessage")
+        # Womöglich angekommen: als erinnert gewertet (Entscheidung Hannes), die bisherige Nachricht bleibt
+        self.assertEqual(self.st().issues["reboot"].notify_count, 1)
+        self.assertEqual(self.panel_id(), first)
+        self.assertGreater(self.tg.send_paused_until, time.time())
+        # Auch nach Ende der Störung und der Pause nicht noch einmal: nur die bisherige Nachricht bearbeiten
+        self.tg.unanswered = set()
+        self.tg.send_paused_until = 0.0
+        self.bot.pump()
+        self.assertEqual(self.tg.calls.count("sendMessage"), attempts)
+        self.assertEqual(self.panel_id(), first)
+
+    def test_send_pause_keeps_editing_but_holds_events(self):
+        self.bot.pump()
+        first = self.panel_id()
+        self.tg.unanswered = {"sendMessage"}
+        self.event("🔄 a")
+        with self.assertLogs("twguard.telegram", "WARNING"):
+            self.bot.pump()
+        self.tg.unanswered = set()
+        attempts = self.tg.calls.count("sendMessage")
+        # In der Pause: kein neuer Sendeversuch, das Ereignis wartet, die Zustandsnachricht wird weiter bearbeitet
+        with state.locked(self.bot.cfg.state_dir) as st:
+            st.pending_text = "3 Pakete"  # ändert die Nachricht, ohne eine Erinnerung fällig zu machen
+        self.bot.pump()
+        self.assertEqual(self.tg.calls.count("sendMessage"), attempts)
+        self.assertEqual(len(self.st().outbox), 1)
+        self.assertIn("Ausstehend: 3 Pakete", self.tg.current[first][0])
+        # Nach der Pause genau ein neuer Versuch für das Ereignis
+        self.tg.send_paused_until = 0.0
+        self.bot.pump()
+        self.assertEqual(self.st().outbox, [])
+        self.assertEqual(sum("🔄 a" in text for text in self.tg.sent), 1)
+
     def test_bringing_down_does_not_count_as_reminder(self):
         with state.locked(self.bot.cfg.state_dir) as st:
             st.open_issue("reboot", "Kernel")

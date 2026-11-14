@@ -24,6 +24,14 @@ SLOW_SECONDS = 3
 # Diese Aufrufe zählen als Abruf- bzw. Sendefehler (ErrorMeter)
 COUNTED = {"getUpdates": "Abruf", "sendMessage": "Senden", "sendDocument": "Senden"}
 ERROR_WINDOW_SECONDS = 3600
+# Methoden, die bei Wiederholung eine zweite Nachricht erzeugen. Kommt nach dem Absenden keine Antwort, ist die
+# Nachricht womöglich angekommen; ein sofortiger neuer Versuch ergäbe eine Kopie (Fund vom 2026-11-14: elf gleiche
+# Erinnerungen, während Telegram Anfragen annahm, aber erst nach über 20 s beantwortete)
+DUPLICATING = ("sendMessage", "sendDocument")
+# So lange auf die Antwort einer solchen Anfrage warten; länger als sonst, weil jeder Abbruch eine Kopie kosten kann
+SEND_TIMEOUT = 45
+# Danach wachsende Sendepause (s); nach dem nächsten erfolgreichen Senden wieder von vorn
+SEND_BACKOFF = (60, 120, 300, 600, 1800)
 
 # Schaltflächen: Zeilen aus (Beschriftung, Rückgabewert); der Rückgabewert hat höchstens 64 Bytes
 Buttons = list[list[tuple[str, str]]]
@@ -47,8 +55,14 @@ def keyboard(buttons: Buttons | None) -> dict:
 
 
 class TelegramError(Exception):
-    def __init__(self, message: str, migrate_to: int = 0, retry_after: float = 0):
+    def __init__(self, message: str, migrate_to: int = 0, retry_after: float = 0, maybe_sent: bool = False,
+                 api: bool = False):
         super().__init__(message)
+        # Die Anfrage war abgeschickt, die Antwort fehlt oder ist ein Serverfehler (5xx): Telegram hat sie
+        # womöglich ausgeführt
+        self.maybe_sent = maybe_sent
+        # Telegram hat die Anfrage beantwortet und abgelehnt (z. B. fehlendes Recht), kein Netz- oder Sperrfehler
+        self.api = api
         # Gruppe wurde zur Supergruppe: deren neue ID (Telegram nennt sie im Fehler)
         self.migrate_to = migrate_to
         # Zu viele Nachrichten (429): so viele Sekunden nichts mehr senden
@@ -125,15 +139,31 @@ UNGATED = ("getUpdates", "getMe", "answerCallbackQuery")
 
 
 def gate(client, method: str) -> None:
-    """Während der von Telegram verlangten Wartezeit (`retry_after`) gar nicht erst anfragen.
+    """Während einer Wartezeit gar nicht erst anfragen.
 
-    So umgeht auch ein Rückfall (Bearbeiten scheitert, also neu senden; Löschen scheitert, also kürzen)
-    die Wartezeit nicht.
+    Nach „Too Many Requests“ (`blocked_until`, von Telegram verlangt) gilt das für alles außer Abrufen; so umgeht
+    auch ein Rückfall (Bearbeiten scheitert, also neu senden; Löschen scheitert, also kürzen) die Wartezeit nicht.
+    Nach einer womöglich zugestellten Sendung (`send_paused_until`, eigene Vorsicht) nur für Methoden, die bei
+    Wiederholung eine Kopie erzeugen; Bearbeiten, Löschen und Antworten auf Knöpfe laufen weiter. Dieser Fehler trägt
+    kein `retry_after`, sonst übertrüge der Bot ihn auf die allgemeine Sperre.
     """
+    if method in UNGATED:
+        return
     remaining = client.blocked_until - time.time()
-    if remaining > 0 and method not in UNGATED:
+    if remaining > 0:
         raise TelegramError(f"{method}: " + tr("Wartezeit nach Too Many Requests, noch {n} s", n=f"{remaining:.0f}"),
                             retry_after=remaining)
+    remaining = client.send_paused_until - time.time()
+    if remaining > 0 and method in DUPLICATING:
+        raise TelegramError(f"{method}: " + tr("Sendepause, noch {n} s", n=f"{remaining:.0f}"))
+
+
+def back_off(client, method: str) -> None:
+    """Nach einer womöglich angekommenen Sendung eine Weile nichts senden, statt sofort eine Kopie zu schicken."""
+    pause = SEND_BACKOFF[min(client.backoff_step, len(SEND_BACKOFF) - 1)]
+    client.backoff_step += 1
+    client.send_paused_until = max(client.send_paused_until, time.time() + pause)
+    log.warning(tr("%s ohne Antwort, womöglich trotzdem zugestellt; %d s Sendepause"), method, pause)
 
 
 class Telegram:
@@ -148,6 +178,10 @@ class Telegram:
         self.migration: tuple[int, int] | None = None
         # Nach „Too Many Requests“ bis dahin nichts senden, bearbeiten oder löschen (siehe `gate`)
         self.blocked_until = 0.0
+        # Nach einer womöglich zugestellten Sendung bis dahin nichts Neues senden (siehe `gate`, `_back_off`)
+        self.send_paused_until = 0.0
+        # Stufe in SEND_BACKOFF für die nächste womöglich zugestellte Sendung
+        self.backoff_step = 0
 
     def call(self, method: str, http_timeout: float = 20, body: bytes | None = None, content_type: str = "",
              **params):
@@ -155,14 +189,20 @@ class Telegram:
         start = time.monotonic()
         phases: dict = {}
         try:
-            return self._call(method, http_timeout, phases, body, content_type, **params)
+            result = self._call(method, http_timeout, phases, body, content_type, **params)
         except TelegramError as e:
             # Der Umzug zur Supergruppe ist kein Fehler; send() wiederholt an die neue ID
             if not e.migrate_to:
                 self.errors.add(method, e)
             if e.retry_after:
                 self.blocked_until = max(self.blocked_until, time.time() + e.retry_after)
+            if e.maybe_sent and method in DUPLICATING:
+                back_off(self, method)
             raise
+        else:
+            if method in DUPLICATING:
+                self.backoff_step = 0
+            return result
         finally:
             elapsed = time.monotonic() - start
             if elapsed > SLOW_SECONDS + params.get("timeout", 0):
@@ -171,6 +211,7 @@ class Telegram:
     def _call(self, method: str, http_timeout: float, phases: dict, body: bytes | None = None,
               content_type: str = "", **params):
         conn = None
+        sent = False
         try:
             sock = connect(HOST, PORT, CONNECT_TIMEOUT, phases, self._prefer)
             self._prefer = phases["addr"]
@@ -183,24 +224,30 @@ class Telegram:
             t = time.monotonic()
             conn.request("POST", f"/bot{self.token}/{method}", body=body or json.dumps(params).encode(),
                          headers={"Content-Type": content_type or "application/json"})
+            sent = True
             resp = conn.getresponse()
             body = resp.read()
             phases["antwort"] = time.monotonic() - t
         except (OSError, http.client.HTTPException) as e:
-            raise TelegramError(f"{method}: {e}") from e
+            raise TelegramError(f"{method}: {e}", maybe_sent=sent) from e
         finally:
             if conn is not None:
                 conn.close()
         # Die API liefert auch bei Fehlern JSON mit "description"
+        # Ein Serverfehler (5xx, auch vom Vorschaltserver ohne JSON) nach dem Absenden schließt nicht aus, dass
+        # Telegram die Anfrage ausgeführt hat; 4xx und 429 sind eindeutig abgelehnt
+        server_error = resp.status >= 500
         try:
             data = json.loads(body)
         except ValueError:
-            raise TelegramError(f"{method}: HTTP {resp.status}") from None
+            raise TelegramError(f"{method}: HTTP {resp.status}", maybe_sent=server_error) from None
         if not data.get("ok"):
             parameters = data.get("parameters") or {}
+            code = data.get("error_code") or 0
             raise TelegramError(f"{method}: {data.get('description')}",
                                 migrate_to=int(parameters.get("migrate_to_chat_id", 0)),
-                                retry_after=float(parameters.get("retry_after", 0)))
+                                retry_after=float(parameters.get("retry_after", 0)),
+                                maybe_sent=server_error or (isinstance(code, int) and code >= 500), api=True)
         return data["result"]
 
     def send(self, text: str, chat_id: int | None = None, silent: bool = False,
@@ -219,20 +266,20 @@ class Telegram:
         if markup:
             params["reply_markup"] = markup
         try:
-            return self.call("sendMessage", **params)
+            return self.call("sendMessage", http_timeout=SEND_TIMEOUT, **params)
         except TelegramError as e:
             if not e.migrate_to or params["chat_id"] != self.chat_id:
                 raise
             # Die Gruppe ist zur Supergruppe geworden: an die neue ID senden und den Umzug vormerken
             self.migration = (self.chat_id, e.migrate_to)
             self.chat_id = params["chat_id"] = e.migrate_to
-            return self.call("sendMessage", **params)
+            return self.call("sendMessage", http_timeout=SEND_TIMEOUT, **params)
 
     def send_document(self, chat_id: int, filename: str, content: bytes, caption: str = "",
                       content_type: str = "text/html") -> dict:
         fields = {"chat_id": chat_id, "caption": caption, "parse_mode": "HTML", "disable_notification": "true"}
         body, header = multipart(fields, "document", filename, content, content_type)
-        return self.call("sendDocument", http_timeout=60, body=body, content_type=header)
+        return self.call("sendDocument", http_timeout=max(60, SEND_TIMEOUT), body=body, content_type=header)
 
     def edit(self, chat_id: int, message_id: int, text: str, buttons: Buttons | None = None) -> dict:
         return self.call("editMessageText", chat_id=chat_id, message_id=message_id, text=text,

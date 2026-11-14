@@ -2,7 +2,7 @@
 
 import time
 
-from twguard.telegram import TelegramError, gate
+from twguard.telegram import DUPLICATING, TelegramError, back_off, gate
 
 
 class FakeTelegram:
@@ -31,6 +31,10 @@ class FakeTelegram:
         self.blocked_until = 0.0
         self.limit = {}  # Methode → retry_after für den nächsten Aufruf dieser Methode
         self.calls = []  # Methoden in der Reihenfolge der Aufrufe, die Telegram erreicht hätten
+        # Wie der echte Client: nach einer womöglich zugestellten Sendung Sendepause; `unanswered` löst sie aus
+        self.send_paused_until = 0.0
+        self.backoff_step = 0
+        self.unanswered = set()  # Methoden, deren Antwort ausbleibt (Telegram stellt trotzdem zu)
 
     def _call(self, method):
         gate(self, method)
@@ -39,6 +43,12 @@ class FakeTelegram:
             self.blocked_until = time.time() + retry
             raise TelegramError(f"{method}: Too Many Requests: retry after {retry:.0f}", retry_after=retry)
         self.calls.append(method)
+        if method in self.unanswered:
+            if method in DUPLICATING:
+                back_off(self, method)
+            raise TelegramError(f"{method}: The read operation timed out", maybe_sent=True)
+        if method in DUPLICATING:
+            self.backoff_step = 0
 
     def send(self, text, chat_id=None, silent=False, reply_to=None, buttons=None, markup=None):
         self._call("sendMessage")
@@ -79,7 +89,7 @@ class FakeTelegram:
     def delete(self, chat_id, message_id):
         self._call("deleteMessage")
         if self.fail_delete:
-            raise TelegramError("deleteMessage: Bad Request: message can't be deleted")
+            raise TelegramError("deleteMessage: Bad Request: message can't be deleted", api=True)
         self.deleted.append(message_id)
         self.current.pop(message_id, None)
 

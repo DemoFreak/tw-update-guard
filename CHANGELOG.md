@@ -4,6 +4,20 @@ Published versions of tw-update-guard. Versions in between were development step
 published version. **Upgrade** notes name what you may have to change by hand; `twguard config-diff` shows which
 values in your `config.toml` differ from the defaults.
 
+## 0.10.11 – 2026-11-14
+
+- **Far fewer copies when Telegram answers late.** If a message was sent but Telegram did not answer in time,
+  twguard sent it again in the next round; Telegram had accepted each attempt, so a slow phase produced eleven
+  identical reminders at once. Now a message without an answer, or with a server error (5xx), counts as possibly
+  delivered: new messages pause for 1, 2, 5, 10, then 30 minutes, until one goes through again. Editing the state
+  message, deleting, fetching and answering button presses go on. A reminder or briefing that was possibly
+  delivered counts as delivered; the next one follows the escalation ladder. Events that were possibly delivered
+  are sent again after the pause (better a copy than a lost failure report)
+- twguard waits 45 instead of 20 seconds for the answer to a sent message
+- A network or pause error when deleting a command no longer logs that the bot lacks the right to delete messages
+
+**Upgrade:** none.
+
 ## 0.10.10 – 2026-11-13
 
 - "1 day later" is also hidden while twguard checks, not only while it installs; a press from a state message
