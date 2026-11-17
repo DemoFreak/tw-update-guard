@@ -2205,6 +2205,38 @@ class BotTest(unittest.TestCase):
         restarted.startup()
         self.assertEqual(self.st().language_override, "")
 
+    def test_keyboard_is_renewed_silently_after_a_day(self):
+        self.bot.handle(message("/keyboard@server1_bot"))
+        first = self.tg.next_id
+        sent = len(self.tg.sent)
+        self.bot.refresh_keyboard()
+        self.assertEqual(len(self.tg.sent), sent)  # jung: bleibt
+        with state.locked(self.bot.cfg.state_dir) as st:
+            st.messages["keyboard"]["at"] = time.time() - bot_module.KEYBOARD_RENEW - 1
+        self.bot.tick()
+        self.assertEqual(len(self.tg.sent), sent + 1)
+        self.assertTrue(self.tg.silent[-1])
+        self.assertTrue(self.tg.markups[-1]["is_persistent"])
+        self.assertIn(first, self.tg.deleted)
+        self.assertEqual(self.st().messages["keyboard"]["message_id"], self.tg.next_id)
+        # /keyboard off löscht danach die neue
+        self.bot.handle(message("/keyboard@server1_bot off"))
+        self.assertIn(self.tg.next_id, self.tg.deleted)
+
+    def test_no_keyboard_no_renewal(self):
+        self.bot.refresh_keyboard(time.time() + 10 * bot_module.KEYBOARD_RENEW)
+        self.assertEqual(self.tg.sent, [])
+
+    def test_keyboard_renewal_waits_for_send_pause(self):
+        self.bot.handle(message("/keyboard@server1_bot"))
+        first = self.tg.next_id
+        with state.locked(self.bot.cfg.state_dir) as st:
+            st.messages["keyboard"]["at"] = 0
+        self.tg.send_paused_until = time.time() + 60
+        self.bot.refresh_keyboard()
+        self.assertNotIn(first, self.tg.deleted)
+        self.assertEqual(self.st().messages["keyboard"]["message_id"], first)
+
     def test_language_renews_keyboard(self):
         self.addCleanup(set_language, "de")
         self.bot.handle(message("/keyboard@server1_bot"))

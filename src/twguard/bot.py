@@ -40,6 +40,10 @@ EVENT_HOLD = 300
 VIEW_MAX = 900
 # So lange gilt die Rückfrage nach „Freigeben“ bzw. „Diesmal einspielen“
 CONFIRM_SECONDS = 60
+# Nach so langer Zeit sendet der Bot seine Tastatur-Nachricht still neu und löscht die alte. Telegram-Clients
+# verlieren eine ältere feste Tastatur in Gruppen mit mehreren Bots (beobachtet erst auf dem Desktop, dann auch auf
+# dem Telefon, obwohl die Nachricht noch stand); eine junge Nachricht lässt sich zudem immer löschen (< 48 h)
+KEYBOARD_RENEW = 24 * 3600
 # Ein angestoßener Prüflauf, der sich so lange nicht gemeldet hat, ist nicht gestartet
 QUEUED_MAX = 180
 # So lange gilt ein mit /update angebotener Stand
@@ -349,6 +353,7 @@ class Bot:
         for message in due:
             messages.delete(self.tg, message)
         self.maybe_briefing(now)
+        self.refresh_keyboard(now)
         self.retry_stale()
         self.migrate_legacy()
 
@@ -1352,15 +1357,35 @@ class Bot:
 
     def _renew_keyboard(self) -> None:
         """Eine eingeblendete Tastatur in der neuen Sprache senden; die alte versteht der Bot weiterhin."""
+        self.refresh_keyboard(force=True)
+
+    def refresh_keyboard(self, now: float | None = None, force: bool = False) -> None:
+        """Die eigene Tastatur-Nachricht still neu senden, wenn sie älter als KEYBOARD_RENEW ist (oder mit `force`).
+
+        Erst die neue, dann die alte entfernen, damit die Tasten nie fehlen. Gesendet wird außerhalb der Sperre.
+        """
+        now = now or time.time()
+        if self._paused():
+            return
         with state.locked(self.cfg.state_dir) as st:
-            old = st.messages.get("keyboard")
-            if not old:
+            old = dict(st.messages.get("keyboard") or {})
+        if not old or not force and now - old.get("at", now) < KEYBOARD_RENEW:
+            return
+        try:
+            sent = self.tg.send(self.keyboard_text(), chat_id=old["chat_id"], silent=True, markup=keyboard_markup())
+        except TelegramError as e:
+            self._pause(e)
+            log.debug(tr("Nachricht nicht gesendet: %s"), e)
+            return
+        with state.locked(self.cfg.state_dir) as st:
+            if not messages.same(st.messages.get("keyboard") or {}, old):
+                # Inzwischen per /keyboard ersetzt oder ausgeblendet: die eben gesendete ist überzählig
+                messages.retire(self.tg, messages.ref(sent))
                 return
-            try:
-                messages.replace(self.tg, st, "keyboard", self.keyboard_text(), chat_id=old["chat_id"],
-                                 markup=keyboard_markup())
-            except TelegramError as e:
-                log.debug(tr("Nachricht nicht gesendet: %s"), e)
+            messages.claim(st, "keyboard", messages.ref(sent))
+        if not messages.retire(self.tg, old):
+            with state.locked(self.cfg.state_dir) as st:
+                st.stale_messages.append(old)
 
     def _deliver(self, msg: dict, out: Out | None) -> None:
         if out is None:

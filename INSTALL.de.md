@@ -7,7 +7,7 @@ Für jeden Server, als root. Voraussetzungen: openSUSE Tumbleweed, `git`, Python
 ## 1. Telegram-Bot anlegen
 
 1. Bei **@BotFather**: `/newbot` → Name und Benutzername (z. B. `server1_updates_bot`) → Token notieren.
-2. Ebenfalls bei @BotFather: `/setprivacy` → Bot wählen → **Disable**. Sonst sieht der Bot in der Gruppe nur gezielt an ihn gerichtete Befehle.
+2. Ebenfalls bei @BotFather: `/setprivacy` → Bot wählen → **Disable**. Sonst sieht der Bot in der Gruppe nur gezielt an ihn gerichtete Befehle und reagiert nicht auf die Tasten der festen Tastatur. Telegram übernimmt die Einstellung erst beim Beitritt: Ist der Bot schon in der Gruppe, ihn danach entfernen und neu hinzufügen.
 3. Eine Gruppe anlegen (bei mehreren Servern: eine für alle) und den Bot hinzufügen. Optional das Admin-Recht **Nachrichten löschen** geben, dann räumt der Bot Befehle und alte Meldungen weg. Telegram macht daraus oft eine Supergruppe mit neuer ID; twguard bemerkt das und meldet die neue ID.
 
 ## 2. Installieren

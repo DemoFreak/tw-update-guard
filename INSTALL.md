@@ -9,7 +9,7 @@ Messages are in English by default; German is available (step 3).
 ## 1. Create a Telegram bot
 
 1. With **@BotFather**: `/newbot` → name and username (e.g. `server1_updates_bot`) → note the token.
-2. Also with @BotFather: `/setprivacy` → choose the bot → **Disable**. Otherwise the bot only sees commands addressed to it in a group.
+2. Also with @BotFather: `/setprivacy` → choose the bot → **Disable**. Otherwise the bot only sees commands addressed to it in a group and ignores the keys of the permanent keyboard. Telegram applies the setting when the bot joins: if it is already in the group, remove it and add it again.
 3. Create a group (with several servers: one for all of them) and add the bot. Optionally grant the admin right **Delete messages**, then the bot cleans up commands and old messages. Telegram often turns the group into a supergroup with a new ID; twguard notices this and reports the new ID.
 
 ## 2. Install

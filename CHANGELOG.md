@@ -4,6 +4,16 @@ Published versions of tw-update-guard. Versions in between were development step
 published version. **Upgrade** notes name what you may have to change by hand; `twguard config-diff` shows which
 values in your `config.toml` differ from the defaults.
 
+## 0.10.12 – 2026-11-17
+
+- The bot that shows the permanent keyboard sends its keyboard message again once a day, silently, and deletes the
+  old one. Telegram clients lost an older keyboard in groups with several bots although the message was still
+  there (first on the desktop, then also on the phone). Renewing it after `/language` is now silent as well
+- INSTALL: privacy mode only takes effect when the bot joins the group; a bot already in the group has to be
+  removed and added again, otherwise it ignores the keyboard keys
+
+**Upgrade:** none. Send `/keyboard@<bot>` once to the bot that shows the keyboard if it is gone.
+
 ## 0.10.11 – 2026-11-14
 
 - **Far fewer copies when Telegram answers late.** If a message was sent but Telegram did not answer in time,
