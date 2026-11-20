@@ -1172,6 +1172,15 @@ class BotTest(unittest.TestCase):
         self.bot.handle(msg)
         self.assertEqual(len(self.tg.sent), 1)
 
+    def test_check_without_address_checks_all_like_the_key(self):
+        # Fund vom 2026-11-18: ein getipptes /check ohne @botname bewirkte bei keinem Bot etwas
+        self.bot.handle(message("/check"))
+        self.start_check.assert_called_once_with(requested=True)
+
+    def test_check_as_reply_to_other_bot_is_left_to_it(self):
+        self.bot.handle(message("/check", reply_to=OTHER_BOT))
+        self.start_check.assert_not_called()
+
     def test_keyboard_check_all(self):
         self.bot.handle(message("🔄 Alle prüfen"))
         self.start_check.assert_called_once()
@@ -2213,7 +2222,9 @@ class BotTest(unittest.TestCase):
         self.assertEqual(len(self.tg.sent), sent)  # jung: bleibt
         with state.locked(self.bot.cfg.state_dir) as st:
             st.messages["keyboard"]["at"] = time.time() - bot_module.KEYBOARD_RENEW - 1
-        self.bot.tick()
+        # Über tick, aber ohne dessen übrige Sendungen (Briefing je nach Uhrzeit)
+        with mock.patch.object(self.bot, "maybe_briefing"):
+            self.bot.tick()
         self.assertEqual(len(self.tg.sent), sent + 1)
         self.assertTrue(self.tg.silent[-1])
         self.assertTrue(self.tg.markups[-1]["is_persistent"])

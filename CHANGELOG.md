@@ -4,6 +4,16 @@ Published versions of tw-update-guard. Versions in between were development step
 published version. **Upgrade** notes name what you may have to change by hand; `twguard config-diff` shows which
 values in your `config.toml` differ from the defaults.
 
+## 0.10.13 – 2026-11-21
+
+- Many packages with the same reason for approval now make one line with the count and the first names, e.g.
+  "Downgrade: 54 packages (apache2-mod_php8, php8, php8-bcmath, …)"; before, each got its own line and filled the
+  state message. The full list is in Details
+- A typed `/check` without @botname now makes all servers check, like the key “🔄 Check all”; before, no bot
+  reacted. Addressed or as a reply, only that server checks
+
+**Upgrade:** none.
+
 ## 0.10.12 – 2026-11-17
 
 - The bot that shows the permanent keyboard sends its keyboard message again once a day, silently, and deletes the

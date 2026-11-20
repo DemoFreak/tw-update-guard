@@ -72,7 +72,7 @@ HELP = """Befehle. In der Gruppe als Antwort auf eine Nachricht dieses Bots oder
 /status – Zustandsnachricht nach unten holen (ohne @botname antworten alle Server)
 /details – Paketliste des letzten Probelaufs in der Zustandsnachricht
 /approve – gemeldetes Update freigeben und einspielen
-/check – sofort prüfen
+/check – sofort prüfen (ohne @botname: alle Server)
 /later 1d – Erinnerungen aufschieben (z. B. 12h, 2d)
 /reboot – Neustart in 1 Minute
 /cancel – geplanten Neustart abbrechen
@@ -183,7 +183,8 @@ class Bot:
             "mode": (self.cmd_mode, False),
             "details": (self.cmd_details, True),
             "approve": (self.cmd_approve, True),
-            "check": (self.cmd_check, True),
+            # Ohne @botname prüfen alle Server, wie die Taste „Alle prüfen“; gezielt nur einer
+            "check": (self.cmd_check, False),
             "later": (self.cmd_later, True),
             "reboot": (self.cmd_reboot, True),
             "cancel": (self.cmd_cancel, True),

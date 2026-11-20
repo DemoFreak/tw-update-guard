@@ -60,7 +60,7 @@ In der Gruppe gelten Befehle für einen bestimmten Server nur, wenn sie **als An
 | `/status` | Zustandsnachricht nach unten holen; ohne `@botname` antworten alle Server |
 | `/details` | Paketliste des letzten Probelaufs, in der Zustandsnachricht |
 | `/approve` | gemeldetes Update freigeben und einspielen |
-| `/check` | sofort prüfen; die Zustandsnachricht zeigt den Fortschritt, das Ergebnis folgt als kurzes Ereignis |
+| `/check` | sofort prüfen (ohne @botname: alle Server); die Zustandsnachricht zeigt den Fortschritt, das Ergebnis folgt als kurzes Ereignis |
 | `/later 12h`, `/later 2d` | Erinnerungen aufschieben (begrenzt) |
 | `/reboot` | Neustart in 1 Minute; nach dem Start meldet sich der Server zurück |
 | `/cancel` | geplanten Neustart abbrechen |

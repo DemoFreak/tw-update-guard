@@ -62,7 +62,7 @@ In a group, commands for a specific server only apply as a **reply to a message 
 | `/status` | bring the state message down; without `@botname` all servers answer |
 | `/details` | package list of the last dry run, inside the state message |
 | `/approve` | approve and install the reported update |
-| `/check` | check now; the state message shows the progress, the result follows as a short event |
+| `/check` | check now (without @botname: all servers); the state message shows the progress, the result follows as a short event |
 | `/later 12h`, `/later 2d` | postpone reminders (limited) |
 | `/reboot` | reboot in 1 minute; the server reports back after the restart |
 | `/cancel` | cancel a scheduled reboot |

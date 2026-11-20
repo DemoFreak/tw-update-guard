@@ -31,6 +31,23 @@ class ClassifyTest(unittest.TestCase):
         self.assertTrue(v.auto)
         self.assertEqual(v.reasons, [])
 
+    def test_many_packages_with_the_same_reason_become_one_line(self):
+        # Fund vom 2026-11-19: 54 Downgrades (Wechsel des PHP-Builds) füllten die Zustandsnachricht
+        names = ["apache2-mod_php8", "php8", "php8-bcmath", *[f"php8-ext{i}" for i in range(51)]]
+        downgrades = [up(n, "8.5.12-3.1", "8.5.12-2.1") for n in names]
+        v = classify(plan(to_downgrade=downgrades, to_upgrade=[up("dracut", "112-62.1", "112-63.1")]), self.rules)
+        self.assertFalse(v.auto)
+        self.assertEqual(v.reasons, [
+            "Downgrade: 54 Pakete (apache2-mod_php8, php8, php8-bcmath, …)",
+            "kritisches Paket: dracut 112-62.1 → 112-63.1",
+        ])
+
+    def test_few_packages_with_the_same_reason_stay_single_lines(self):
+        downgrades = [up(n, "2.0-1", "1.9-1") for n in ("a", "b", "c")]
+        v = classify(plan(to_downgrade=downgrades), self.rules)
+        self.assertEqual(len(v.reasons), 3)
+        self.assertTrue(all(r.startswith("Downgrade: ") for r in v.reasons))
+
     def kernel_plan(self, new, name="kernel-default"):
         return plan(to_install=[pkg(name, new)], to_remove=[pkg(name, "7.3.0-1.1")])
 

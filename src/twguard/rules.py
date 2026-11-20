@@ -12,6 +12,10 @@ from .i18n import tr, trn
 from .zypper import Plan, Solvable
 
 MAX_CONFLICT_LINES = 3
+# Ab so vielen Paketen mit demselben Grund steht der Grund als eine Zeile mit Anzahl und den ersten Namen da
+# (z. B. 54 Downgrades bei einem Wechsel des PHP-Builds); die vollständige Liste zeigt /details
+GROUP_AT = 4
+GROUP_NAMES = 3
 CONFLICT_LINE_LIMIT = 200
 
 
@@ -87,6 +91,26 @@ def _conflict_lines(problems: list[str]) -> list[str]:
     return lines
 
 
+def _grouped(found: list[tuple[str, Solvable, str]]) -> list[str]:
+    """Je Grund die einzelnen Zeilen, ab GROUP_AT gleichen eine Zeile mit Anzahl und den ersten Namen.
+
+    Reihenfolge wie gefunden; dasselbe Paket mit demselben Grund zählt einmal.
+    """
+    by_title: dict[str, list[tuple[Solvable, str]]] = {}
+    for title, s, line in found:
+        entries = by_title.setdefault(title, [])
+        if line not in (known for _, known in entries):
+            entries.append((s, line))
+    lines = []
+    for title, entries in by_title.items():
+        if len(entries) < GROUP_AT:
+            lines += [line for _, line in entries]
+        else:
+            names = ", ".join(s.name for s, _ in entries[:GROUP_NAMES])
+            lines.append(tr("{title}: {n} Pakete ({names}, …)", title=title, n=len(entries), names=names))
+    return lines
+
+
 def _branch(edition: str, depth: int) -> tuple[int, ...]:
     return tuple(int(part) for part in version_key(edition, depth))
 
@@ -100,13 +124,19 @@ def classify(plan: Plan, rules: Rules, running_kernel: str | None = None) -> Ver
             approvable=False,
         )
 
-    reasons: list[str] = []
+    # Gründe je Art gesammelt: (Titel, Paket, vollständige Zeile); viele gleiche fasst `_grouped` zusammen
+    found: list[tuple[str, Solvable, str]] = []
+
+    def add(title: str, s: Solvable, line: str) -> None:
+        found.append((title, s, line))
+
     for section, text in (
         ("to-downgrade", "Downgrade"),
         ("to-change-arch", "Architekturwechsel"),
         ("to-change-vendor", "Anbieterwechsel"),
     ):
-        reasons += [f"{tr(text)}: {s.label()}" for s in plan.get(section)]
+        for s in plan.get(section):
+            add(tr(text), s, f"{tr(text)}: {s.label()}")
 
     installs = plan.get("to-install")
     upgrades = plan.get("to-upgrade") + plan.get("to-downgrade")
@@ -115,10 +145,10 @@ def classify(plan: Plan, rules: Rules, running_kernel: str | None = None) -> Ver
 
     for s in changed:
         if _matches(s.name, rules.block):
-            reasons.append(tr("kritisches Paket: {package}", package=s.label()))
+            add(tr("kritisches Paket"), s, tr("kritisches Paket: {package}", package=s.label()))
     for s in removals:
         if _matches(s.name, rules.block):
-            reasons.append(tr("kritisches Paket wird entfernt: {package}", package=s.label()))
+            add(tr("kritisches Paket wird entfernt"), s, tr("kritisches Paket wird entfernt: {package}", package=s.label()))
 
     for s in upgrades:
         depth = _watch_depth(s.name, rules.watch)
@@ -126,37 +156,39 @@ def classify(plan: Plan, rules: Rules, running_kernel: str | None = None) -> Ver
             continue
         # Ohne Ausgangsversion lässt sich ein Sprung nicht ausschließen
         if not s.edition_old:
-            reasons.append(tr("Ausgangsversion unbekannt: {package}", package=s.label()))
+            add(tr("Ausgangsversion unbekannt"), s, tr("Ausgangsversion unbekannt: {package}", package=s.label()))
         elif version_key(s.edition_old, depth) != version_key(s.edition, depth):
-            reasons.append(tr("Versionssprung: {package}", package=s.label()))
+            add(tr("Versionssprung"), s, tr("Versionssprung: {package}", package=s.label()))
 
     running = os.uname().release if running_kernel is None else running_kernel
     for s in installs + upgrades:
         depth = _watch_depth(s.name, rules.kernel)
         # Ältere Zweige daneben (z. B. longterm) werden nicht Standard im Bootmenü
         if depth and _branch(s.edition, depth) > _branch(running, depth):
-            reasons.append(tr("neuer Kernel-Zweig: {package} (läuft: {running})", package=s.label(), running=running))
+            add(tr("neuer Kernel-Zweig"), s,
+                tr("neuer Kernel-Zweig: {package} (läuft: {running})", package=s.label(), running=running))
 
     installed_names = {s.name for s in installs}
     for s in installs:
         if _watch_depth(s.name, rules.watch) and not _matches(s.name, rules.block):
-            reasons.append(tr("neues Paket: {package}", package=s.label()))
+            add(tr("neues Paket"), s, tr("neues Paket: {package}", package=s.label()))
 
     # Bei mehrfach installierbaren Paketen (Kernel) ersetzt die neue Version die alte
     replaced = [s for s in removals if s.name not in installed_names and not _matches(s.name, rules.block)]
     # watch geht vor routine_removals (z. B. php8-lang passt auf php8* und *-lang)
     for s in replaced:
         if _watch_depth(s.name, rules.watch):
-            reasons.append(tr("überwachtes Paket wird entfernt: {package}", package=s.label()))
+            add(tr("überwachtes Paket wird entfernt"), s,
+                tr("überwachtes Paket wird entfernt: {package}", package=s.label()))
         elif not _matches(s.name, rules.routine_removals):
-            reasons.append(tr("wird entfernt: {package}", package=s.label()))
+            add(tr("wird entfernt"), s, tr("wird entfernt: {package}", package=s.label()))
+    reasons = _grouped(found)
     if len(removals) > rules.max_removals:
         reasons.append(tr("{n} Pakete werden entfernt (Grenze {limit})", n=len(removals), limit=rules.max_removals))
     if rules.max_packages and plan.packages_to_change > rules.max_packages:
         reasons.append(tr("{n} Pakete (Grenze {limit})", n=plan.packages_to_change, limit=rules.max_packages))
 
     reboot_expected = plan.need_reboot or any(_matches(s.name, rules.reboot) for s in changed)
-    reasons = list(dict.fromkeys(reasons))
     return Verdict(auto=not reasons, reasons=reasons, reboot_expected=reboot_expected)
 
 
